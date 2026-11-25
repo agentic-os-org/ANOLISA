@@ -11,7 +11,7 @@ use configuration::{provider_protocol, validate_boolean_effects};
 
 use crate::admission::{AdapterCapabilities, AdmissionError, AdmittedStep, StepExecution};
 use aw_config::{
-    requirements::{HookRequirement, StepRequirement},
+    requirements::{step_enabled, HookRequirement, StepRequirement},
     Configuration,
 };
 pub use aw_contracts::{
@@ -391,7 +391,7 @@ pub fn resolve_shadow_preflight(
             let no_step_tools = ev["steps"].as_array().is_some_and(|steps| {
                 steps
                     .iter()
-                    .all(|s| s["enabled"] == false || s["match"].get("tools").is_none())
+                    .all(|s| !step_enabled(s) || s["match"].get("tools").is_none())
             });
             if ev["match"].get("tools").is_some() || !no_step_tools {
                 return Err(Reject("non-tool event does not support tool selectors"));

@@ -1,6 +1,6 @@
 //! Configuration-level regressions for selectors and command Hook protocols.
 
-use super::{base_document, catalog_capabilities, parse_config, CONFIGURATION};
+use super::{base_document, catalog_capabilities, enable_event, parse_config, CONFIGURATION};
 use aw_core::{
     admission::preflight,
     resolver::{
@@ -64,6 +64,41 @@ fn boolean_hook_replacements_are_invalid_even_with_a_capable_source() {
                     ))
                 ));
             }
+        }
+    }
+}
+
+#[test]
+fn mode_off_step_with_tool_selector_on_non_tool_event_matches_preflight() {
+    let caps = catalog_capabilities("qoder");
+    for explicit_enabled in [None, Some(true)] {
+        let mut doc = base_document();
+        let mut step = json!({
+            "id": "disabled-by-mode",
+            "provider": "policy",
+            "operation": "check",
+            "effects": ["observe"],
+            "mode": "off",
+            "on_error": "report",
+            "match": {"tools": ["native:qoder:read"]},
+        });
+        if let Some(enabled) = explicit_enabled {
+            step["enabled"] = json!(enabled);
+        }
+        enable_event(&mut doc, "session.start", false, json!([step]));
+
+        let config = parse_config(&doc);
+        let expected = preflight(&config, "qoder", &caps).unwrap();
+        let (_, actual) = resolve_shadow_preflight(&config, "qoder", &caps).unwrap();
+        assert_eq!(actual, expected);
+
+        // Turning the step back on with a tool selector on a non-tool event is
+        // rejected at configuration validation.
+        for active_mode in ["shadow", "enforce"] {
+            doc["spec"]["events"]["session.start"]["steps"][0]["mode"] = json!(active_mode);
+            assert!(CONFIGURATION
+                .parse(&serde_json::to_vec(&doc).unwrap())
+                .is_err());
         }
     }
 }
