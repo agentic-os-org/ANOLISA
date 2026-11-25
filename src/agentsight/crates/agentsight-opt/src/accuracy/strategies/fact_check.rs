@@ -4,7 +4,9 @@
 //! Consumes shared assertions (no own LLM call). Grep runs in a blocking task.
 //! - grep miss → L2 (objective, has checker)
 //! - API claims → L4 (needs external doc knowledge, capped)
-//! - grep execution failure → assertion skipped (not reported as missing)
+//! - blank symbol or grep execution failure → assertion skipped (`CheckFailed`, not reported as missing)
+//! - `file` / `path` assertions must canonicalize strictly inside `repo_root`; `..` traversals,
+//!   external absolute paths, and symlinks resolving outside canonical `repo_root` return `NotFound`
 //! - `repo_root=None` → strategy skips gracefully.
 
 use std::path::{Path, PathBuf};
@@ -114,6 +116,10 @@ impl FactCheckStrategy {
         }
     }
 
+    /// Check that `symbol` resolves strictly within canonical `repo_root`.
+    ///
+    /// Note: symlinks inside the repository that resolve outside `repo_root`
+    /// return `false` (`NotFound`) intentionally to prevent probing external files.
     fn repo_contains_path(repo_root: &Path, symbol: &str) -> bool {
         let Ok(root) = repo_root.canonicalize() else {
             return false;
@@ -276,26 +282,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn grep_treats_leading_dash_symbols_as_literal_patterns() {
-        let dir = std::env::temp_dir().join(format!(
-            "agentsight-opt-factcheck-flags-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let test_dir = TestDir::new("agentsight-opt-factcheck-flags");
+        let dir = &test_dir.0;
         std::fs::write(dir.join("notes.md"), "plain_text_only\n").unwrap();
 
         assert!(
             matches!(
-                FactCheckStrategy::grep_symbol(&dir, "--help", "api"),
+                FactCheckStrategy::grep_symbol(dir, "--help", "api"),
                 GrepOutcome::NotFound
             ),
             "absent `--help` must not be reported Found via grep --help output"
         );
         assert!(
             matches!(
-                FactCheckStrategy::grep_symbol(&dir, "-V", "api"),
+                FactCheckStrategy::grep_symbol(dir, "-V", "api"),
                 GrepOutcome::NotFound
             ),
             "absent `-V` must not be reported Found via grep -V output"
@@ -307,27 +326,21 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            FactCheckStrategy::grep_symbol(&dir, "--exclude=*", "api"),
+            FactCheckStrategy::grep_symbol(dir, "--exclude=*", "api"),
             GrepOutcome::Found
         ));
         assert!(matches!(
-            FactCheckStrategy::grep_symbol(&dir, "--help", "api"),
+            FactCheckStrategy::grep_symbol(dir, "--help", "api"),
             GrepOutcome::Found
         ));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn file_check_rejects_paths_outside_repo_root() {
-        let root = std::env::temp_dir().join(format!(
-            "agentsight-opt-factcheck-escape-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let repo = root.join("repo");
+        let test_root = TestDir::new("agentsight-opt-factcheck-escape");
+        let repo = test_root.0.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let outside = root.join("outside.txt");
+        let outside = test_root.0.join("outside.txt");
         std::fs::write(&outside, "secret\n").unwrap();
         std::fs::write(repo.join("inside.txt"), "ok\n").unwrap();
 
@@ -357,6 +370,18 @@ mod tests {
             ),
             "absolute path outside repo_root must not report Found"
         );
+        #[cfg(unix)]
+        {
+            let symlink_escape = repo.join("escape_link.txt");
+            std::os::unix::fs::symlink(&outside, &symlink_escape).unwrap();
+            assert!(
+                matches!(
+                    FactCheckStrategy::grep_symbol(&repo, "escape_link.txt", "file"),
+                    GrepOutcome::NotFound
+                ),
+                "symlink inside repo resolving outside repo_root must not report Found"
+            );
+        }
         assert!(matches!(
             FactCheckStrategy::grep_symbol(&repo, "   ", "api"),
             GrepOutcome::CheckFailed
@@ -365,7 +390,5 @@ mod tests {
             FactCheckStrategy::grep_symbol(&repo, "", "file"),
             GrepOutcome::CheckFailed
         ));
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
