@@ -69,7 +69,9 @@ def merge(json_str, config_path):
             sys.exit(1)
 
     if not isinstance(existing, dict):
-        existing = {}
+        print(f"ERROR: Config in {config_path} is not a JSON object; refusing to overwrite it",
+              file=sys.stderr)
+        sys.exit(1)
 
     # Merge. A non-object mcpServers in the existing config follows the same
     # lenient policy as an unparseable config file: warn and start fresh.

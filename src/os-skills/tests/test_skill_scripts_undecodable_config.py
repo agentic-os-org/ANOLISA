@@ -23,6 +23,7 @@ import importlib.util
 import io
 import json
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -79,6 +80,70 @@ class ValidateMcpDecodeTest(unittest.TestCase):
         self.assertEqual(backup.read_bytes(), original, "the replaced bytes must be recoverable")
         rewritten = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual(sorted(rewritten["mcpServers"]), ["new-server"])
+
+    def test_merge_refuses_non_object_config_roots(self) -> None:
+        roots = (
+            b' [{"a": 1, "keep": "value"}]\n',
+            b"[]",
+            '"保留内容"'.encode("utf-8"),
+            b'""',
+            b"123",
+            b"1.5",
+            b"true",
+            b"false",
+            b"null",
+        )
+        for original in roots:
+            for mode in (0o600, 0o640):
+                with self.subTest(root=original, mode=oct(mode)):
+                    self.config.write_bytes(original)
+                    self.config.chmod(mode)
+                    before = self.config.stat()
+                    result = subprocess.run(
+                        [sys.executable, self.module.__file__,
+                         '{"mcpServers": {"n": {"command": "x"}}}',
+                         "--merge", str(self.config)],
+                        capture_output=True, text=True, encoding="utf-8",
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("ERROR: Config in", result.stderr)
+                    self.assertIn("is not a JSON object", result.stderr)
+                    self.assertIn(str(self.config), result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(self.config.read_bytes(), original)
+                    after = self.config.stat()
+                    self.assertEqual(stat.S_IMODE(after.st_mode), mode)
+                    self.assertEqual(after.st_ino, before.st_ino)
+                    self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                    self.assertEqual(
+                        sorted(p.name for p in self.config.parent.iterdir()),
+                        ["mcp.json"],
+                    )
+
+    def test_merge_non_object_rejection_preserves_symlink_and_backup(self) -> None:
+        original = b'[{"keep": "value"}]'
+        self.config.write_bytes(original)
+        self.config.chmod(0o600)
+        link = self.config.parent / "settings.json"
+        link.symlink_to(self.config)
+        backup = link.with_name(link.name + ".bak")
+        backup.write_bytes(b"previous backup")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            self.module.merge('{"mcpServers": {"n": {"command": "x"}}}', str(link))
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(str(link), stderr.getvalue())
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), self.config.resolve())
+        self.assertEqual(self.config.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+        self.assertEqual(backup.read_bytes(), b"previous backup")
+        self.assertEqual(
+            sorted(p.name for p in self.config.parent.iterdir()),
+            ["mcp.json", "settings.json", "settings.json.bak"],
+        )
 
     def test_merge_preserves_every_other_setting(self) -> None:
         # The clean-path control: a readable config keeps what it had.

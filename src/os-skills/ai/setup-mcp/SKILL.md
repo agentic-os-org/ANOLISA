@@ -109,8 +109,9 @@ python3 __SKILL_DIR__/scripts/validate_mcp.py '<json>' --merge <config_path>
 
 脚本会自动处理目录创建、已有配置保留、原文件权限和新条目合并。
 
-脚本报错时分两种，别混：
+脚本遇到以下情况时，分别处理：
 
+- `ERROR: Config in ... is not a JSON object; refusing to overwrite it` —— 已有配置虽是合法 JSON，但根是数组、字符串、数字、布尔值或 `null`，无法安全合并。脚本返回 1，原文件保持不变。停下来把路径和错误原文告诉用户，**不要自行清空、改写或重建这个文件**；由用户确认如何修复已有内容后再重试。
 - `ERROR: Cannot decode ... as UTF-8` —— 文件里有非 UTF-8 字节，不是 JSON 语法问题，**重复重试也一定同样失败**。停下来把这个路径和错误原文告诉用户，让他自己决定，**不要自行改写或重建这个文件**：脚本正是为了不误删里面的设置才拒绝写入的。
 - `WARNING: Could not parse ...` + `WARNING: Original kept at <path>.bak` —— JSON 语法非法，脚本已把原文件连同权限备份为 `<path>.bak`，随后按新条目重写了正本。修好语法后重试即可；确认无误后可以删掉那个 `.bak`（它在 `.copilot-shell/` 下，不在仓库 `.gitignore` 里，会出现在 `git status` 中）。
 
