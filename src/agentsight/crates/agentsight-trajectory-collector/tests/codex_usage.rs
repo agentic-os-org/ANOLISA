@@ -2,8 +2,8 @@
 
 use agentsight_atif::{AtifTrajectory, StepSource};
 use agentsight_trajectory_collector::{
-    codex::convert_codex_events, scan_once, CollectorConfig, TrajectoryMaintenancePolicy,
-    TrajectoryStore,
+    codex::{convert_codex_events, extract_private_metadata},
+    scan_once, CollectorConfig, TrajectoryMaintenancePolicy, TrajectoryStore,
 };
 use serde_json::{json, Value};
 
@@ -179,4 +179,33 @@ fn collector_persists_correct_steps_and_authoritative_totals() {
         );
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn null_or_empty_token_count_info_preserves_previous_total_baseline() {
+    let repeated = snapshot(usage(100, 20, 40), usage(100, 20, 40));
+    for info in [Value::Null, json!({})] {
+        let rate_limit_only = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": info,
+                "rate_limits": {"primary": {"used_percent": 10}}
+            }
+        });
+        let events = [
+            user("first"),
+            repeated.clone(),
+            rate_limit_only,
+            user("second"),
+            repeated.clone(),
+        ];
+        let trajectory = convert(&events);
+        assert_eq!(step_usage(&trajectory), vec![(100, 20, 40)]);
+        assert_eq!(trajectory.steps.len(), 3);
+        assert_eq!(trajectory.steps.last().unwrap().source, StepSource::User);
+
+        let extra = extract_private_metadata(&events, "codex");
+        assert_eq!(extra["assistant_message_count"], 1);
+    }
 }
