@@ -1,6 +1,6 @@
 //! Target-specific composition; queue and lifecycle remain in Policy Runtime.
 use asc_agentsight_client::AgentSightClientFactory;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "lua-lsm-testing"))]
 use asc_lua_lsm_client::LuaLsmClient;
 use asc_lua_lsm_protocol::LUA_LSM_ROUTE;
 use asc_pcp::{
@@ -33,7 +33,7 @@ pub enum FilePolicyBackend {
 impl FilePolicyBackend {
     /// Reads the explicit daemon selection, preserving `AgentSight` when unset.
     /// # Errors
-    /// Rejects unknown or non-Unicode values without silently changing backends.
+    /// Rejects unknown, unavailable or non-Unicode selections.
     pub fn from_env() -> Result<Self, StoreError> {
         match std::env::var("AGENT_SEC_FILE_BACKEND") {
             Ok(value) => Self::parse(Some(&value)),
@@ -44,9 +44,15 @@ impl FilePolicyBackend {
     fn parse(value: Option<&str>) -> Result<Self, StoreError> {
         match value {
             None | Some("agentsight") => Ok(Self::AgentSight),
-            Some("lua-lsm") => Ok(Self::LuaLsm),
+            Some("lua-lsm") => Self::LuaLsm.validate_selection(),
             _ => Err(StoreError::Invalid),
         }
+    }
+    fn validate_selection(self) -> Result<Self, StoreError> {
+        if self == Self::LuaLsm && !cfg!(all(target_os = "linux", feature = "lua-lsm-testing")) {
+            return Err(StoreError::Invalid);
+        }
+        Ok(self)
     }
     fn route(self) -> &'static str {
         match self {
@@ -195,9 +201,10 @@ fn build_reconciler<R: BindingStateRepository + BindingReconcileCatalog + 'stati
     clock: Arc<dyn Clock>,
     backend: FilePolicyBackend,
 ) -> Result<BindingReconciler, StoreError> {
+    backend.validate_selection()?;
     let routes = recover_file_bindings(repository.as_ref())?;
     let mut factories = BTreeMap::from([("agentsight".into(), file_factory)]);
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "lua-lsm-testing"))]
     {
         let lua: Arc<dyn TargetDeploymentClient> = Arc::new(LuaLsmClient::default());
         factories.insert(LUA_LSM_ROUTE.into(), Arc::new(move || Ok(lua.clone())));
@@ -358,7 +365,12 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/file-backends.json")).unwrap();
         for case in fixture.as_array().unwrap() {
             let selected = FilePolicyBackend::parse(case["value"].as_str());
-            if let Some(route) = case["route"].as_str() {
+            let expected = if cfg!(all(target_os = "linux", feature = "lua-lsm-testing")) {
+                case.get("linuxTestRoute").unwrap_or(&case["route"])
+            } else {
+                &case["route"]
+            };
+            if let Some(route) = expected.as_str() {
                 assert_eq!(selected.unwrap().route(), route);
             } else {
                 assert_eq!(selected, Err(StoreError::Invalid));
@@ -568,19 +580,20 @@ when {
             .collect()
     }
 
-    fn prepare_gateway_delete(
+    fn prepare_saved_delete(
         repository: &SqlitePolicyRepository,
         scope: &PreparedScope,
         ids: &[ResourceId],
+        route: &str,
     ) {
-        // Model durable gateway responsibility even when the current template is file-only.
+        // Cleanup follows the saved target even when the current template uses a different route.
         for id in ids {
             let current = repository.get_binding_state(id).unwrap().unwrap();
             let mut ready = current.clone();
             ready.binding.status = BindingStatus::Ready.into();
             ready.deployments = vec![Deployment {
                 target: TargetRef {
-                    route: "gateway".into(),
+                    route: route.into(),
                     id: id.to_string(),
                     cleanup: vec![1],
                 },
@@ -604,6 +617,37 @@ when {
         client: Arc<dyn TargetDeploymentClient>,
     ) -> Arc<dyn TargetDeploymentClientFactory> {
         Arc::new(move || Ok(client.clone()))
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "lua-lsm-testing")))]
+    #[test]
+    fn default_daemon_retains_saved_lua_cleanup_when_client_is_unavailable() {
+        let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+        let scope = admit_scope(&repository, "saved-lua-cleanup", false, 1);
+        let ids = binding_ids(&repository, &scope);
+        prepare_saved_delete(&repository, &scope, &ids, LUA_LSM_ROUTE);
+        let id = &ids[0];
+        let pending = repository.get_binding_state(id).unwrap().unwrap();
+        let reconciler = build_reconciler(
+            repository.clone(),
+            Arc::new(|| panic!("saved Lua-LSM cleanup reached AgentSight")),
+            None,
+            Arc::new(TestClock),
+            FilePolicyBackend::AgentSight,
+        )
+        .unwrap();
+        let result = reconciler
+            .reconcile(id, &mut AttemptSchedule::default())
+            .unwrap();
+        assert!(matches!(result, Disposition::RetryAt { .. }));
+        let after = repository.get_binding_state(id).unwrap().unwrap();
+        assert_eq!(after.binding.status.phase, BindingStatus::PendingDelete);
+        assert_eq!(
+            after.binding.status.error.unwrap().code,
+            "RECONCILE_TARGET_UNAVAILABLE"
+        );
+        assert_eq!(after.deployments.len(), 1);
+        assert_eq!(after.deployments[0].target, pending.deployments[0].target);
     }
 
     fn test_admission(
@@ -674,7 +718,7 @@ when {
             let file_id = binding_ids(&repository, &file_scope)[0].clone();
             let ids = binding_ids(&repository, &deferred_scope);
             if !matches!(work, PendingWork::CredentialApply) {
-                prepare_gateway_delete(&repository, &deferred_scope, &ids);
+                prepare_saved_delete(&repository, &deferred_scope, &ids, "gateway");
             }
             let pending: Vec<_> = ids
                 .iter()

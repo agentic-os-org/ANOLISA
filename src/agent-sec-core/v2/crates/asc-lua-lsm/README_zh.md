@@ -7,14 +7,17 @@ Lua-LSM 后端与 AgentSight 共用 Cedar 文件策略解析，独立生成 Lua�
 `92a8552ad51490433034423ef33c3f61fcb3cdb9`、ABI version 1。
 旧版 inode 标签模板的原生 Client 防护用例已在 Alibaba Cloud Linux 4、内核
 `6.6.102-008.0.2.ali6000.pro.alnx4.x86_64` 上通过。隔离运行的 daemon 在同一台主机上下发了
-10 个 Binding，并确认正常重启后防护继续生效。当前路径匹配模板及安装包的 systemd 部署仍待实机验证。
+10 个 Binding，并确认正常重启后防护继续生效。当前路径匹配模板及测试 daemon 的 systemd 部署仍待实机验证。
 随后同机的完整 daemon 测试在卸载模块时触发内核崩溃。Lua-LSM 负责人已确认是已知内核问题，正在回移修复，修复版本待实机验证。
 
 ## 配置与生命周期
 
-daemon 环境设置 `AGENT_SEC_FILE_BACKEND=lua-lsm`。默认仍为 `agentsight`，
-其它值使启动失败；已有部署保留原 route，Gateway 凭证下发不变。
-管理员可给当前 system unit 添加以下 drop-in，并在目标发行版验证：
+正式包中的 daemon 遇到 `AGENT_SEC_FILE_BACKEND=lua-lsm` 会拒绝启动，也没有能更新或撤回已有
+Lua-LSM 部署的原生 Client。切回正式包前，先用测试 daemon 清理这些部署。
+在隔离的 Linux 测试环境中，从 `src/agent-sec-core/v2` 执行
+`cargo build --locked -p asc-daemon --features lua-lsm-testing`，再为该二进制设置
+`AGENT_SEC_FILE_BACKEND=lua-lsm`。默认后端仍为 AgentSight。如果通过 systemd 运行测试构建，
+请在目标发行版上验证以下 drop-in。
 
 ```ini
 [Service]

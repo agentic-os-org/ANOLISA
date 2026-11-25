@@ -1,7 +1,7 @@
 [
   { "value": null, "route": "agentsight" },
   { "value": "agentsight", "route": "agentsight" },
-  { "value": "lua-lsm", "route": "lua-lsm" },
+  { "value": "lua-lsm", "route": null, "linuxTestRoute": "lua-lsm" },
   { "value": "", "route": null },
   { "value": "Lua-LSM", "route": null },
   { "value": "other", "route": null }

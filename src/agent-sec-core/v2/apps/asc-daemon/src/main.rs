@@ -152,20 +152,12 @@ fn main() -> ExitCode {
 }
 
 fn file_backend_from_env() -> std::io::Result<asc_daemon::FilePolicyBackend> {
-    let backend = asc_daemon::FilePolicyBackend::from_env().map_err(|error| {
+    asc_daemon::FilePolicyBackend::from_env().map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("invalid AGENT_SEC_FILE_BACKEND: {error}; expected agentsight or lua-lsm"),
+            "invalid AGENT_SEC_FILE_BACKEND: expected agentsight, or lua-lsm in a Linux build with the lua-lsm-testing feature",
         )
-    })?;
-    #[cfg(not(target_os = "linux"))]
-    if backend == asc_daemon::FilePolicyBackend::LuaLsm {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "AGENT_SEC_FILE_BACKEND=lua-lsm requires Linux",
-        ));
-    }
-    Ok(backend)
+    })
 }
 
 fn report_startup(stage: &'static str, started: Instant) {
