@@ -1,5 +1,121 @@
 use super::*;
 
+#[test]
+fn raw_relay_bash_restores_first_command_after_idle_pressure_release() {
+    struct RecoveryInput {
+        ready: std::sync::mpsc::Receiver<()>,
+        current_file: std::path::PathBuf,
+        recovery_file: std::path::PathBuf,
+        phase: usize,
+    }
+
+    impl Read for RecoveryInput {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let command: &[u8] = match self.phase {
+                0 => {
+                    self.ready
+                        .recv_timeout(Duration::from_secs(10))
+                        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+                    if !std::fs::read(&self.recovery_file)?.is_empty() {
+                        return Err(io::Error::other("idle prompt must keep preexec enabled"));
+                    }
+                    std::fs::write(&self.current_file, "50\n")?;
+                    b"printf '__PRESSURE_RECOVERY__\\n'\n"
+                }
+                1 => {
+                    self.ready
+                        .recv_timeout(Duration::from_secs(10))
+                        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+                    b"exit\n"
+                }
+                _ => return Ok(0),
+            };
+            self.phase += 1;
+            buffer[..command.len()].copy_from_slice(command);
+            Ok(command.len())
+        }
+    }
+
+    for slash_via_shell in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "cosh-idle-pressure-recovery-{slash_via_shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let home = root.join("home");
+        let group = root.join("cg");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&group).expect("group");
+        std::fs::write(group.join("memory.current"), "200\n").expect("current");
+        std::fs::write(group.join("memory.high"), "100\n").expect("high");
+        std::fs::write(
+            home.join(".bashrc"),
+            format!(
+                "_COSH_CGROUP_DIR={}\nPS0='__USER_PS0__'\n",
+                shell_arg(&group)
+            ),
+        )
+        .expect("bashrc");
+        let mut config = ShellHostConfig::new("idle-pressure-recovery", root.join("work"))
+            .with_env("HOME", home.display().to_string());
+        config.slash_via_shell = slash_via_shell;
+        let (sender, ready) = std::sync::mpsc::channel();
+        let input = RecoveryInput {
+            ready,
+            current_file: group.join("memory.current"),
+            recovery_file: root.join("work/terminal-recovery-request.ps0-pressure"),
+            phase: 0,
+        };
+        let mut observed = 0;
+        let mut rendered = Vec::new();
+        let output =
+            run_raw_relay_bash_with_observer(&config, input, &mut rendered, |events, _| {
+                for event in &events[observed..] {
+                    if matches!(
+                        event.kind,
+                        ShellEventKind::ShellReady
+                            | ShellEventKind::CommandCompleted
+                            | ShellEventKind::CommandFailed
+                    ) {
+                        let _ = sender.send(());
+                    }
+                }
+                observed = events.len();
+                Ok(())
+            })
+            .expect("recovery relay");
+        let command = "printf '__PRESSURE_RECOVERY__\\n'";
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::CommandStarted
+                    && event.command.as_deref() == Some(command)
+            }),
+            "{slash_via_shell}: missing recovered preexec: {:?}; terminal: {:?}",
+            output.events,
+            String::from_utf8_lossy(&rendered)
+        );
+        let ledger = ledger_from_output(&output);
+        let block = ledger
+            .blocks
+            .iter()
+            .find(|block| block.command == command)
+            .expect("recovered block");
+        assert_eq!(block.exit_code, 0);
+        let captured = std::fs::read_to_string(
+            block
+                .output
+                .terminal_output_ref
+                .as_ref()
+                .expect("output ref"),
+        )
+        .expect("captured output");
+        assert!(captured.contains("__PRESSURE_RECOVERY__"), "{captured}");
+        let terminal = String::from_utf8_lossy(&rendered);
+        assert!(terminal.contains("__USER_PS0__"), "{terminal}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
 fn xtrace_record_contains_secret(rendered: &str, trace_prefix: &str, secret: &str) -> bool {
     rendered
         .split(['\r', '\n'])

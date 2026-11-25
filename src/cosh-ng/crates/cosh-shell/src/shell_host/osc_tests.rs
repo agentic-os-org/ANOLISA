@@ -17,6 +17,37 @@ use std::sync::{Arc, Mutex};
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
 
 #[test]
+fn commandless_preexec_revokes_prompt_without_creating_a_command() {
+    let directory =
+        std::env::temp_dir().join(format!("cosh-boundary-parser-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut parser = OscParser::new(
+        "boundary".into(),
+        directory.clone(),
+        TEST_MARKER_TOKEN.into(),
+    );
+    let gate = crate::raw_input::MainPromptGate::default();
+    gate.set_at_prompt(true);
+    parser.set_main_prompt_gate(gate.clone());
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\"}\x07")
+        .unwrap();
+    assert!(!gate.is_at_prompt());
+    assert!(!parser.has_active_foreground_command());
+    assert!(parser.events.is_empty());
+    parser.feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":\"handoff\",\"cwd\":\"/tmp\"}\x07").unwrap();
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\"}\x07")
+        .unwrap();
+    parser.feed(b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0}\x07").unwrap();
+    let ledger = build_command_blocks(&parser.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert_eq!(ledger.blocks.len(), 1);
+    assert_eq!(ledger.blocks[0].command, "handoff");
+    std::fs::remove_dir_all(directory).ok();
+}
+
+#[test]
 fn bounded_raw_session_spools_output_without_materializing_result() {
     // Serialize with process-wide PATH rewrites so a concurrent env-guard
     // holder cannot change PATH while this test spawns bash.

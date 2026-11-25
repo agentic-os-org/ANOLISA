@@ -438,6 +438,380 @@ fn throttled_boundary_marker_is_fork_free() {
 }
 
 #[test]
+fn prompt_wrappers_capture_traps_without_command_substitution() {
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let wrappers: Vec<&str> = script
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("PROMPT_COMMAND=") || line.starts_with("PROMPT_COMMAND+="))
+        .filter(|line| line.contains("trap -p"))
+        .collect();
+    assert_eq!(wrappers.len(), 2);
+    for wrapper in wrappers {
+        let fast_path = wrapper
+            .split(" else _COSH_PROMPT_DEBUG_TRAP")
+            .next()
+            .unwrap();
+        assert_eq!(fast_path.matches("trap -p").count(), 1, "{wrapper}");
+        assert!(
+            fast_path.contains("trap -p RETURN ERR DEBUG 2>/dev/null >|"),
+            "{wrapper}"
+        );
+        assert!(
+            !fast_path.contains("$(trap -p"),
+            "prompt trap capture must not fork: {wrapper}"
+        );
+        if wrapper.contains("_cosh_bounded_prompt_marker") {
+            assert!(
+                wrapper.contains(" else _COSH_PROMPT_DEBUG_TRAP=\"$(trap -p DEBUG"),
+                "snapshot failure must retain a marker fallback: {wrapper}"
+            );
+        }
+    }
+}
+
+#[test]
+fn prompt_snapshot_failure_still_emits_marker_and_restores_traps() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    let temp_root = std::env::temp_dir().join(format!(
+        "cosh-prompt-snapshot-failure-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("temp root");
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let wrapper = script
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("PROMPT_COMMAND+=") && line.contains("trap -p"))
+        .expect("marker wrapper")
+        .replace("> /dev/tty", &format!("> {}/marker", temp_root.display()));
+    let command = format!(
+        "_COSH_PROMPT_STATUS=7\n\
+         _COSH_PROMPT_TRAP_BASE=/dev/null/cosh-prompt\n\
+         _COSH_PROMPT_UMASK=022\n\
+         _COSH_PROMPT_XTRACE=0\n\
+         trap 'printf \"USER-DEBUG\\n\" >> {root}/debug' DEBUG\n\
+         _cosh_report_startup_environment_once() {{ :; }}\n\
+         _cosh_bounded_prompt_marker() {{ printf '%s\\n' \"$1\"; }}\n\
+         {wrapper}\n\
+         eval \"${{PROMPT_COMMAND[-1]}}\"\n\
+         trap -p DEBUG > {root}/restored",
+        root = temp_root.display()
+    );
+    let output = Command::new("bash")
+        .args(["-c", command.as_str()])
+        .output()
+        .expect("prompt snapshot failure");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(temp_root.join("marker")).expect("marker emitted"),
+        "7\n"
+    );
+    let restored = std::fs::read_to_string(temp_root.join("restored")).expect("restored trap");
+    assert!(restored.contains("USER-DEBUG"), "{restored}");
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
+fn prompt_snapshot_file_is_private_and_restores_umask() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "cosh-prompt-snapshot-private-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("temp root");
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let initialization = script
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("_COSH_PROMPT_TRAP_BASE="))
+        .take_while(|line| !line.trim_start().starts_with("PROMPT_COMMAND="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let wrapper = script
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("PROMPT_COMMAND+=") && line.contains("trap -p"))
+        .expect("marker wrapper")
+        .replace("> /dev/tty", &format!("> {}/marker", temp_root.display()));
+    let command = format!(
+        "umask 022\n\
+         COSH_RECOVERY_REQUEST_FILE={root}/recovery\n\
+         {initialization}\n\
+         _COSH_PROMPT_STATUS=0\n\
+         _COSH_PROMPT_XTRACE=0\n\
+         _cosh_report_startup_environment_once() {{ :; }}\n\
+         _cosh_bounded_prompt_marker() {{ :; }}\n\
+         {wrapper}\n\
+         eval \"${{PROMPT_COMMAND[-1]}}\"\n\
+         umask > {root}/umask",
+        root = temp_root.display()
+    );
+    let output = Command::new("bash")
+        .args(["-c", command.as_str()])
+        .output()
+        .expect("prompt snapshot privacy");
+    assert!(output.status.success(), "{output:?}");
+    let mode = std::fs::metadata(temp_root.join("recovery.prompt.traps"))
+        .expect("snapshot file")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "snapshot mode={mode:o}");
+    assert_eq!(
+        std::fs::read_to_string(temp_root.join("umask"))
+            .expect("umask")
+            .trim(),
+        "0022"
+    );
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
+fn prompt_snapshot_read_failure_preserves_traps_and_marker() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cosh-prompt-read-failure-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("temp root");
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let wrappers: Vec<&str> = script
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("PROMPT_COMMAND=") || line.starts_with("PROMPT_COMMAND+="))
+        .filter(|line| line.contains("trap -p"))
+        .collect();
+    assert_eq!(wrappers.len(), 2);
+    for (index, wrapper) in wrappers.iter().enumerate() {
+        let marker = temp_root.join(format!("marker-{index}"));
+        let wrapper = wrapper.replace("> /dev/tty", &format!("> {}", shell_arg(&marker)));
+        let fault_trap = r#"trap ': USER_DEBUG; if [[ "$BASH_COMMAND" == _COSH_PROMPT_TRAPS=* && "$BASH_COMMAND" == *"_COSH_PROMPT_TRAP_BASE"* ]]; then command rm -f "${_COSH_PROMPT_TRAP_BASE}.traps"; fi' DEBUG"#;
+        let command = format!(
+            "_COSH_PROMPT_TRAP_BASE={root}/snapshot\n\
+             _COSH_PROMPT_STATUS=7\n\
+             : > \"${{_COSH_PROMPT_TRAP_BASE}}.traps\"\n\
+             {fault_trap}\n\
+             trap ': USER_RETURN' RETURN\n\
+             trap ': USER_ERR' ERR\n\
+             _cosh_report_startup_environment_once() {{ :; }}\n\
+             _cosh_bounded_prompt_marker() {{ printf '%s\\n' \"$1\"; }}\n\
+             {wrapper}\n\
+             eval \"${{PROMPT_COMMAND[${{#PROMPT_COMMAND[@]}}-1]}}\"\n\
+             builtin trap -p DEBUG RETURN ERR",
+            root = temp_root.display()
+        );
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-c", &command])
+            .output()
+            .expect("snapshot read failure");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        for expected in ["USER_DEBUG", "USER_RETURN", "USER_ERR"] {
+            assert!(
+                stdout.contains(expected),
+                "wrapper {index} lost {expected}: {output:?}"
+            );
+        }
+        if index == 1 {
+            assert_eq!(std::fs::read_to_string(&marker).expect("marker"), "7\n");
+        }
+    }
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
+fn ps0_checks_overage_before_full_preexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let assignment = script
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("PS0=") && line.contains("_cosh_bounded_preexec_marker"))
+        .expect("PS0 assignment")
+        .replace("> /dev/tty", "> /dev/null");
+    for (overage, expected_calls) in [(1, 0), (0, 1)] {
+        let command = format!(
+            "_COSH_USER_PS0=\n\
+             _COSH_PS0_PREEXEC_ENABLED=1\n\
+             {assignment}\n\
+             _COSH_TEST_OVERAGE={overage}\n\
+             _cosh_memory_overage() {{ [[ \"$_COSH_TEST_OVERAGE\" == 1 ]]; }}\n\
+             _cosh_bounded_preexec_marker() {{ printf 'FULL_PREEXEC\\n' >&2; }}\n\
+             eval \"$PS0\" >/dev/null"
+        );
+        let output = Command::new("bash")
+            .args(["-c", command.as_str()])
+            .output()
+            .expect("evaluate PS0");
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.matches("FULL_PREEXEC").count(),
+            expected_calls,
+            "overage={overage}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn pressure_boundary_second_probe_still_revokes_prompt_ownership() {
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let function = shell_function(script, "_cosh_bounded_preexec_marker");
+    let assignment = script
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("PS0=") && line.contains("_cosh_bounded_preexec_marker"))
+        .expect("PS0 assignment")
+        .replace("> /dev/tty", "> /dev/stdout");
+    let command = format!(
+        "_COSH_USER_PS0=\n_COSH_PS0_PREEXEC_ENABLED=1\n_COSH_PS0_PRESSURE_BOUNDARY=\n_COSH_PS0_FALLBACK=__BOUNDARY_ONLY__\n_COSH_ATTEMPT_GENERATION=0\n{assignment}\n{function}\n_probe_count=0\n_cosh_memory_overage() {{ _probe_count=$((_probe_count + 1)); (( _probe_count >= 2 )); }}\neval \"printf '%s' \\\"$PS0\\\"\""
+    );
+    let output = Command::new("bash")
+        .args(["-c", &command])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "__BOUNDARY_ONLY__");
+}
+
+#[test]
+fn pressure_guard_keeps_ps0_storage_stable_during_readline() {
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let function = format!(
+        "{}\n{}",
+        shell_function(
+            include_str!("../../src/shell_host/marker/bash.sh"),
+            "_cosh_json_escape_var"
+        ),
+        shell_function(script, "_cosh_refresh_ps0_for_memory_pressure")
+    );
+    assert!(!function
+        .lines()
+        .any(|line| line.trim_start().starts_with("PS0=")));
+    let assignment = script
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("PS0=") && line.contains("_cosh_bounded_preexec_marker"))
+        .expect("PS0 assignment");
+    assert!(
+        assignment.contains("${_COSH_PS0_PREEXEC_ENABLED:+$("),
+        "{assignment}"
+    );
+}
+
+#[test]
+fn pressure_guard_disables_and_restores_only_cosh_preexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let directory = std::env::temp_dir().join(format!("cosh-ps0-state-{}", unique_suffix()));
+    std::fs::create_dir_all(&directory).expect("state dir");
+    let function = format!(
+        "{}\n{}",
+        shell_function(
+            include_str!("../../src/shell_host/marker/bash.sh"),
+            "_cosh_json_escape_var"
+        ),
+        shell_function(script, "_cosh_refresh_ps0_for_memory_pressure")
+    );
+    let bounded_prompt = shell_function(script, "_cosh_bounded_prompt_marker");
+    let command = format!(
+        "COSH_RECOVERY_REQUEST_FILE={state}\n\
+         : > \"${{COSH_RECOVERY_REQUEST_FILE}}.ps0-pressure\"\n\
+         {function}\n\
+         {bounded_prompt}\n\
+         _cosh_precmd_marker() {{ :; }}\n\
+         _COSH_WRAPPED_PS0='cosh-preexec-user'\n\
+         _COSH_USER_PS0='user'\n\
+         _COSH_PS0_PRESSURE_DISABLED=0\n\
+         _COSH_TEST_OVERAGE=1\n\
+         _cosh_memory_overage() {{ [[ \"$_COSH_TEST_OVERAGE\" == 1 ]]; }}\n\
+         PS0=\"$_COSH_WRAPPED_PS0\"\n\
+         _cosh_refresh_ps0_for_memory_pressure true\n\
+         [[ \"$PS0\" == \"$_COSH_WRAPPED_PS0\" && -z \"$_COSH_PS0_PREEXEC_ENABLED\" && \"$_COSH_PS0_PRESSURE_DISABLED\" == 1 ]] || exit 11\n\
+         _COSH_TEST_OVERAGE=0\n\
+         _cosh_bounded_prompt_marker 0\n\
+         [[ \"$PS0\" == \"$_COSH_WRAPPED_PS0\" && \"$_COSH_PS0_PREEXEC_ENABLED\" == 1 && \"$_COSH_PS0_PRESSURE_DISABLED\" == 0 ]] || exit 12\n\
+         _COSH_TEST_OVERAGE=1\n\
+         _cosh_refresh_ps0_for_memory_pressure true\n\
+         PS0='user-customized'\n\
+         _COSH_TEST_OVERAGE=0\n\
+         _cosh_refresh_ps0_for_memory_pressure true\n\
+         [[ \"$PS0\" == user-customized && \"$_COSH_PS0_PRESSURE_DISABLED\" == 0 ]] || exit 13\n\
+         _COSH_TEST_OVERAGE=1\n\
+         _cosh_refresh_ps0_for_memory_pressure true\n\
+         [[ \"$PS0\" == user-customized && \"$_COSH_PS0_PRESSURE_DISABLED\" == 0 ]] || exit 14",
+        state = shell_arg(&directory.join("recovery"))
+    );
+    let output = Command::new("bash")
+        .args(["-c", command.as_str()])
+        .output()
+        .expect("pressure PS0 guard");
+    assert!(output.status.success(), "{output:?}");
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
+fn pressure_guard_publishes_and_clears_only_owned_recovery_state() {
+    let script = include_str!("../../src/shell_host/marker/bash_prompt.sh");
+    let directory = std::env::temp_dir().join(format!("cosh-ps0-sidecar-{}", unique_suffix()));
+    std::fs::create_dir_all(&directory).expect("state dir");
+    let function = format!(
+        "{}\n{}",
+        shell_function(
+            include_str!("../../src/shell_host/marker/bash.sh"),
+            "_cosh_json_escape_var"
+        ),
+        shell_function(script, "_cosh_refresh_ps0_for_memory_pressure")
+    );
+    let command = format!(
+        r#"COSH_RECOVERY_REQUEST_FILE={state}
+{function}
+_COSH_WRAPPED_PS0='cosh-user'
+_COSH_USER_PS0='user'
+_COSH_PS0_PRESSURE_DISABLED=0
+_COSH_TEST_OVERAGE=1
+_cosh_memory_overage() {{ [[ "$_COSH_TEST_OVERAGE" == 1 ]]; }}
+PS0="$_COSH_WRAPPED_PS0"
+_cosh_refresh_ps0_for_memory_pressure true
+[[ "$PS0" == "$_COSH_WRAPPED_PS0" && "$_COSH_PS0_PRESSURE_DISABLED" == 0 ]] || exit 11
+mkdir "${{COSH_RECOVERY_REQUEST_FILE}}.ps0-pressure"
+_cosh_refresh_ps0_for_memory_pressure true
+[[ "$PS0" == "$_COSH_WRAPPED_PS0" && "$_COSH_PS0_PRESSURE_DISABLED" == 0 ]] || exit 12
+rmdir "${{COSH_RECOVERY_REQUEST_FILE}}.ps0-pressure"
+: > "${{COSH_RECOVERY_REQUEST_FILE}}.ps0-pressure"
+_cosh_refresh_ps0_for_memory_pressure true
+[[ "$PS0" == "$_COSH_WRAPPED_PS0" && -z "$_COSH_PS0_PREEXEC_ENABLED" && -s "${{COSH_RECOVERY_REQUEST_FILE}}.ps0-pressure" ]] || exit 13
+_COSH_TEST_OVERAGE=0
+_cosh_refresh_ps0_for_memory_pressure true
+[[ "$PS0" == "$_COSH_WRAPPED_PS0" && "$_COSH_PS0_PREEXEC_ENABLED" == 1 && ! -s "${{COSH_RECOVERY_REQUEST_FILE}}.ps0-pressure" ]] || exit 14
+_COSH_TEST_OVERAGE=1
+_cosh_refresh_ps0_for_memory_pressure true
+PS0='user-customized'
+_COSH_TEST_OVERAGE=0
+_cosh_refresh_ps0_for_memory_pressure true
+[[ "$PS0" == user-customized && ! -s "${{COSH_RECOVERY_REQUEST_FILE}}.ps0-pressure" ]] || exit 15
+"#,
+        state = shell_arg(&directory.join("recovery"))
+    );
+    let output = Command::new("bash")
+        .args(["-c", &command])
+        .output()
+        .expect("pressure recovery state");
+    assert!(output.status.success(), "{output:?}");
+    std::fs::remove_dir_all(directory).ok();
+}
+
+#[test]
 fn shell_oversized_history_privacy_and_recovery_contracts() {
     let temp_root = std::env::temp_dir().join(format!("cosh-10317-contracts-{}", unique_suffix()));
     std::fs::create_dir_all(temp_root.join("home")).unwrap();
@@ -595,6 +969,118 @@ if grep -q 'sk-abcdef123456' "$COSH_TEST_ROOT/handoff.out"; then echo 'oversized
 }
 
 #[test]
+fn shell_secret_detector_prefilter_precedes_regex_scans() {
+    let script = include_str!("../../src/shell_host/marker/bash.sh");
+    let function = shell_function(script, "_cosh_command_has_secret");
+    let prefilter = function
+        .find("_COSH_SECRET_CANDIDATE")
+        .expect("conservative secret prefilter");
+    let first_regex = function.find("jwt_pattern").expect("JWT regex");
+    assert!(
+        prefilter < first_regex,
+        "cheap prefilter must reject ordinary commands before regex scans"
+    );
+    let lowercase = function.find("lower=").expect("lowercase conversion");
+    assert!(
+        prefilter < lowercase,
+        "prefilter must avoid unconditional locale lowercase conversion"
+    );
+}
+
+#[test]
+fn shell_secret_prefilter_preserves_nocasematch_state() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    let function = shell_function(
+        include_str!("../../src/shell_host/marker/bash.sh"),
+        "_cosh_command_has_secret",
+    );
+    for initially_enabled in [false, true] {
+        let setup = if initially_enabled {
+            "shopt -s nocasematch"
+        } else {
+            "shopt -u nocasematch"
+        };
+        let command = format!(
+            "{function}\n\
+             {setup}\n\
+             _cosh_command_has_secret 'echo ordinary' && exit 10\n\
+             if shopt -q nocasematch; then actual=1; else actual=0; fi\n\
+             [[ \"$actual\" == {expected} ]] || exit 11\n\
+             _cosh_command_has_secret 'Bearer abc' || exit 12\n\
+             if shopt -q nocasematch; then actual=1; else actual=0; fi\n\
+             [[ \"$actual\" == {expected} ]] || exit 13",
+            expected = if initially_enabled { 1 } else { 0 }
+        );
+        let output = Command::new("bash")
+            .args(["-c", command.as_str()])
+            .output()
+            .expect("nocasematch state");
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+#[test]
+fn shell_secret_constructed_cookie_headers_stay_out_of_native_history() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-constructed-cookie-history-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let headers = [
+        ": -H Coo'kie:'sid=abc123",
+        r": -H Coo\kie:sid=abc123",
+        r#": -H C"oo"kie:sid=abc123"#,
+        r": -H Set\-Coo\kie:sid=abc123",
+    ];
+    for (index, header) in headers.iter().enumerate() {
+        std::fs::write(
+            home_dir.join(".bashrc"),
+            format!(
+                "set -o history\nHISTCONTROL=ignorespace\nbuiltin history -c\nbuiltin history -s {}\n",
+                shell_arg(std::path::Path::new(header))
+            ),
+        )
+        .expect("bashrc");
+        let direct_history = work_dir.join(format!("direct-{index}.history"));
+        let recovered_history = work_dir.join(format!("recovered-{index}.history"));
+        let config = ShellHostConfig::new(format!("constructed-cookie-{index}"), &work_dir)
+            .with_env("HOME", home_dir.display().to_string());
+        let output = run_scripted_bash(
+            &config,
+            &[
+                ScriptedInput::user_line(format!(
+                    "builtin history -w {}",
+                    shell_arg(&direct_history)
+                )),
+                ScriptedInput::command(format!(" {header}\u{1b}[101~")),
+                ScriptedInput::user_line("echo safe-cookie-control"),
+                ScriptedInput::user_line(format!(
+                    "builtin history -w {}",
+                    shell_arg(&recovered_history)
+                )),
+            ],
+        )
+        .expect("scripted bash pty");
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        for history_file in [&direct_history, &recovered_history] {
+            let history = std::fs::read_to_string(history_file).expect("native history");
+            assert!(
+                !history.contains("sid=abc123"),
+                "{header}: {history_file:?}: {history}"
+            );
+        }
+        let recovered = std::fs::read_to_string(&recovered_history).expect("recovered history");
+        assert!(recovered.contains("echo safe-cookie-control"), "{terminal}");
+        assert!(terminal.contains("safe-cookie-control"), "{terminal}");
+    }
+    std::fs::remove_dir_all(&work_dir).ok();
+}
+
+#[test]
 fn shell_secret_detectors_match_canonical_shapes_and_boundaries() {
     let detectors = [
         ("bash", include_str!("../../src/shell_host/marker/bash.sh")),
@@ -668,6 +1154,10 @@ fn shell_secret_detectors_match_canonical_shapes_and_boundaries() {
         r"curl -H Cookie\:session=quoted-cookie-value-42",
         "curl -H Cookie':'session=quoted-cookie-value-42",
         "curl -H Coo'kie:'session=quoted-cookie-value-42",
+        ": -H Coo'kie:'sid=abc123",
+        r": -H Coo\kie:sid=abc123",
+        r#": -H C"oo"kie:sid=abc123"#,
+        r": -H Set\-Coo\kie:sid=abc123",
         r"curl -H Set\-Cookie\:csrf=quoted-cookie-value-42",
         r#"curl -H"Cookie: session=quoted-cookie-value-42""#,
         "curl -H'Cookie: session=quoted-cookie-value-42'",
@@ -3118,15 +3608,30 @@ fn shell_host_bash_prompt_hook_observes_only_bounded_capture() {
         let function_stack = fields.next().unwrap_or_default();
         assert!(
             command.starts_with("_COSH_PROMPT_STATUS=")
+                || command.starts_with("_COSH_PROMPT_TRAP_BASE=")
                 || command.starts_with("_COSH_PROMPT_DEBUG_TRAP=")
                 || command.starts_with("_COSH_PROMPT_RETURN_TRAP=")
                 || command.starts_with("_COSH_PROMPT_ERR_TRAP=")
+                || command.starts_with("_COSH_PROMPT_TRAPS=")
+                || command == "_COSH_PROMPT_TRAPS_SAVED=0"
+                || command == "_COSH_PROMPT_TRAPS_SAVED=1"
+                || command == "(( _COSH_PROMPT_TRAPS_SAVED ))"
+                || command == "unset _COSH_PROMPT_TRAPS_SAVED"
+                || command == "[[ -f \"${_COSH_PROMPT_TRAP_BASE}.traps\" ]]"
                 || command == "_COSH_PROMPT_XTRACE=0"
                 || command == "_COSH_PROMPT_XTRACE=1"
                 || command == "(( _COSH_PROMPT_XTRACE == 1 ))"
                 || command == "unset _COSH_PROMPT_XTRACE"
                 || (command.starts_with("trap -p DEBUG >")
-                    && command.contains("COSH_RECOVERY_REQUEST_FILE")),
+                    && command.contains("COSH_RECOVERY_REQUEST_FILE"))
+                || (command.starts_with("trap -p RETURN ERR DEBUG >")
+                    && command.contains("_COSH_PROMPT_TRAP_BASE"))
+                || (command.starts_with("trap -p RETURN ERR DEBUG 2>")
+                    && command.contains("_COSH_PROMPT_TRAP_BASE"))
+                || (["DEBUG", "RETURN", "ERR"]
+                    .iter()
+                    .any(|signal| { command.starts_with(&format!("trap -p {signal} >")) })
+                    && command.contains("_COSH_PROMPT_TRAP_BASE")),
             "unexpected Cosh internals in user trap: {line}\n{trace_log}"
         );
         assert!(
@@ -3135,6 +3640,153 @@ fn shell_host_bash_prompt_hook_observes_only_bounded_capture() {
         );
     }
     assert!(terminal.contains("trace-options-preserved"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_prompt_preserves_multiline_traps() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-multiline-traps-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        r#"trap $'printf "D1\\n"
+printf "D2\\n"' DEBUG
+trap $'printf "R1\\n"
+printf "R2\\n"' RETURN
+trap $'printf "E1\\n"
+printf "E2\\n"' ERR
+"#,
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-multiline-traps-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line("trap -p RETURN ERR DEBUG")],
+    )
+    .expect("scripted bash pty");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    for (action, signal) in [("R2", "RETURN"), ("E2", "ERR"), ("D2", "DEBUG")] {
+        let expected = format!("printf \"{action}\\n\"' {signal}");
+        assert!(
+            terminal.contains(&expected),
+            "missing {expected}: {terminal}"
+        );
+    }
+    assert!(!terminal.contains("unexpected EOF"), "{terminal}");
+    assert!(!terminal.contains("syntax error"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_prompt_preserves_runtime_umask() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-prompt-runtime-umask-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "umask 022\nPROMPT_COMMAND='if [[ ${USER_CHANGE_MASK:-0} == 1 ]]; then umask 027; unset USER_CHANGE_MASK; fi'\n",
+    )
+    .expect("bashrc");
+    let command_file = work_dir.join("command.file");
+    let hook_file = work_dir.join("hook.file");
+    let config = ShellHostConfig::new("prompt-runtime-umask", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("umask 077"),
+            ScriptedInput::user_line(format!(
+                "printf 'COMMAND-MASK='; umask; : > {}",
+                shell_arg(&command_file)
+            )),
+            ScriptedInput::user_line("USER_CHANGE_MASK=1"),
+            ScriptedInput::user_line(format!(
+                "printf 'HOOK-MASK='; umask; : > {}",
+                shell_arg(&hook_file)
+            )),
+        ],
+    )
+    .expect("scripted bash pty");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("COMMAND-MASK=0077"), "{terminal}");
+    assert!(terminal.contains("HOOK-MASK=0027"), "{terminal}");
+    for (file, expected_mode) in [(&command_file, 0o600), (&hook_file, 0o640)] {
+        let mode = std::fs::metadata(file)
+            .expect("created file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, expected_mode, "{file:?}: {terminal}");
+    }
+    let snapshot = work_dir.join("terminal-recovery-request.prompt.traps");
+    assert_eq!(
+        std::fs::metadata(snapshot)
+            .expect("snapshot")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    std::fs::remove_dir_all(&work_dir).ok();
+}
+
+#[test]
+fn shell_host_bash_prompt_snapshot_supports_noclobber() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-prompt-noclobber-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(home_dir.join(".bashrc"), "set -C\ntrap ':' ERR\n").expect("bashrc");
+    let config = ShellHostConfig::new("prompt-noclobber", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("set -C"),
+            ScriptedInput::user_line("[[ -o noclobber ]] && printf 'NOCLOBBER-PRESERVED\\n'"),
+            ScriptedInput::user_line("echo prompt-still-ready"),
+        ],
+    )
+    .expect("scripted bash pty");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("NOCLOBBER-PRESERVED"), "{terminal}");
+    assert!(
+        !terminal.lines().any(|line| {
+            line.contains(".prompt.traps:") && line.contains("cannot overwrite existing file")
+        }),
+        "{terminal}"
+    );
+    let snapshot = std::fs::read_to_string(work_dir.join("terminal-recovery-request.prompt.traps"))
+        .expect("snapshot");
+    assert!(
+        snapshot.contains("trap -- ':' ERR"),
+        "{snapshot}: {terminal}"
+    );
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandCompleted && event.exit_code == Some(0)
+        }),
+        "{:?}",
+        output.events
+    );
+    std::fs::remove_dir_all(&work_dir).ok();
 }
 
 #[test]

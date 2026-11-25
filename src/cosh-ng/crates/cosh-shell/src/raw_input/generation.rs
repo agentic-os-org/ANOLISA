@@ -195,6 +195,18 @@ mod tests {
     }
 
     #[test]
+    fn default_meta_history_and_edit_keys_keep_prompt_evidence() {
+        for key in [b"\x1b<".as_slice(), b"\x1bp", b"\x1bb"] {
+            for split in 0..=key.len() {
+                let mut counter = LineSubmitCounter::default();
+                assert!(!counter.has_untracked_readline_prefix(&key[..split]));
+                counter.count(&key[..split]);
+                assert!(!counter.has_untracked_readline_prefix(&key[split..]));
+            }
+        }
+    }
+
+    #[test]
     fn line_submit_counter_counts_ctrl_o_as_submission() {
         let mut counter = LineSubmitCounter::default();
 

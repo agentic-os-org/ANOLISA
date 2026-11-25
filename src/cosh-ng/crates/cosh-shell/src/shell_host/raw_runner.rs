@@ -26,6 +26,7 @@ use super::model::{ShellEventView, ShellHostConfig, ShellHostOutput};
 use super::prompt_presentation::PromptPresentation;
 use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
 
+mod input_capabilities;
 mod interactive;
 pub(super) mod raw_mode_guard;
 mod startup_gate;
@@ -423,12 +424,12 @@ where
         input_master,
         session.child.id(),
         input_event_sender,
-        input_classifier
-            .with_shell_passthrough(!config.integration.uses_markers())
-            .with_bash_readline_history_privacy(
-                bounded_bash_handoff && config.integration.uses_markers(),
-            )
-            .with_bash_slash_submission_guard(slash_route_enabled),
+        input_capabilities::configure(
+            input_classifier,
+            config,
+            bounded_bash_handoff,
+            slash_route_enabled,
+        ),
         Arc::clone(&input_mode),
         input_generation.clone(),
         RawInputShellRoute::new(

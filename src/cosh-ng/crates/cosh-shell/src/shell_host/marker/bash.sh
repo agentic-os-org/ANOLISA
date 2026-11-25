@@ -331,15 +331,34 @@ _cosh_command_has_secret() {
       input="${input:0:8192}${input:$secret_tail_offset:8192}"
     fi
   fi
-  local jwt_pattern='(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}([^A-Za-z0-9_]|$)'
-  if [[ "$input" =~ $jwt_pattern ]]; then
-    return 0
+  local _COSH_SECRET_PREFILTER_INPUT="$input"
+  if [[ "$input" == *[\'\"\\]* ]]; then
+    _COSH_SECRET_PREFILTER_INPUT="${_COSH_SECRET_PREFILTER_INPUT//\\/}"
+    _COSH_SECRET_PREFILTER_INPUT="${_COSH_SECRET_PREFILTER_INPUT//\'/}"
+    _COSH_SECRET_PREFILTER_INPUT="${_COSH_SECRET_PREFILTER_INPUT//\"/}"
   fi
+  local _COSH_SECRET_CANDIDATE=0
+  local _COSH_NOCASEMATCH_RESTORE=0
+  if ! shopt -q nocasematch; then
+    shopt -s nocasematch
+    _COSH_NOCASEMATCH_RESTORE=1
+  fi
+  case "$_COSH_SECRET_PREFILTER_INPUT" in
+    *eyj*|*"://"*|*bearer*|*gh*|*sk*|*glpat*|*npm_*|*hf_*|*aiza*|*xox*|*ltai*|*akia*|*asia*|*key*|*secret*|*token*|*pass*|*cookie*|*auth*)
+      _COSH_SECRET_CANDIDATE=1
+      ;;
+  esac
+  (( _COSH_NOCASEMATCH_RESTORE == 1 )) && shopt -u nocasematch
+  (( _COSH_SECRET_CANDIDATE == 1 )) || return 1
   local lower
   if (( BASH_VERSINFO[0] >= 4 )); then
     lower="${input,,}"
   else
     lower="$(printf '%s' "$input" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  fi
+  local jwt_pattern='(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}([^A-Za-z0-9_]|$)'
+  if [[ "$input" =~ $jwt_pattern ]]; then
+    return 0
   fi
   case "$lower" in
     *"-----begin "*"private key-----"*)
@@ -613,6 +632,7 @@ _cosh_guard_slash_submission() {
     restore_xtrace=1
     set +x
   fi
+  _cosh_refresh_ps0_for_memory_pressure true
   local input="$READLINE_LINE"
   # Remember the accepted line so PS0 can prove which history entry belongs
   # to this submission (Bash may exclude the real command via HISTIGNORE).

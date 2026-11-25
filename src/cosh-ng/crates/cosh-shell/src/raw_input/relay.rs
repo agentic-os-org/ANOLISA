@@ -448,7 +448,7 @@ fn relay_native_passthrough(
         bytes,
     );
     let guard_submission = bash_submission_needs_guard(
-        relay.input_classifier.bash_slash_submission_guard_enabled(),
+        relay.input_classifier.bash_pressure_guard_enabled(),
         relay.main_prompt_gate.is_at_prompt(),
         relay.input_classifier,
         relay.native_line_state,
@@ -574,28 +574,28 @@ fn submit_line_bytes_to_shell(
     bytes.extend_from_slice(&remainder);
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
     let readline_safe = matches!(ownership, ShellBatchOwnership::ReadlineSafe);
-    let guard_submission = readline_safe
-        && (bash_submission_needs_guard(
+    let guard_submission = bash_submission_needs_guard(
+        relay.input_classifier.bash_pressure_guard_enabled(),
+        relay.main_prompt_gate.is_at_prompt(),
+        relay.input_classifier,
+        relay.native_line_state,
+        relay.line_submits,
+        &bytes,
+    ) || readline_safe
+        && bash_submission_has_leading_whitespace(
             relay.input_classifier.bash_slash_submission_guard_enabled(),
             relay.main_prompt_gate.is_at_prompt(),
-            relay.input_classifier,
             relay.native_line_state,
             relay.line_submits,
             &bytes,
-        ) || bash_submission_has_leading_whitespace(
-            relay.input_classifier.bash_slash_submission_guard_enabled(),
-            relay.main_prompt_gate.is_at_prompt(),
-            relay.native_line_state,
-            relay.line_submits,
-            &bytes,
-        ));
+        );
     send_raw_input_events(&bytes, relay.input_events);
     observe_native_line(relay.native_line_state, &bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(&bytes);
-    let guarded_bytes = matches!(ownership, ShellBatchOwnership::ReadlineSafe)
+    let guarded_bytes = (readline_safe || guard_submission)
         .then(|| {
             guarded_bash_submission(
                 guard_submission,

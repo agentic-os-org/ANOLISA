@@ -283,6 +283,7 @@ _cosh_bounded_preexec_marker() {
   fi
   if _cosh_memory_overage; then
     _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+    printf '%s' "$_COSH_PS0_FALLBACK"
     return 0
   fi
   history_entry="$(_cosh_history_entry)"
@@ -381,6 +382,7 @@ _cosh_report_startup_environment_once() {
     "$(_cosh_json_escape "$startup_path")" > /dev/tty 2>/dev/null || true
 }
 _cosh_bounded_prompt_marker() {
+  _cosh_refresh_ps0_for_memory_pressure
   _cosh_precmd_marker "${1:-$?}"
   return 0
 }
@@ -415,6 +417,27 @@ _cosh_precmd_marker() {
   unset _COSH_HANDOFF_TOKEN 2>/dev/null || true
   _COSH_AT_PROMPT=1
 }
+_cosh_refresh_ps0_for_memory_pressure() {
+  local state_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.ps0-pressure"
+  _cosh_json_escape_var "$_COSH_MARKER_TOKEN"
+  printf -v _COSH_PS0_FALLBACK '\033]1337;COSH;{"event":"preexec","token":"%s"}\a' \
+    "$_COSH_JSON_ESCAPE_RESULT"
+  if _cosh_memory_overage && [[ "${1:-false}" == true ]]; then
+    if [[ "${PS0-}" == "${_COSH_WRAPPED_PS0}" && -f "$state_file" ]] \
+       && printf '1' 2>/dev/null >| "$state_file"; then
+      _COSH_PS0_PREEXEC_ENABLED=
+      _COSH_PS0_PRESSURE_BOUNDARY="$_COSH_PS0_FALLBACK"
+      _COSH_PS0_PRESSURE_DISABLED=1
+    fi
+    return 0
+  fi
+  if [[ "${_COSH_PS0_PRESSURE_DISABLED:-0}" == 1 ]]; then
+    _COSH_PS0_PREEXEC_ENABLED=1
+    _COSH_PS0_PRESSURE_BOUNDARY=
+    : 2>/dev/null >| "$state_file" || true
+  fi
+  _COSH_PS0_PRESSURE_DISABLED=0
+}
 {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
     unset PROMPT_COMMAND
@@ -424,7 +447,11 @@ _cosh_precmd_marker() {
   _cosh_initial_history_entry="$(_cosh_history_entry)"
   _cosh_remember_preexec_history_no "$(_cosh_history_no "$_cosh_initial_history_entry")"
   unset _cosh_initial_history_entry
-  PS0='$(set +x; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_bounded_preexec_marker > /dev/tty)'"$_COSH_USER_PS0"
+  _COSH_PS0_PREEXEC_ENABLED=1
+  _COSH_PS0_PRESSURE_BOUNDARY=
+  PS0='${_COSH_PS0_PREEXEC_ENABLED:+$(set +x; trap - DEBUG RETURN ERR 2>/dev/null; if _cosh_memory_overage; then printf "%s" "$_COSH_PS0_FALLBACK" > /dev/tty; exit 0; fi; _cosh_bounded_preexec_marker > /dev/tty)}${_COSH_PS0_PRESSURE_BOUNDARY}'"$_COSH_USER_PS0"
+  _COSH_WRAPPED_PS0="$PS0"
+  _COSH_PS0_PRESSURE_DISABLED=0
   _COSH_USER_PROMPT_COMMAND=()
   if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
     if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
@@ -438,9 +465,17 @@ _cosh_precmd_marker() {
   # resume. Bash before 5.1 executes only element zero of an array
   # PROMPT_COMMAND, so those versions receive the same sequence as one scalar
   # command.
-  PROMPT_COMMAND=('_COSH_PROMPT_STATUS="$?"; _COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; eval "unset _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
+  _COSH_PROMPT_TRAP_BASE="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.prompt"
+  _COSH_PROMPT_UMASK="$(umask)"
+  umask 077
+  rm -f -- "${_COSH_PROMPT_TRAP_BASE}.traps" 2>/dev/null || true
+  : 2>/dev/null >| "${_COSH_PROMPT_TRAP_BASE}.traps"
+  : 2>/dev/null >| "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.ps0-pressure"
+  umask "$_COSH_PROMPT_UMASK"
+  unset _COSH_PROMPT_UMASK
+  PROMPT_COMMAND=('_COSH_PROMPT_STATUS="$?"; _COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_TRAPS=; _COSH_PROMPT_TRAPS_SAVED=0; if [[ -f "${_COSH_PROMPT_TRAP_BASE}.traps" ]] && trap -p RETURN ERR DEBUG 2>/dev/null >| "${_COSH_PROMPT_TRAP_BASE}.traps" && _COSH_PROMPT_TRAPS="$(<"${_COSH_PROMPT_TRAP_BASE}.traps")"; then _COSH_PROMPT_TRAPS_SAVED=1; fi; if (( _COSH_PROMPT_TRAPS_SAVED )); then trap - DEBUG RETURN ERR 2>/dev/null; eval "unset _COSH_PROMPT_TRAPS ${_COSH_PROMPT_TRAPS:+; ${_COSH_PROMPT_TRAPS}}"; fi; unset _COSH_PROMPT_TRAPS_SAVED; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
   PROMPT_COMMAND+=("${_COSH_USER_PROMPT_COMMAND[@]}")
-  PROMPT_COMMAND+=('_COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_report_startup_environment_once; _cosh_bounded_prompt_marker "$_COSH_PROMPT_STATUS" > /dev/tty; eval "unset _COSH_PROMPT_STATUS _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
+  PROMPT_COMMAND+=('_COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_TRAPS=; _COSH_PROMPT_TRAPS_SAVED=0; if [[ -f "${_COSH_PROMPT_TRAP_BASE}.traps" ]] && trap -p RETURN ERR DEBUG 2>/dev/null >| "${_COSH_PROMPT_TRAP_BASE}.traps" && _COSH_PROMPT_TRAPS="$(<"${_COSH_PROMPT_TRAP_BASE}.traps")"; then _COSH_PROMPT_TRAPS_SAVED=1; fi; if (( _COSH_PROMPT_TRAPS_SAVED )); then trap - DEBUG RETURN ERR 2>/dev/null; _cosh_report_startup_environment_once; _cosh_bounded_prompt_marker "$_COSH_PROMPT_STATUS" > /dev/tty; eval "unset _COSH_PROMPT_STATUS _COSH_PROMPT_TRAPS ${_COSH_PROMPT_TRAPS:+; ${_COSH_PROMPT_TRAPS}}"; else _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_report_startup_environment_once; _cosh_bounded_prompt_marker "$_COSH_PROMPT_STATUS" > /dev/tty; eval "unset _COSH_PROMPT_STATUS _COSH_PROMPT_TRAPS _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"; fi; unset _COSH_PROMPT_TRAPS_SAVED; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
   if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
     _COSH_PROMPT_COMMAND_SCALAR="${PROMPT_COMMAND[0]}"
     if [[ -n "${_COSH_USER_PROMPT_COMMAND[0]-}" ]]; then
@@ -463,7 +498,10 @@ _cosh_precmd_marker() {
     bind -m "$_cosh_keymap" -x '"\e[101~":_cosh_guard_recoverable_history_submission' 2>/dev/null || true
   done
   unset _cosh_keymap
-  IFS= read -r _COSH_USER_DEBUG_TRAP < "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" || true
+  _COSH_USER_DEBUG_TRAP=
+  if [[ -f "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" ]]; then
+    _COSH_USER_DEBUG_TRAP="$(<"${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap")"
+  fi
   rm -f -- "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" 2>/dev/null || true
   if [[ -n "${_COSH_USER_DEBUG_TRAP:-}" ]]; then
     eval "$_COSH_USER_DEBUG_TRAP"

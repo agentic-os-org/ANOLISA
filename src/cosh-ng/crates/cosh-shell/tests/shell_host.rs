@@ -279,6 +279,9 @@ where
 #[path = "shell_host/redaction.rs"]
 mod redaction;
 
+#[path = "shell_host/pressure_boundaries.rs"]
+mod pressure_boundaries;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "shell_host/replay_interrupt.rs"]
 mod replay_interrupt;

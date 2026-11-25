@@ -1,75 +1,8 @@
-use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+pub(crate) mod assistance_control;
 pub(crate) mod composer;
 pub(crate) mod path_prompt;
+pub(crate) use assistance_control::AssistanceControl;
 pub(crate) use path_prompt::{PathPromptIntercept, ShellPathCommandNames, ShellPromptCwd};
-
-#[derive(Debug, Clone)]
-pub(crate) struct AssistanceControl {
-    enabled: Arc<AtomicBool>,
-    at_prompt: Arc<AtomicBool>,
-    state_file: PathBuf,
-}
-
-impl AssistanceControl {
-    pub(crate) fn enabled(state_file: PathBuf) -> Self {
-        Self {
-            enabled: Arc::new(AtomicBool::new(true)),
-            at_prompt: Arc::new(AtomicBool::new(false)),
-            state_file,
-        }
-    }
-
-    pub(crate) fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn set_at_prompt(&self, at_prompt: bool) {
-        self.at_prompt.store(at_prompt, Ordering::Release);
-    }
-
-    pub(crate) fn is_at_prompt(&self) -> bool {
-        self.at_prompt.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn toggle(&self) -> std::io::Result<bool> {
-        self.set_enabled(!self.is_enabled())
-    }
-
-    pub(crate) fn set_enabled(&self, enabled: bool) -> std::io::Result<bool> {
-        if enabled {
-            if let Err(error) = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&self.state_file)
-            {
-                if error.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(error);
-                }
-            }
-        } else if let Err(error) = fs::remove_file(&self.state_file) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(error);
-            }
-        }
-        self.enabled.store(enabled, Ordering::Release);
-        Ok(enabled)
-    }
-}
-
-impl PartialEq for AssistanceControl {
-    fn eq(&self, other: &Self) -> bool {
-        self.state_file == other.state_file
-            && self.is_enabled() == other.is_enabled()
-            && self.is_at_prompt() == other.is_at_prompt()
-    }
-}
-
-impl Eq for AssistanceControl {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputClassifier {
@@ -79,6 +12,8 @@ pub struct InputClassifier {
     shell_passthrough: bool,
     bash_readline_history_privacy: bool,
     bash_slash_submission_guard: bool,
+    bash_pressure_guard: bool,
+    bash_pressure_recovery_file: Option<std::path::PathBuf>,
     assistance_control: Option<AssistanceControl>,
     shell_prompt_cwd: ShellPromptCwd,
     shell_path_command_names: ShellPathCommandNames,
@@ -102,6 +37,16 @@ impl InputClassifier {
 
     pub(crate) fn with_bash_slash_submission_guard(mut self, enabled: bool) -> Self {
         self.bash_slash_submission_guard = enabled;
+        self
+    }
+
+    pub(crate) fn with_bash_pressure_guard(mut self, enabled: bool) -> Self {
+        self.bash_pressure_guard = enabled;
+        self
+    }
+
+    pub(crate) fn with_bash_pressure_recovery_file(mut self, file: std::path::PathBuf) -> Self {
+        self.bash_pressure_recovery_file = Some(file);
         self
     }
 
@@ -131,6 +76,8 @@ impl Default for InputClassifier {
             shell_passthrough: false,
             bash_readline_history_privacy: false,
             bash_slash_submission_guard: false,
+            bash_pressure_guard: false,
+            bash_pressure_recovery_file: None,
             assistance_control: None,
             shell_prompt_cwd: ShellPromptCwd::default(),
             shell_path_command_names: ShellPathCommandNames::default(),
@@ -153,6 +100,17 @@ impl InputClassifier {
 
     pub(crate) fn bash_slash_submission_guard_enabled(&self) -> bool {
         self.bash_slash_submission_guard
+    }
+
+    pub(crate) fn bash_pressure_guard_enabled(&self) -> bool {
+        self.bash_pressure_guard
+    }
+
+    pub(crate) fn bash_pressure_recovery_pending(&self) -> bool {
+        self.bash_pressure_recovery_file
+            .as_ref()
+            .and_then(|file| std::fs::metadata(file).ok())
+            .is_some_and(|metadata| metadata.is_file() && metadata.len() != 0)
     }
 
     pub(crate) fn assistance_control(&self) -> Option<&AssistanceControl> {

@@ -112,15 +112,26 @@ fn assert_debug_log_has_only_bounded_cosh_capture(debug_log: &str) {
             .unwrap_or(line);
         assert!(
             command.starts_with("_COSH_PROMPT_STATUS=")
+                || command.starts_with("_COSH_PROMPT_TRAP_BASE=")
                 || command.starts_with("_COSH_PROMPT_DEBUG_TRAP=")
                 || command.starts_with("_COSH_PROMPT_RETURN_TRAP=")
                 || command.starts_with("_COSH_PROMPT_ERR_TRAP=")
+                || command.starts_with("_COSH_PROMPT_TRAPS=")
+                || command == "_COSH_PROMPT_TRAPS_SAVED=0"
+                || command == "_COSH_PROMPT_TRAPS_SAVED=1"
+                || command == "(( _COSH_PROMPT_TRAPS_SAVED ))"
+                || command == "unset _COSH_PROMPT_TRAPS_SAVED"
+                || command == "[[ -f \"${_COSH_PROMPT_TRAP_BASE}.traps\" ]]"
                 || command == "_COSH_PROMPT_XTRACE=0"
                 || command == "_COSH_PROMPT_XTRACE=1"
                 || command == "(( _COSH_PROMPT_XTRACE == 1 ))"
                 || command == "unset _COSH_PROMPT_XTRACE"
                 || (command.starts_with("trap -p DEBUG >")
-                    && command.contains("COSH_RECOVERY_REQUEST_FILE")),
+                    && command.contains("COSH_RECOVERY_REQUEST_FILE"))
+                || (command.starts_with("trap -p RETURN ERR DEBUG >")
+                    && command.contains("_COSH_PROMPT_TRAP_BASE"))
+                || (command.starts_with("trap -p RETURN ERR DEBUG 2>")
+                    && command.contains("_COSH_PROMPT_TRAP_BASE")),
             "unexpected Cosh internals in DEBUG trap: {line}\n{debug_log}"
         );
     }

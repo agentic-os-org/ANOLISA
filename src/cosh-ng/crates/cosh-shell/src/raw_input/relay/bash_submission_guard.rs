@@ -1,4 +1,6 @@
 use crate::input::InputClassifier;
+#[cfg(target_os = "linux")]
+use std::{fs, path::PathBuf, sync::OnceLock};
 
 use super::super::event_parser::NativeLineState;
 use super::super::event_parser::BRACKETED_PASTE_START;
@@ -14,7 +16,9 @@ pub(super) fn observe_untracked_readline_binding(
 ) {
     // Ctrl-X bindings can accept a line without CR/LF. Until the next real
     // prompt marker, the old PS1 cannot authorize private Readline guards.
-    if relay.input_classifier.bash_slash_submission_guard_enabled() {
+    if relay.input_classifier.bash_slash_submission_guard_enabled()
+        || relay.input_classifier.bash_pressure_guard_enabled()
+    {
         let mut prompt_scan = relay.line_submits.clone();
         if relay.line_buffer.is_active() {
             // Candidate paste delimiters may not have reached the PTY yet.
@@ -182,14 +186,44 @@ fn exact_slash_submission(input_classifier: &InputClassifier, bytes: &[u8]) -> b
 }
 
 pub(super) fn bash_submission_needs_guard(
-    enabled: bool,
+    pressure_enabled: bool,
     at_prompt: bool,
     input_classifier: &InputClassifier,
     state: &NativeLineState,
     line_submits: &LineSubmitCounter,
     bytes: &[u8],
 ) -> bool {
-    if !enabled || !at_prompt {
+    let enabled = input_classifier.bash_slash_submission_guard_enabled();
+    if !at_prompt
+        || (!enabled && !pressure_enabled)
+        || line_submits.first_submission(bytes).is_none()
+    {
+        return false;
+    }
+    bash_submission_needs_guard_with_overage(
+        enabled,
+        pressure_enabled,
+        at_prompt,
+        input_classifier,
+        state,
+        line_submits,
+        bytes,
+        pressure_enabled
+            && (input_classifier.bash_pressure_recovery_pending() || bash_memory_overage()),
+    )
+}
+
+pub(super) fn bash_submission_needs_guard_with_overage(
+    enabled: bool,
+    pressure_enabled: bool,
+    at_prompt: bool,
+    input_classifier: &InputClassifier,
+    state: &NativeLineState,
+    line_submits: &LineSubmitCounter,
+    bytes: &[u8],
+    memory_overage: bool,
+) -> bool {
+    if !at_prompt || !(enabled || pressure_enabled && memory_overage) {
         return false;
     }
     let Some(submit) = line_submits.first_submission(bytes) else {
@@ -212,5 +246,38 @@ pub(super) fn bash_submission_needs_guard(
         return true;
     };
     let first_word = line.split_whitespace().next().unwrap_or_default();
-    input_classifier.is_exact_slash_control_command(first_word)
+    (pressure_enabled && memory_overage)
+        || input_classifier.is_exact_slash_control_command(first_word)
+}
+
+#[cfg(target_os = "linux")]
+fn bash_memory_overage() -> bool {
+    static CGROUP_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let directory = CGROUP_DIR.get_or_init(|| {
+        let cgroup = fs::read_to_string("/proc/self/cgroup").ok()?;
+        let relative = cgroup.strip_prefix("0::")?.trim();
+        if !relative.starts_with('/') || relative == "/" {
+            return None;
+        }
+        let directory = PathBuf::from("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+        directory.join("memory.high").is_file().then_some(directory)
+    });
+    let Some(directory) = directory else {
+        return false;
+    };
+    let Ok(current) = fs::read_to_string(directory.join("memory.current")) else {
+        return false;
+    };
+    let Ok(high) = fs::read_to_string(directory.join("memory.high")) else {
+        return false;
+    };
+    match (current.trim().parse::<u64>(), high.trim().parse::<u64>()) {
+        (Ok(current), Ok(high)) => current > high,
+        _ => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bash_memory_overage() -> bool {
+    false
 }
