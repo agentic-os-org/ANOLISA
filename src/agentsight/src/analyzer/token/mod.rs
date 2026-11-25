@@ -321,25 +321,119 @@ pub fn extract_usage_object(
 ///
 /// Anthropic and Anthropic-compatible proxies split usage this way, so every
 /// consumer that folds SSE events must merge rather than let one event win.
+/// Tracks token usage accumulation across parsed SSE events and a possibly
+/// capped continuation prefix.
+///
+/// Authoritative `message_delta` fields (`input_tokens`,
+/// `cache_creation_input_tokens`, `cache_read_input_tokens`) lock those fields
+/// against stale preliminary values (`message_start`, earlier `message_delta`
+/// events, or unframed partial scans) when replaying a continuation buffer.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UsageFoldState {
+    pub usage: Option<TokenUsage>,
+    pub message_delta_count: usize,
+    pub locked_input: bool,
+    pub locked_cache_creation: bool,
+    pub locked_cache_read: bool,
+}
+
+impl UsageFoldState {
+    /// Merge a parsed `TokenUsage` snapshot without locking any authoritative
+    /// `message_delta` fields, preserving already-locked input/cache values.
+    pub(crate) fn merge_unframed(&mut self, next: TokenUsage) {
+        let Some(cur) = &mut self.usage else {
+            self.usage = Some(next);
+            return;
+        };
+        if !self.locked_input {
+            cur.input_tokens = cur.input_tokens.max(next.input_tokens);
+        }
+        cur.output_tokens = cur.output_tokens.max(next.output_tokens);
+        if !self.locked_cache_creation {
+            cur.cache_creation_input_tokens = max_opt(
+                cur.cache_creation_input_tokens,
+                next.cache_creation_input_tokens,
+            );
+        }
+        if !self.locked_cache_read {
+            cur.cache_read_input_tokens =
+                max_opt(cur.cache_read_input_tokens, next.cache_read_input_tokens);
+        }
+        if cur.model.is_none() {
+            cur.model = next.model;
+        }
+        if cur.provider == LLMProvider::Unknown {
+            cur.provider = next.provider;
+        }
+    }
+
+    /// Merge one parsed usage snapshot together with its source JSON event.
+    pub(crate) fn merge_from_event(&mut self, next: TokenUsage, event: &serde_json::Value) {
+        self.merge_unframed(next);
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("message_delta") {
+            return;
+        }
+        self.message_delta_count += 1;
+        let Some(cur) = &mut self.usage else {
+            return;
+        };
+        let Some(usage) = event.get("usage") else {
+            return;
+        };
+        if let Some(input_tokens) = usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
+            cur.input_tokens = input_tokens;
+            self.locked_input = true;
+        }
+        if let Some(cache_tokens) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
+            cur.cache_creation_input_tokens = Some(cache_tokens);
+            self.locked_cache_creation = true;
+        }
+        if let Some(cache_tokens) = usage
+            .get("cache_read_input_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
+            cur.cache_read_input_tokens = Some(cache_tokens);
+            self.locked_cache_read = true;
+        }
+    }
+
+    /// Merge an event recovered from the continuation buffer without letting a
+    /// capped-prefix `message_start` or earlier `message_delta` override newer
+    /// authoritative values already folded from parsed SSE events.
+    pub(crate) fn merge_continuation_event(
+        &mut self,
+        next: TokenUsage,
+        event: Option<&serde_json::Value>,
+        parsed_message_delta_count: usize,
+        cont_message_delta_seen: &mut usize,
+    ) {
+        if let Some(event_json) = event {
+            if event_json.get("type").and_then(serde_json::Value::as_str) == Some("message_delta") {
+                *cont_message_delta_seen += 1;
+                if *cont_message_delta_seen <= parsed_message_delta_count {
+                    return;
+                }
+                self.merge_from_event(next, event_json);
+                return;
+            }
+        }
+        self.merge_unframed(next);
+    }
+}
+
 pub(crate) fn merge_usage(acc: Option<TokenUsage>, next: TokenUsage) -> Option<TokenUsage> {
-    let Some(mut cur) = acc else {
-        return Some(next);
+    let mut state = UsageFoldState {
+        usage: acc,
+        ..Default::default()
     };
-    cur.input_tokens = cur.input_tokens.max(next.input_tokens);
-    cur.output_tokens = cur.output_tokens.max(next.output_tokens);
-    cur.cache_creation_input_tokens = max_opt(
-        cur.cache_creation_input_tokens,
-        next.cache_creation_input_tokens,
-    );
-    cur.cache_read_input_tokens =
-        max_opt(cur.cache_read_input_tokens, next.cache_read_input_tokens);
-    if cur.model.is_none() {
-        cur.model = next.model;
-    }
-    if cur.provider == LLMProvider::Unknown {
-        cur.provider = next.provider;
-    }
-    Some(cur)
+    state.merge_unframed(next);
+    state.usage
 }
 
 /// Merge one parsed usage snapshot with its source event.
@@ -353,33 +447,12 @@ pub(crate) fn merge_usage_from_event(
     next: TokenUsage,
     event: &serde_json::Value,
 ) -> Option<TokenUsage> {
-    let mut merged = merge_usage(acc, next)?;
-    if event.get("type").and_then(serde_json::Value::as_str) != Some("message_delta") {
-        return Some(merged);
-    }
-
-    let Some(usage) = event.get("usage") else {
-        return Some(merged);
+    let mut state = UsageFoldState {
+        usage: acc,
+        ..Default::default()
     };
-    if let Some(input_tokens) = usage
-        .get("input_tokens")
-        .and_then(serde_json::Value::as_u64)
-    {
-        merged.input_tokens = input_tokens;
-    }
-    if let Some(cache_tokens) = usage
-        .get("cache_creation_input_tokens")
-        .and_then(serde_json::Value::as_u64)
-    {
-        merged.cache_creation_input_tokens = Some(cache_tokens);
-    }
-    if let Some(cache_tokens) = usage
-        .get("cache_read_input_tokens")
-        .and_then(serde_json::Value::as_u64)
-    {
-        merged.cache_read_input_tokens = Some(cache_tokens);
-    }
-    Some(merged)
+    state.merge_from_event(next, event);
+    state.usage
 }
 
 /// Max of two optional counters, preserving a value when only one is set.
