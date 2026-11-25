@@ -75,18 +75,30 @@ fi
 # Extract version number
 VERSION_CLEAN="$(echo "$VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")"
 
-# Use jq --arg to safely embed variables into JSON — avoids broken output
-# when paths contain characters that need JSON escaping.
+# Escape a value for a JSON string. jq does this on the branch below; without it
+# a path holding a quote or a backslash produced invalid JSON, and a caller that
+# cannot parse the status learns nothing about the adapter.
+json_escape() {
+    local text="$1"
+    text="${text//\\/\\\\}"   # backslash first, or it re-escapes the rest
+    text="${text//\"/\\\"}"     # double quote
+    text="${text//$'\t'/\\t}"    # control characters are not valid in a
+    text="${text//$'\n'/\\n}"    # JSON string; a path carrying one is
+    text="${text//$'\r'/\\r}"    # pathological, so escape the likely three
+    printf '%s' "$text"
+}
+
+# Use jq --arg to safely embed variables into JSON when it is available.
 if command -v jq &>/dev/null; then
   jq -n --arg ver "$VERSION_CLEAN" --arg p "$TOKENLESS_BIN" --arg st "$STATUS" \
     '{installed: true, status: $st, version: $ver, path: $p}'
 else
-  cat <<EOF
-{
-  "installed": true,
-  "status": "$STATUS",
-  "version": "$VERSION_CLEAN",
-  "path": "$TOKENLESS_BIN"
-}
-EOF
+  # No jq: escape by hand and emit with the shell's own printf, so this branch
+  # depends on no external tool and stays parseable for any path. A path holding
+  # a quote used to be interpolated raw, and the exit 0 that followed let a
+  # caller read a registration nobody had verified.
+  printf '{\n  "installed": true,\n  "status": "%s",\n  "version": "%s",\n  "path": "%s"\n}\n' \
+    "$(json_escape "$STATUS")" \
+    "$(json_escape "$VERSION_CLEAN")" \
+    "$(json_escape "$TOKENLESS_BIN")"
 fi

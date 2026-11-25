@@ -374,6 +374,53 @@ else
     fi
 fi
 
+# ── The jq-free branch must still emit parseable JSON ───────────────────────
+# A tokenless path holding a double quote used to be interpolated raw into a
+# heredoc, so a host without jq received invalid JSON together with exit 0 - and
+# a caller that could not parse the status fell back to the exit code and read
+# it as a registered adapter.
+quoted_dir="$SANDBOX/we\"ird"
+mkdir -p "$quoted_dir"
+cat > "$quoted_dir/tokenless" <<'STUBEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && echo "tokenless 0.0.0-test"
+exit 0
+STUBEOF
+chmod +x "$quoted_dir/tokenless"
+
+# The usual shell tools, but no jq, so the fallback branch is the one that runs.
+nojq_bin="$SANDBOX/nojq-bin"
+mkdir -p "$nojq_bin"
+for tool in bash cat dirname grep head sed tr; do
+    tool_path="$(command -v "$tool" 2>/dev/null || true)"
+    [ -n "$tool_path" ] && ln -sf "$tool_path" "$nojq_bin/$tool"
+done
+
+quoted_out="$(env -i PATH="$quoted_dir:$SANDBOX/bin:$nojq_bin" HOME="$FAKE_HOME" \
+    XDG_DATA_HOME="$XDG" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    ANOLISA_COMPONENT=tokenless ANOLISA_TARGET=codex bash "$DETECT_SH" 2>/dev/null)"
+quoted_rc=$?
+if [ "$quoted_rc" -eq 0 ]; then
+    pass "detect stays fail-open on the jq-free path"
+else
+    fail "detect exited $quoted_rc on the jq-free path"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$quoted_out" | QUOTED_EXPECT="$quoted_dir/tokenless" python3 -c '
+import json, os, sys
+document = json.load(sys.stdin)
+assert document["path"] == os.environ["QUOTED_EXPECT"], document
+assert document["installed"] is True, document
+assert document["status"] in ("installable", "missing_prereqs"), document
+'; then
+        pass "the jq-free branch escapes a quoted path into parseable JSON"
+    else
+        fail "the jq-free branch did not emit parseable JSON: $quoted_out"
+    fi
+else
+    skip "the jq-free branch JSON check (no python3)"
+fi
+
 echo ""
 echo "Codex adapter tests: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]

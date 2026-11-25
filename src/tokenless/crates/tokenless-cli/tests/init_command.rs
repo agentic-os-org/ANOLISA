@@ -860,7 +860,11 @@ fn pre_contract_codex_with_an_unusable_host_pin_never_reports_success() {
         "batch mode reported success:\n{}",
         batch.combined()
     );
-    assert!(fixture.installed().is_empty());
+    assert!(
+        fixture.installed().is_empty(),
+        "batch mode ran the installer: {:?}",
+        fixture.installed()
+    );
 }
 
 /// The shipped OpenCode detector already used the tri-state contract before the
@@ -980,14 +984,17 @@ fn bundled_adapters() -> PathBuf {
 }
 
 /// An adapter tree holding only the *shipped* Codex detector, so the contract
-/// under test is the real script rather than a stub of it.
+/// An adapter tree holding only the *shipped* Codex detector, so the contract
+/// under test is the real script rather than a stub of it. Its installer is a
+/// recording stub: the shipped one needs a live Codex host.
 struct CodexFixture {
     _root: TempDir,
     adapter_dir: PathBuf,
     home: PathBuf,
     data_root: PathBuf,
-    /// Put on PATH ahead of the system directories.
+    /// Put on PATH ahead of whatever else a test asks for.
     bin: PathBuf,
+    log: PathBuf,
 }
 
 impl CodexFixture {
@@ -1000,16 +1007,25 @@ impl CodexFixture {
         for name in ["detect.sh", "_common.sh"] {
             fs::copy(bundled.join(name), scripts.join(name)).expect("copy shipped detector");
         }
+        let log = root.path().join("install.log");
         fs::write(
             adapter_dir.join("manifest.json"),
             concat!(
                 r#"{"component":"tokenless","version":"0.0.0-test","#,
                 r#""detectContract":"status-v1","#,
                 r#""targets":{"codex":{"compatibleVersions":"*","#,
-                r#""actions":{"detect":"codex/scripts/detect.sh"}}}}"#
+                r#""actions":{"detect":"codex/scripts/detect.sh","#,
+                r#""install":"codex/scripts/install.sh"}}}}"#
             ),
         )
         .expect("write manifest");
+        write_script(
+            &scripts.join("install.sh"),
+            &format!(
+                "#!/usr/bin/env bash\nprintf 'installer-ran\\n' >> '{}'\n",
+                log.display()
+            ),
+        );
         let home = root.path().join("home");
         let data_root = root.path().join("data");
         let bin = root.path().join("bin");
@@ -1021,6 +1037,7 @@ impl CodexFixture {
             home,
             data_root,
             bin,
+            log,
         }
     }
 
@@ -1031,15 +1048,20 @@ impl CodexFixture {
     }
 
     fn command(&self, args: &[&str]) -> Command {
+        // System directories stay reachable so Bash itself is found; the
+        // fixture bin comes first so a stub host wins over any real one.
+        self.command_with_path(args, &format!("{}:/usr/bin:/bin", self.bin.display()))
+    }
+
+    /// A command with an explicit PATH, for runs that must not find `jq`.
+    fn command_with_path(&self, args: &[&str], path: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tokenless"));
         command
             .args(args)
             .env("ANOLISA_ADAPTER_DIR", &self.adapter_dir)
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", &self.data_root)
-            // System directories stay reachable so Bash itself is found; the
-            // fixture bin comes first so a stub host wins over any real one.
-            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .env("PATH", path)
             .env_remove("CODEX_BIN")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1050,6 +1072,36 @@ impl CodexFixture {
     fn marketplace(&self) -> PathBuf {
         self.data_root.join("anolisa/codex-marketplace")
     }
+
+    /// How many times the fixture installer ran.
+    fn install_runs(&self) -> usize {
+        match fs::read_to_string(&self.log) {
+            Ok(contents) => contents.lines().count(),
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Absolute path of a tool on the test runner's PATH.
+#[cfg(unix)]
+fn tool_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Fill `dir` with the usual shell tools but not `jq`, so a PATH built from it
+/// exercises the detector's jq-free branch.
+#[cfg(unix)]
+fn link_shell_tools(dir: &Path) -> bool {
+    ["bash", "cat", "dirname", "grep", "head", "sed", "tr"]
+        .iter()
+        .all(|tool| match tool_path(tool) {
+            Some(source) => std::os::unix::fs::symlink(source, dir.join(tool)).is_ok(),
+            None => false,
+        })
 }
 
 #[test]
@@ -1079,8 +1131,9 @@ fn shipped_codex_detector_refuses_an_unusable_host_pin() {
         "a host that cannot register was reported as installed:\n{}",
         run.combined()
     );
-    assert!(
-        !run.combined().contains("skipping plugin registration"),
+    assert_eq!(
+        fixture.install_runs(),
+        0,
         "install.sh ran although registration was impossible:\n{}",
         run.combined()
     );
@@ -1108,6 +1161,112 @@ fn shipped_codex_detector_is_installable_with_a_resolvable_host() {
         !list.stdout.contains("predate the detector status contract"),
         "the bundled tree was reported as stale:\n{}",
         list.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-06 — a status document that does not parse is not an answer
+// ---------------------------------------------------------------------------
+
+/// What the shipped Codex detector emitted on a jq-free host whose `tokenless`
+/// lived under a directory name holding a double quote: a document that starts
+/// like JSON, never closes its string, and is followed by exit 0.
+const BROKEN_STATUS_DETECT: &str = r#"#!/usr/bin/env bash
+printf '%s' '{"installed": true, "status": "installable", "path": "/opt/we"ird/tokenless"}'
+exit 0
+"#;
+
+#[test]
+fn an_unparseable_status_document_is_not_read_as_ready() {
+    let fixture = Fixture::new(&[Target::new("one", BROKEN_STATUS_DETECT)]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "one"), "installable");
+    assert!(
+        list.stdout.contains("not parseable JSON"),
+        "the unreadable answer was not reported:\n{}",
+        list.stdout
+    );
+
+    // Falling back to installable keeps the idempotent installer in play rather
+    // than skipping the registration it would have performed.
+    let named = run(&fixture, &["init", "--framework", "one"]);
+    named.assert_code(0);
+    assert_eq!(fixture.installed(), vec!["one".to_string()]);
+}
+
+#[test]
+fn an_unparseable_status_document_does_not_resurrect_a_pre_contract_target() {
+    // The host-only inventory still wins: a broken answer from a detector that
+    // never described the adapter cannot make it installable.
+    let fixture = Fixture::legacy(&[Target::new("codex", BROKEN_STATUS_DETECT)]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "unverified");
+
+    let named = run(&fixture, &["init", "--framework", "codex"]);
+    named.assert_code(1);
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command reached the installer: {:?}",
+        fixture.installed()
+    );
+}
+
+/// The shipped detector against a quoted path and a PATH without `jq`.
+#[test]
+#[cfg(unix)]
+fn shipped_codex_detector_stays_parseable_without_jq() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    let quoted = fixture._root.path().join("we\"ird");
+    fs::create_dir_all(&quoted).expect("create quoted directory");
+    write_script(
+        &quoted.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if !link_shell_tools(&tools) {
+        // No way to build a jq-free PATH on this host; the adapter shell suite
+        // covers the same detector output.
+        return;
+    }
+    let path = format!(
+        "{}:{}:{}",
+        quoted.display(),
+        fixture.bin.display(),
+        tools.display()
+    );
+
+    let list = finish(
+        fixture
+            .command_with_path(&["init", "--list"], &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "installable");
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "the shipped detector emitted unparseable JSON:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "a fresh install never reached the installer:\n{}",
+        named.combined()
     );
 }
 

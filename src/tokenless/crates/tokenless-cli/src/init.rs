@@ -34,6 +34,12 @@
 //! nothing about their adapter state can be established and their installers
 //! exit successfully without registering anything.
 //!
+//! A detector that publishes a status document owes the caller valid JSON. When
+//! its output was meant to be JSON but does not parse, the answer is treated as
+//! absent rather than letting the exit code stand in for it: a codex detector
+//! without `jq` once interpolated an unescaped path, and the exit 0 that
+//! followed then reported a registration nobody had verified.
+//!
 //! Every lifecycle script is Bash, so a host without it cannot report any
 //! status. A detector that cannot be launched is an error rather than an
 //! adapter state: folding it into `missing prereqs` let `--all` exit 0 with
@@ -181,6 +187,9 @@ struct FrameworkInfo {
     status: DetectStatus,
     capabilities: Vec<String>,
     install_script: Option<String>,
+    /// The detector published something meant to be JSON that did not parse, so
+    /// `status` is a conservative fallback rather than the detector's answer.
+    status_unreadable: bool,
 }
 
 /// Why one target the caller selected could not be installed.
@@ -282,10 +291,10 @@ fn run_detect(
     name: &str,
     detect_script: &str,
     contract: DetectorContract,
-) -> Result<DetectStatus, String> {
+) -> Result<(DetectStatus, bool), String> {
     let script = adapter_dir.join(detect_script);
     if !script.exists() {
-        return Ok(DetectStatus::NotChecked);
+        return Ok((DetectStatus::NotChecked, false));
     }
     match Command::new("bash")
         .arg(&script)
@@ -294,11 +303,13 @@ fn run_detect(
         .env("ANOLISA_ADAPTER_DIR", adapter_dir)
         .output()
     {
-        Ok(out) => Ok(interpret_detect(
-            out.status.code(),
-            &String::from_utf8_lossy(&out.stdout),
-            contract,
-        )),
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            Ok((
+                interpret_detect(out.status.code(), &stdout, contract),
+                status_unreadable(&stdout),
+            ))
+        }
         Err(e) => Err(format!("{}: {}", script.display(), e)),
     }
 }
@@ -344,10 +355,24 @@ fn interpret_detect(
 
     match exit_code {
         Some(0) if uninstalled => DetectStatus::Installable,
+        // A status document that did not parse is not evidence of
+        // registration. Falling back to installable keeps an idempotent
+        // installer in play instead of skipping the registration it would do.
+        Some(0) if status_unreadable(stdout) => DetectStatus::Installable,
         Some(0) => DetectStatus::Ready,
         Some(1) => DetectStatus::Installable,
         _ => DetectStatus::MissingPrereqs,
     }
+}
+
+/// True when a detector meant to publish a JSON status and produced something
+/// unparseable.
+///
+/// Every shipped text detector starts its output with `[tokenless]`, so a
+/// leading brace is a deliberate JSON document — a partial one is a bug in the
+/// detector, not a prose line that happens to look like JSON.
+fn status_unreadable(stdout: &str) -> bool {
+    stdout.trim_start().starts_with('{') && json_objects(stdout).is_empty()
 }
 
 /// JSON objects a detector published on stdout.
@@ -439,28 +464,30 @@ fn collect_frameworks(
                     status: DetectStatus::NotChecked,
                     capabilities,
                     install_script: None,
+                    status_unreadable: false,
                 };
             };
-            let status = match &actions.detect {
+            let (status, status_unreadable) = match &actions.detect {
                 Some(detect) => {
                     let contract = DetectorContract::for_target(declared, name);
                     match run_detect(adapter_dir, name, detect, contract) {
-                        Ok(status) => status,
+                        Ok(reading) => reading,
                         Err(reason) => {
                             if launch_failure.is_none() {
                                 launch_failure = Some(reason);
                             }
-                            DetectStatus::Unavailable
+                            (DetectStatus::Unavailable, false)
                         }
                     }
                 }
-                None => DetectStatus::NotChecked,
+                None => (DetectStatus::NotChecked, false),
             };
             FrameworkInfo {
                 name: name.clone(),
                 status,
                 capabilities,
                 install_script: actions.install.clone(),
+                status_unreadable,
             }
         })
         .collect();
@@ -526,6 +553,25 @@ fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path) {
             "         {}",
             incompatible_resources_error(&unverified.join(", "), adapter_dir)
         );
+    }
+
+    // A detector that published unparseable JSON gave no answer, so the status
+    // in its row is this command's fallback rather than the detector's own.
+    let unreadable: Vec<&str> = frameworks
+        .iter()
+        .filter(|fw| fw.status_unreadable)
+        .map(|fw| fw.name.as_str())
+        .collect();
+    if !unreadable.is_empty() {
+        println!();
+        for name in unreadable {
+            println!(
+                "warning: {name}'s detector printed output that is not parseable JSON, so its \
+                 answer could not be read and the status above is a fallback. Reinstall \
+                 tokenless to refresh the adapter resources at {dir}.",
+                dir = adapter_dir.display()
+            );
+        }
     }
 
     // A detector can report installable for a target whose manifest declares no
@@ -929,6 +975,51 @@ mod tests {
         assert!(
             !parse(&format!(r#"{{"component":"tokenless"{targets}}}"#)).declares_detect_contract()
         );
+    }
+
+    /// The jq-free codex detector output a path holding a quote used to
+    /// produce: a document that starts like JSON and never closes a string.
+    const BROKEN_CODEX_STATUS: &str = "{\n  \"installed\": true,\n  \"status\": \"installable\",\n  \"path\": \"/opt/we\"ird/tokenless\"\n}\n";
+
+    #[test]
+    fn an_unparseable_status_document_is_not_readiness() {
+        assert!(status_unreadable(BROKEN_CODEX_STATUS));
+        assert_eq!(
+            declared(Some(0), BROKEN_CODEX_STATUS),
+            DetectStatus::Installable
+        );
+        // A declared tree is the case that regressed: exit 0 alone must not
+        // stand in for an answer the detector failed to publish.
+        assert_ne!(declared(Some(0), BROKEN_CODEX_STATUS), DetectStatus::Ready);
+    }
+
+    #[test]
+    fn an_unparseable_status_document_changes_no_other_contract() {
+        // A host-only detector is refused either way, and the negative answers
+        // still win over the fallback.
+        assert_eq!(
+            legacy_host_only(Some(0), BROKEN_CODEX_STATUS),
+            DetectStatus::Unverifiable
+        );
+        assert_eq!(
+            declared(Some(1), BROKEN_CODEX_STATUS),
+            DetectStatus::Installable
+        );
+        assert_eq!(
+            declared(Some(2), BROKEN_CODEX_STATUS),
+            DetectStatus::MissingPrereqs
+        );
+    }
+
+    #[test]
+    fn only_an_intended_json_document_can_be_unreadable() {
+        assert!(!status_unreadable(""));
+        assert!(!status_unreadable("[tokenless] opencode: ready (1.2.3)\n"));
+        assert!(!status_unreadable("[tokenless] detect\n{not json}\n"));
+        assert!(!status_unreadable("{\"status\": \"ready\"}"));
+        assert!(!status_unreadable("{\n  \"installed\": false\n}\n"));
+        assert!(status_unreadable("{\"status\": }"));
+        assert!(status_unreadable("  { broken"));
     }
 
     #[test]
