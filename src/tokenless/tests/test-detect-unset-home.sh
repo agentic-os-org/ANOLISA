@@ -25,8 +25,9 @@
 #
 # A fourth block covers the state dir a caller configures explicitly. That value
 # is a decision of its own, not a HOME fallback, so it must be probed exactly as
-# given: a trailing slash is trimmed, and a bare "/" stays "/" instead of being
-# mistaken for "no state dir at all".
+# given: trailing slashes are trimmed and every other byte of the name reaches
+# the probes untouched -- a bare "/" stays "/" instead of being mistaken for "no
+# state dir at all", and a name ending in a newline keeps that newline.
 #
 # Every run is isolated from the adapter overrides a developer shell may already
 # carry (HERMES_HOME, OPENCLAW_HOME, OPENCLAW_STATE_DIR). Cases 1-3 measure the
@@ -200,6 +201,18 @@ detect openclaw HOME="$EMPTY_HOME" OPENCLAW_STATE_DIR="$EXPLICIT_STATE//"
 expect_report "$stdout" "present ($EXPLICIT_STATE)" \
     "openclaw trimmed only one of the trailing slashes of an explicit OPENCLAW_STATE_DIR"
 
+# Only the slashes may go. A name that ends in a newline is legal, and trimming
+# it through a command substitution would delete that newline -- bash strips
+# trailing newlines from $(...) -- so the detector would probe a directory that
+# does not exist and report a configured state dir as missing.
+NEWLINE_STATE="$TEST_DIR/newline-state"$'\n'
+mkdir -p "$NEWLINE_STATE/extensions/tokenless"
+detect openclaw HOME="$EMPTY_HOME" OPENCLAW_STATE_DIR="$NEWLINE_STATE/"
+expect_report "$stdout" "present ($NEWLINE_STATE)" \
+    "openclaw dropped the trailing newline of an explicit OPENCLAW_STATE_DIR"
+expect_report "$stdout" "installed ($NEWLINE_STATE/extensions/tokenless)" \
+    "openclaw probed the wrong directory for a state dir whose name ends in a newline"
+
 # A bare "/" is a real, if unusual, state dir. `${dir%/}` collapses it to "", and
 # an empty state dir is exactly how "HOME is unset" is reported, so an unguarded
 # trim turns the explicit root into a missing one: "/bin" leaves PATH,
@@ -223,6 +236,6 @@ expect_report "$stdout" "present (/)" \
 refuse_report "$stdout" "HOME is unset" \
     "hermes blamed an unset HOME for an explicit HERMES_HOME=/"
 
-echo "  explicit state dir: trailing slash trimmed, bare / still probed"
+echo "  explicit state dir: trailing slashes trimmed, rest of the name kept, bare / still probed"
 
 echo "detect unset-HOME test passed"
