@@ -33,12 +33,13 @@ pub(super) fn decide(input: &ArbitrationInput<'_>) -> Verdict {
     if input.require_reversibility && input.recoverability == Recoverability::Unrecoverable {
         return Verdict::Reject(Disposition::RecoverabilityUnavailable);
     }
+    let saves_bytes = input.candidate.len() < input.original.len();
     let saves_chars = input.candidate.chars().count() < input.original.chars().count();
     let original_tokens = estimate_tokens(input.original);
     let candidate_tokens = estimate_tokens(input.candidate);
     let saves_tokens = candidate_tokens < original_tokens
         && original_tokens - candidate_tokens >= input.min_token_savings;
-    if !(saves_chars && saves_tokens) {
+    if !(saves_bytes && saves_chars && saves_tokens) {
         return Verdict::Reject(Disposition::NoSavings);
     }
     if input.dry_run {

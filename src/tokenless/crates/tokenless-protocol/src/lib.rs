@@ -261,6 +261,25 @@ pub struct BeforeModelResponse {
     pub visible_markers: Vec<String>,
 }
 
+/// Level of PostTool output replacement supported by the calling host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostToolReplacementCapability {
+    /// Host supports full PostTool replacement including CCR/stash recovery.
+    #[default]
+    FullRetrievable,
+    /// Host supports lossless PostTool replacement only (no retrievable stash markers).
+    LosslessOnly,
+    /// Host does not support PostTool output replacement.
+    None,
+}
+
+impl PostToolReplacementCapability {
+    fn is_default(&self) -> bool {
+        *self == Self::FullRetrievable
+    }
+}
+
 /// Host capabilities relevant to PreTool.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -271,6 +290,12 @@ pub struct PreToolCapabilities {
     /// The host can block this call and suggest a retry.
     #[serde(default)]
     pub block_and_suggest: bool,
+    /// PostTool replacement capability declared by the host.
+    #[serde(
+        default,
+        skip_serializing_if = "PostToolReplacementCapability::is_default"
+    )]
+    pub post_tool_replacement: PostToolReplacementCapability,
 }
 
 /// Input for the PreTool lifecycle operation.
@@ -413,6 +438,18 @@ pub struct PostToolRequest {
     pub output_optimization: OutputOptimization,
     /// Host capabilities for applying the result.
     pub capabilities: PostToolCapabilities,
+    /// Process exit status reported by the host, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Separate stderr stream when the host keeps stdout and stderr split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    /// Original pre-rewrite command line, when retained by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_command: Option<String>,
+    /// Working directory where the command ran, when provided by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// Final PostTool disposition.

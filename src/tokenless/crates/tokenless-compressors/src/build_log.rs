@@ -12,6 +12,7 @@ mod scope;
 mod template;
 mod trace;
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
@@ -19,7 +20,10 @@ use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, compute_key, recover
 use tokenless_protocol::estimate_tokens;
 
 use crate::terminal_cleanup::clean_terminal;
-use classify::{BuildLogFormat, Evidence, LineRole, RoutineFamily, classify, format_evidence};
+use classify::{
+    BuildLogFormat, Evidence, LineRole, RoutineFamily, classify, format_evidence,
+    is_failure_mode_anchor,
+};
 use template::generic_progress_template;
 use trace::trace_regions;
 
@@ -27,8 +31,21 @@ const SAMPLE_LINES_PER_END: usize = 100;
 const SAMPLE_BYTES_PER_END: usize = 32 * 1024;
 const MIN_ROUTINE_RUN_LINES: usize = 9;
 const ROUTINE_EDGE_LINES: usize = 2;
-const MAX_OMISSION_BLOCKS: usize = 8;
+// Allow up to 24 omission blocks sorted by net savings rather than aborting at 8;
+// keeping top-24 bounds worst-case stash writes and recovery markers in one output.
+const MAX_OMISSION_BLOCKS: usize = 24;
 const GENERIC_TEMPLATE_MIN_LINES: usize = 9;
+
+/// Execution outcome context guiding build-log omission strictness.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BuildLogMode {
+    /// Normal successful build or test output.
+    #[default]
+    Success,
+    /// Non-zero exit output carrying failure diagnostics; restricts omissions to
+    /// whitelisted routine families and preserves error, assertion, and caret anchors.
+    DiagnosticFailure,
+}
 
 struct LayoutEdit {
     start: usize,
@@ -88,6 +105,10 @@ pub struct BuildLogCompressor;
 
 impl BuildLogCompressor {
     /// Detects a supported build/test log using a bounded head-and-tail sample.
+    ///
+    /// Note that detection is mode-unaware (evaluates as `BuildLogMode::Success`);
+    /// generic-only logs may return `true` here yet yield a lossless-only or unchanged
+    /// outcome under `BuildLogMode::DiagnosticFailure`, where generic templates are disabled.
     #[must_use]
     pub fn detect(input: &str) -> bool {
         detect_log(input).route.is_some()
@@ -96,7 +117,7 @@ impl BuildLogCompressor {
     /// Builds the smallest valid build-log candidate under the recovery policy.
     #[must_use]
     pub fn compress(&self, input: &str, stash: Option<&dyn StashStore>) -> BuildLogOutcome {
-        self.compress_with_recovery(input, stash, &RecoveryMethod::Shell)
+        self.compress_with_options(input, stash, &RecoveryMethod::Shell, BuildLogMode::Success)
     }
 
     /// Measures and renders omissions using the caller's actual recovery entry point.
@@ -107,6 +128,18 @@ impl BuildLogCompressor {
         stash: Option<&dyn StashStore>,
         recovery: &RecoveryMethod,
     ) -> BuildLogOutcome {
+        self.compress_with_options(input, stash, recovery, BuildLogMode::Success)
+    }
+
+    /// Measures and renders omissions using the caller's recovery entry point and execution mode.
+    #[must_use]
+    pub fn compress_with_options(
+        &self,
+        input: &str,
+        stash: Option<&dyn StashStore>,
+        recovery: &RecoveryMethod,
+        mode: BuildLogMode,
+    ) -> BuildLogOutcome {
         let cleaned = clean_terminal(input);
         let cleanup_changed = cleaned != input;
         let mut lossless_operations = cleanup_changed
@@ -114,7 +147,7 @@ impl BuildLogCompressor {
             .into_iter()
             .collect::<Vec<_>>();
         let store = stash.filter(|_| recovery.is_available());
-        let detected = detect_log(&cleaned);
+        let detected = detect_log_with_mode(&cleaned, mode);
         let Some(route) = detected.route else {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
@@ -138,14 +171,27 @@ impl BuildLogCompressor {
         for region in trace_regions(&stripped) {
             diagnostic_mask[region].fill(true);
         }
+        if mode == BuildLogMode::DiagnosticFailure {
+            for (mask, line) in diagnostic_mask.iter_mut().zip(&stripped) {
+                if is_failure_mode_anchor(line.trim()) {
+                    *mask = true;
+                }
+            }
+        }
 
         // Stage 1: lossless structural layout planning (independent of Stash availability).
         let stage1 = plan_stage1(route, &lines, &diagnostic_mask);
         let mut layouts = stage1.layouts;
 
         // Stage 2: residual line-role classification for optional Stash omission.
-        let (mut roles, run_starts) =
-            build_stage2_roles(stage1.residual, &detected.sample, &lines, &stripped, store);
+        let (mut roles, run_starts) = build_stage2_roles(
+            stage1.residual,
+            &detected.sample,
+            &lines,
+            &stripped,
+            store,
+            mode,
+        );
         for (role, &is_diag) in roles.iter_mut().zip(&diagnostic_mask) {
             if is_diag {
                 *role = LineRole::Diagnostic;
@@ -168,9 +214,7 @@ impl BuildLogCompressor {
         let Some(store) = store else {
             return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         };
-        let Some(plans) = omission_plans(&lines, &roles, &run_starts, recovery) else {
-            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
-        };
+        let plans = omission_plans(&lines, &roles, &run_starts, recovery);
         if plans.is_empty() {
             return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
         }
@@ -248,13 +292,19 @@ fn saves_both(original: &str, candidate: &str) -> bool {
         && estimate_tokens(candidate) < estimate_tokens(original)
 }
 
+struct ScoredOmissionPlan {
+    plan: OmissionPlan,
+    saved_tokens: usize,
+    saved_bytes: usize,
+}
+
 fn omission_plans(
     lines: &[&str],
     roles: &[LineRole],
     run_starts: &HashSet<usize>,
     recovery: &RecoveryMethod,
-) -> Option<Vec<OmissionPlan>> {
-    let mut plans = Vec::new();
+) -> Vec<OmissionPlan> {
+    let mut scored = Vec::new();
     let mut index = 0;
     while index < roles.len() {
         let LineRole::Routine(family) = roles[index] else {
@@ -279,20 +329,36 @@ fn omission_plans(
                 recovery,
             );
             if saves_both(&payload, &marker) {
-                plans.push(OmissionPlan {
-                    start,
-                    end: omitted_end,
-                    family,
-                    payload,
+                let saved_tokens =
+                    estimate_tokens(&payload).saturating_sub(estimate_tokens(&marker));
+                let saved_bytes = payload.len().saturating_sub(marker.len());
+                scored.push(ScoredOmissionPlan {
+                    plan: OmissionPlan {
+                        start,
+                        end: omitted_end,
+                        family,
+                        payload,
+                    },
+                    saved_tokens,
+                    saved_bytes,
                 });
-                if plans.len() > MAX_OMISSION_BLOCKS {
-                    return None;
-                }
             }
         }
         index = end;
     }
-    Some(plans)
+    if scored.len() > MAX_OMISSION_BLOCKS {
+        // Keep the highest-net-savings omission intervals and restore ascending
+        // source order so render_reduced's single-pass cursor remains valid.
+        scored.sort_by_key(|entry| {
+            (
+                Reverse((entry.saved_tokens, entry.saved_bytes)),
+                entry.plan.start,
+            )
+        });
+        scored.truncate(MAX_OMISSION_BLOCKS);
+        scored.sort_by_key(|entry| entry.plan.start);
+    }
+    scored.into_iter().map(|entry| entry.plan).collect()
 }
 
 fn render_reduced(
@@ -480,13 +546,14 @@ fn classify_scored_lines(
     format: BuildLogFormat,
     stripped: &[String],
     maven_transfers: &[bool],
+    mode: BuildLogMode,
 ) -> Vec<LineRole> {
     let templates = dominant_generic_templates(format, stripped);
     stripped
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let role = classify(line, format, &templates);
+            let role = classify(line, format, &templates, mode);
             if role == LineRole::Unknown && maven_transfers.get(index).copied().unwrap_or(false) {
                 LineRole::Routine(RoutineFamily::Generic)
             } else {
@@ -502,9 +569,14 @@ fn scoped_fallback_roles(
     protected_ranges: &[Range<usize>],
     store: Option<&dyn StashStore>,
     is_protected_step: fn(&str) -> bool,
+    mode: BuildLogMode,
 ) -> Vec<LineRole> {
     let sub_format = if store.is_some() {
-        detect_scored_format(sample).or_else(|| detect_generic(sample))
+        detect_scored_format(sample).or_else(|| {
+            (mode == BuildLogMode::Success)
+                .then(|| detect_generic(sample))
+                .flatten()
+        })
     } else {
         None
     };
@@ -524,7 +596,7 @@ fn scoped_fallback_roles(
             {
                 LineRole::Summary
             } else {
-                classify(line, sub_format, &templates)
+                classify(line, sub_format, &templates, mode)
             }
         })
         .collect::<Vec<_>>();
@@ -540,12 +612,16 @@ fn build_stage2_roles(
     lines: &[&str],
     stripped: &[String],
     store: Option<&dyn StashStore>,
+    mode: BuildLogMode,
 ) -> (Vec<LineRole>, HashSet<usize>) {
     match residual {
         ResidualPolicy::Provided { roles, run_starts } => (roles, run_starts),
         ResidualPolicy::KeepResidual => (vec![LineRole::Summary; lines.len()], HashSet::new()),
         ResidualPolicy::MavenTransfersOrGeneric => {
-            if maven::is_compacted(lines) || store.is_none() {
+            if maven::is_compacted(lines)
+                || store.is_none()
+                || mode == BuildLogMode::DiagnosticFailure
+            {
                 return (vec![LineRole::Summary; lines.len()], HashSet::new());
             }
             // No-edit Maven results retain anchored Generic recovery, plus verified
@@ -560,17 +636,18 @@ fn build_stage2_roles(
                     .then_some(BuildLogFormat::Generic)
             });
             let roles = match generic {
-                Some(format) => classify_scored_lines(format, stripped, &maven_transfers),
+                Some(format) => classify_scored_lines(format, stripped, &maven_transfers, mode),
                 None => vec![LineRole::Summary; lines.len()],
             };
             (roles, HashSet::new())
         }
         ResidualPolicy::AnchoredGeneric => {
-            if store.is_some()
+            if mode == BuildLogMode::Success
+                && store.is_some()
                 && let Some(generic) = detect_generic(sample)
             {
                 return (
-                    classify_scored_lines(generic, stripped, &[]),
+                    classify_scored_lines(generic, stripped, &[], mode),
                     HashSet::new(),
                 );
             }
@@ -586,16 +663,22 @@ fn build_stage2_roles(
                 &protected_ranges,
                 store,
                 is_protected_step,
+                mode,
             ),
             HashSet::new(),
         ),
-        ResidualPolicy::Scored(format) => {
-            (classify_scored_lines(format, stripped, &[]), HashSet::new())
-        }
+        ResidualPolicy::Scored(format) => (
+            classify_scored_lines(format, stripped, &[], mode),
+            HashSet::new(),
+        ),
     }
 }
 
 fn detect_log(input: &str) -> DetectedLog {
+    detect_log_with_mode(input, BuildLogMode::Success)
+}
+
+fn detect_log_with_mode(input: &str, mode: BuildLogMode) -> DetectedLog {
     let mut sample = sample_lines(input);
     let maven = maven::detect(&sample);
     let gradle = gradle::detect(&sample);
@@ -620,7 +703,11 @@ fn detect_log(input: &str) -> DetectedLog {
         Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps))
     } else {
         detect_scored_format(&sample)
-            .or_else(|| detect_generic(&sample))
+            .or_else(|| {
+                (mode == BuildLogMode::Success)
+                    .then(|| detect_generic(&sample))
+                    .flatten()
+            })
             .map(DetectedRoute::Scored)
     };
     DetectedLog { route, sample }

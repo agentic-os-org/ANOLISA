@@ -507,6 +507,10 @@ fn runtime_records_json_record_reduction_operation() {
                     recovery: tokenless_protocol::RecoveryMethod::Shell,
                     replace_with_text: false,
                 },
+                exit_code: None,
+                stderr: None,
+                original_command: None,
+                cwd: None,
             },
             &attribution,
         )
@@ -555,6 +559,10 @@ fn runtime_records_build_log_reduction_operation() {
                     recovery: tokenless_protocol::RecoveryMethod::Shell,
                     replace_with_text: true,
                 },
+                exit_code: None,
+                stderr: None,
+                original_command: None,
+                cwd: None,
             },
             &ProtocolAttribution {
                 agent_id: "agentscope".to_owned(),
@@ -634,6 +642,10 @@ fn concurrent_sessions_keep_embedded_html_rows_and_attribution_apart() {
                                 recovery: tokenless_protocol::RecoveryMethod::Shell,
                                 replace_with_text: false,
                             },
+                            exit_code: None,
+                            stderr: None,
+                            original_command: None,
+                            cwd: None,
                         },
                         &attribution,
                     )

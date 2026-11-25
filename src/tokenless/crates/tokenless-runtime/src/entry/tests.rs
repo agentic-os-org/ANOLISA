@@ -396,6 +396,7 @@ fn bash_request(command: &str) -> PreToolRequest {
         capabilities: PreToolCapabilities {
             replace_arguments: true,
             block_and_suggest: false,
+            post_tool_replacement: Default::default(),
         },
     }
 }
@@ -501,6 +502,7 @@ fn pre_tool_preserves_native_source_previews() {
             capabilities: PreToolCapabilities {
                 replace_arguments: true,
                 block_and_suggest: false,
+                post_tool_replacement: Default::default(),
             },
         };
         let response = pre_tool_with_rewriter(
@@ -553,6 +555,7 @@ fn pre_tool_keeps_native_find_commands_without_calling_rtk() {
             capabilities: PreToolCapabilities {
                 replace_arguments: true,
                 block_and_suggest: false,
+                post_tool_replacement: Default::default(),
             },
         };
         // No launcher or data directory, and RTK panics if consulted.
@@ -579,12 +582,20 @@ fn pre_tool_keeps_native_find_commands_without_calling_rtk() {
         "nocorrect printf '%s' 'find . -type f'",
         "builtin printf '%s' find",
         "command exec rtk find . -type f",
+        "noglob git status",
+        "nocorrect git diff",
+        "command exec git log",
+        "command env -i git status",
+    ] {
+        assert!(!keeps_command_native(command), "{command}");
+    }
+    for command in [
         "noglob cargo test",
         "nocorrect pytest -q",
         "command exec cargo test",
         "command env -i cargo test",
     ] {
-        assert!(!keeps_command_native(command), "{command}");
+        assert!(keeps_command_native(command), "{command}");
     }
 }
 
@@ -637,6 +648,7 @@ fn pre_tool_keeps_find_behind_rtk_process_wrappers() {
                 capabilities: PreToolCapabilities {
                     replace_arguments: true,
                     block_and_suggest: false,
+                    post_tool_replacement: Default::default(),
                 },
             },
             &Attribution::new("test"),
@@ -658,8 +670,8 @@ fn pre_tool_keeps_find_behind_rtk_process_wrappers() {
         "time --bogus find .",
         "nice --bogus find .",
         "nohup --bogus find .",
-        "timeout 30 cargo build",
-        "nice -n 10 pytest -q",
+        "timeout 30 git status",
+        "nice -n 10 git log",
         "TIMEOUT 30 find .",
         "timeout",
         "timeout -s",
@@ -676,6 +688,9 @@ fn pre_tool_keeps_find_behind_rtk_process_wrappers() {
         "timeout 30 '' find . -type f",
     ] {
         assert!(!keeps_command_native(command), "{command}");
+    }
+    for command in ["timeout 30 cargo build", "nice -n 10 pytest -q"] {
+        assert!(keeps_command_native(command), "{command}");
     }
 }
 
@@ -843,6 +858,7 @@ fn pre_tool_build_log_owner_does_not_require_rtk() {
         capabilities: PreToolCapabilities {
             replace_arguments: true,
             block_and_suggest: false,
+            post_tool_replacement: Default::default(),
         },
     };
     let response = pre_tool_with_rewriter(
@@ -1011,6 +1027,7 @@ fn pre_tool_no_op_does_not_require_rtk() {
             capabilities: PreToolCapabilities {
                 replace_arguments: true,
                 block_and_suggest: false,
+                post_tool_replacement: Default::default(),
             },
         },
         PreToolRequest {
@@ -1020,6 +1037,7 @@ fn pre_tool_no_op_does_not_require_rtk() {
             capabilities: PreToolCapabilities {
                 replace_arguments: true,
                 block_and_suggest: false,
+                post_tool_replacement: Default::default(),
             },
         },
         PreToolRequest {
@@ -1029,6 +1047,7 @@ fn pre_tool_no_op_does_not_require_rtk() {
             capabilities: PreToolCapabilities {
                 replace_arguments: false,
                 block_and_suggest: false,
+                post_tool_replacement: Default::default(),
             },
         },
     ];
@@ -1057,6 +1076,7 @@ fn pre_tool_no_op_does_not_require_rtk() {
         capabilities: PreToolCapabilities {
             replace_arguments: true,
             block_and_suggest: false,
+            post_tool_replacement: Default::default(),
         },
     };
     assert!(matches!(
@@ -1119,6 +1139,7 @@ fn pre_tool_carries_attribution_into_the_rewritten_command() {
         capabilities: PreToolCapabilities {
             replace_arguments: false,
             block_and_suggest: true,
+            post_tool_replacement: Default::default(),
         },
     };
     let attribution = Attribution {
@@ -1653,6 +1674,10 @@ fn rtk_and_retrieve_results_bypass_post_tool_pipeline() {
                 recovery: tokenless_protocol::RecoveryMethod::None,
                 replace_with_text: true,
             },
+            exit_code: None,
+            stderr: None,
+            original_command: None,
+            cwd: None,
         };
         let outcome = post_tool_with_store(&request, &options(), None).unwrap();
         assert_eq!(outcome.response.disposition, Disposition::Passthrough);
@@ -1864,11 +1889,12 @@ fn failing_build_log() -> String {
 }
 
 #[test]
-fn tool_error_build_log_stays_original_even_when_recovery_is_available() {
+fn tool_error_build_log_compresses_when_exit_code_is_present_and_keeps_env_diagnosis() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
     let request = PostToolRequest {
         status: ToolResultStatus::Error,
         content: failing_build_log(),
+        exit_code: Some(101),
         capabilities: PostToolCapabilities {
             replace_output: true,
             recovery: tokenless_protocol::RecoveryMethod::Shell,
@@ -1879,11 +1905,21 @@ fn tool_error_build_log_stays_original_even_when_recovery_is_available() {
 
     let outcome = post_tool_with_store(&request, &options(), Some(&store)).unwrap();
 
-    assert_eq!(outcome.response.disposition, Disposition::ToolError);
+    assert_eq!(outcome.response.disposition, Disposition::Applied);
     assert_eq!(outcome.response.content_type, Some(ContentType::BuildLog));
-    assert_eq!(outcome.response.output, request.content);
-    assert!(outcome.response.applied_operations.is_empty());
-    assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+    assert_eq!(
+        outcome.response.applied_operations,
+        [AppliedOperation::BuildLogReduction]
+    );
+    assert_eq!(outcome.response.recoverability, Recoverability::Retrievable);
+    assert!(!outcome.response.stash_keys.is_empty());
+    assert!(
+        outcome
+            .response
+            .output
+            .contains("error: linker command not found")
+    );
+    assert!(!outcome.response.output.contains("Compiling package-015"));
     assert!(
         outcome
             .response
@@ -1895,16 +1931,37 @@ fn tool_error_build_log_stays_original_even_when_recovery_is_available() {
 }
 
 #[test]
-fn tool_error_without_recovery_keeps_the_original_build_log() {
-    let request = PostToolRequest {
-        status: ToolResultStatus::Error,
-        content: failing_build_log(),
-        ..post_tool_request("unused")
-    };
-    let outcome = post_tool_with_store(&request, &options(), None).unwrap();
-    assert_eq!(outcome.response.disposition, Disposition::ToolError);
-    assert_eq!(outcome.response.output, request.content);
-    assert!(outcome.response.applied_operations.is_empty());
+fn tool_error_without_exit_code_keeps_original_build_log_and_diagnosis_even_with_recovery() {
+    let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+    for recovery in [
+        tokenless_protocol::RecoveryMethod::None,
+        tokenless_protocol::RecoveryMethod::Shell,
+        tokenless_protocol::RecoveryMethod::tool("tokenless_retrieve").unwrap(),
+    ] {
+        let request = PostToolRequest {
+            status: ToolResultStatus::Error,
+            content: failing_build_log(),
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                recovery,
+                replace_with_text: true,
+            },
+            ..post_tool_request("unused")
+        };
+        let outcome = post_tool_with_store(&request, &options(), Some(&store)).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::ToolError);
+        assert_eq!(outcome.response.output, request.content);
+        assert!(outcome.response.applied_operations.is_empty());
+        assert!(outcome.response.stash_keys.is_empty());
+        assert!(
+            outcome
+                .response
+                .additional_context
+                .as_deref()
+                .unwrap()
+                .contains("ENV_DEPENDENCY_MISSING")
+        );
+    }
 }
 
 #[test]
@@ -2211,5 +2268,158 @@ fn post_tool_request(content: &str) -> PostToolRequest {
             recovery: tokenless_protocol::RecoveryMethod::None,
             replace_with_text: true,
         },
+        exit_code: None,
+        stderr: None,
+        original_command: None,
+        cwd: None,
     }
+}
+
+#[test]
+fn pre_tool_replacement_none_disables_search_and_build_exemptions() {
+    for command in [
+        "cargo test --workspace",
+        "timeout 30 cargo build",
+        "nice -n 10 pytest -q",
+        "grep -n needle src",
+        "find . -type f",
+    ] {
+        let mut request = bash_request(command);
+        request.capabilities.post_tool_replacement = PostToolReplacementCapability::None;
+        let response = pre_tool_with_rewriter(
+            &request,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            response.action,
+            PreToolAction::ReplaceArguments,
+            "{command}"
+        );
+        assert_eq!(response.output_optimization, OutputOptimization::Rtk);
+    }
+}
+
+#[test]
+fn pre_tool_replacement_lossless_only_keeps_search_native_and_rewrites_build_and_vcs() {
+    for (command, expect_rtk) in [
+        ("grep -rn needle src", false),
+        ("find . -type f", false),
+        ("head -40 README.md", false),
+        ("cargo test --workspace", true),
+        ("git status", true),
+    ] {
+        let mut request = bash_request(command);
+        request.capabilities.post_tool_replacement = PostToolReplacementCapability::LosslessOnly;
+        let response = pre_tool_with_rewriter(
+            &request,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            response.action == PreToolAction::ReplaceArguments,
+            expect_rtk,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn pre_tool_unified_wrapper_stripping_keeps_wrapped_build_test_native() {
+    for command in [
+        "timeout 30 cargo test --workspace",
+        "uv run pytest -q",
+        "uv run python3 -m pytest tests/",
+        "nice -n 5 make -j4",
+        "env -S 'timeout 30 cargo test --workspace'",
+        "env -vS 'cargo test --workspace'",
+        "env -S 'cargo\\_test\\_--workspace'",
+    ] {
+        let request = bash_request(command);
+        let response = pre_tool_with_rewriter(
+            &request,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            rtk_must_not_run,
+        )
+        .unwrap();
+        assert_eq!(response.action, PreToolAction::Passthrough, "{command}");
+    }
+}
+
+#[test]
+fn post_tool_tokenless_retrieve_shell_command_bypasses_and_uses_stderr_for_env_diagnosis() {
+    let payload = serde_json::to_string_pretty(
+        &(0..30)
+            .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    for command in [
+        "/usr/local/bin/tokenless --data-dir /tmp/d retrieve aabbccdd1122",
+        "env -C /tmp/work tokenless retrieve aabbccdd1122",
+        "env --chdir /tmp/work tokenless retrieve aabbccdd1122",
+        "env -C /tmp/work -- tokenless retrieve aabbccdd1122",
+        "env -S 'tokenless retrieve aabbccdd1122'",
+        "env -S 'tokenless\\_retrieve\\_aabbccdd1122'",
+        "env -vS 'tokenless retrieve aabbccdd1122'",
+        "env -iS'tokenless retrieve aabbccdd1122'",
+        "env -vC /tmp/work tokenless retrieve aabbccdd1122",
+        "env -S 'tokenless retrieve aabbccdd1122\\cignored'",
+        "env -S 'tokenless --data-dir \"/tmp/my\\_dir\" retrieve aabbccdd1122'",
+        "env --split-string='FOO=1 -C /tmp/work tokenless retrieve aabbccdd1122'",
+        "env -S 'tokenless --data-dir /tmp/d retrieve' aabbccdd1122",
+    ] {
+        let ok_req = PostToolRequest {
+            result_kind: ResultKind::Tool,
+            command: Some(command.into()),
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                replace_with_text: true,
+            },
+            ..post_tool_request(&payload)
+        };
+        let ok_outcome = post_tool_with_store(&ok_req, &options(), None).unwrap();
+        assert_eq!(
+            ok_outcome.response.disposition,
+            Disposition::Passthrough,
+            "{command}"
+        );
+        assert_eq!(ok_outcome.response.output, payload, "{command}");
+    }
+
+    assert!(!super::is_tokenless_retrieve_command(
+        "env -S '\ntokenless retrieve aabbccdd1122'"
+    ));
+    assert!(!super::is_tokenless_retrieve_command(
+        "env -S 'tokenless\nretrieve aabbccdd1122'"
+    ));
+
+    let err_req = PostToolRequest {
+        result_kind: ResultKind::Tool,
+        status: ToolResultStatus::Error,
+        command: Some("tokenless retrieve aabbccdd1122".into()),
+        stderr: Some("error: permission denied opening stash.db".into()),
+        exit_code: Some(1),
+        ..post_tool_request("failed to retrieve")
+    };
+    let err_outcome = post_tool_with_store(&err_req, &options(), None).unwrap();
+    assert_eq!(err_outcome.response.disposition, Disposition::ToolError);
+    assert_eq!(err_outcome.response.output, "failed to retrieve");
+    assert!(
+        err_outcome
+            .response
+            .additional_context
+            .as_deref()
+            .unwrap()
+            .contains("ENV_PERMISSION")
+    );
 }

@@ -370,16 +370,9 @@ Agent adapters may apply separate pre-check thresholds; see the
 
 ### compress
 
-Shared Agent hooks send lifecycle requests to `tokenless compress`; only
-successful, non-bypassed PostTool JSON, CSV/TSV tables, and eligible command-output build logs
-enter the Runtime-owned Pipeline. Tool errors bypass compression and keep their
-original output while Core attaches environment-diagnostic context.
+Shared Agent hooks send lifecycle requests to `tokenless compress`; successful (or `exit_code`-opted failing) non-bypassed PostTool JSON, eligible build/test logs, and diffs enter the Runtime-owned Pipeline, while successful non-error inputs can also use CSV/TSV tables, HTML, browser snapshots, and mixed regions. Tool errors omitting `exit_code` and Level E1 hard/short errors bypass compression and keep their original output while Core attaches `[tokenless:env]` diagnostics (`stderr` fallback); longer failing results carrying `exit_code` enter fact-guarded Level E2 compression, and opt-in hosts must consume `additional_context` on both `tool_error` and `applied`.
 
-PreTool leaves recognized Cargo, pytest, npm/Jest, Go, and Make build/test
-commands unchanged so their native output has a single PostTool owner. Other
-supported commands may be rewritten by RTK. Successful results enter PostTool only
-when complete execution receipts confirm unchanged output and PostTool supplies the exact
-registered execution command, preserving the original command's file-origin guards.
+Under the default `post_tool_replacement: "full_retrievable"` capability, PreTool leaves recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands as well as native preview/search invocations (`find`, `head`, `tail`, `grep`, `rg`) unchanged across direct and built-in-wrapper spellings (`env -C`/`-S`, `timeout`, `time`, `nice`, `nohup`, `uv run`, etc.) so their output has a single PostTool owner. Hosts declaring `lossless_only` restrict native preservation to preview/search calls, and `none` disables PreTool exemptions so RTK rewriting applies. Other supported commands may be rewritten by RTK. Successful results enter PostTool only when complete execution receipts confirm unchanged output and PostTool supplies the exact registered execution command, preserving the original command's file-origin guards.
 
 Claude Code 2.1.121 or newer, Qoder CLI, OpenCode, and Cosh-NG can replace the
 live result. Their PostTool requests enable recovery when bare `tokenless`

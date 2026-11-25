@@ -9,10 +9,10 @@ use tokenless_ccr::{RecoveryMethod, StashStore, extract_hash, is_valid_hash, rec
 use tokenless_compressors::JsonCompressionConfig;
 use tokenless_protocol::{
     AppliedOperation, Attribution, BeforeModelRequest, BeforeModelResponse, ContentOrigin,
-    Disposition, Operation, OutputOptimization, PostToolRequest, PostToolResponse, PreToolAction,
-    PreToolRequest, PreToolResponse, Recoverability, Request, RequestEnvelope, Response,
-    ResponseEnvelope, ResultKind, RetrieveRequest, RetrieveResponse, TOKENIZER_ID,
-    ToolResultStatus, estimate_tokens,
+    Disposition, Operation, OutputOptimization, PostToolReplacementCapability, PostToolRequest,
+    PostToolResponse, PreToolAction, PreToolRequest, PreToolResponse, Recoverability, Request,
+    RequestEnvelope, Response, ResponseEnvelope, ResultKind, RetrieveRequest, RetrieveResponse,
+    TOKENIZER_ID, ToolResultStatus, estimate_tokens,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::rtk_outcome::OutcomeStore;
@@ -368,8 +368,8 @@ fn pre_tool_with_rewriter(
     if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
         return Ok(pre_tool_passthrough(request));
     }
-    // Preserve native execution for previews, build logs and path lists.
-    if keeps_command_native(command) {
+    // Preserve native execution according to the host's PostTool replacement capability.
+    if keeps_command_native_for(command, request.capabilities.post_tool_replacement) {
         return Ok(pre_tool_passthrough(request));
     }
     let rtk_launcher = rtk_launcher.ok_or(RuntimeError::RtkLauncherUnavailable)?;
@@ -456,8 +456,13 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
     }
 }
 
+#[cfg(test)]
 fn keeps_command_native(command: &str) -> bool {
-    command_has_segment(command, segment_keeps_native)
+    keeps_command_native_for(command, PostToolReplacementCapability::FullRetrievable)
+}
+
+fn keeps_command_native_for(command: &str, capability: PostToolReplacementCapability) -> bool {
+    command_has_segment(command, |words| segment_keeps_native_for(words, capability))
 }
 
 /// Uses the same shell segments and transparent wrappers as PreTool ownership.
@@ -465,7 +470,33 @@ pub(crate) fn is_search_command(command: &str) -> bool {
     command_has_segment(command, native_output::is_search)
 }
 
-fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) -> bool {
+fn is_tokenless_retrieve_command(command: &str) -> bool {
+    command_has_segment(command, |words| {
+        let Some(unwrapped) = native_output::unwrap_transparent_prefix(words) else {
+            return false;
+        };
+        if !matches!(unwrapped.executable(), "tokenless" | "tokenless.exe") {
+            return false;
+        }
+        let mut index = 0;
+        let args = unwrapped.args();
+        while let Some(arg) = args.get(index) {
+            if arg == "retrieve" {
+                return true;
+            }
+            if matches!(arg.as_str(), "--data-dir" | "--stash-db" | "--stats-db") {
+                index += 2;
+            } else if arg.starts_with('-') {
+                index += 1;
+            } else {
+                return false;
+            }
+        }
+        false
+    })
+}
+
+fn command_has_segment(command: &str, mut matches_segment: impl FnMut(&[String]) -> bool) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
     // Empty quoted words still consume wrapper arguments.
@@ -528,81 +559,88 @@ fn command_has_segment(command: &str, matches_segment: fn(&[String]) -> bool) ->
     matches_segment(&words)
 }
 
-fn segment_keeps_native(words: &[String]) -> bool {
-    // RTK smart-truncates --max-lines rather than preserving a head window.
-    // Keep previews and complete search listings native through supported wrappers.
-    if native_output::owns_command(words) {
-        return true;
-    }
-    let mut index = words
-        .iter()
-        .position(|word| !is_environment_assignment(word))
-        .unwrap_or(words.len());
-    if words
-        .get(index)
-        .is_some_and(|word| command_basename(word) == "env")
-    {
-        index += 1;
-        while let Some(word) = words.get(index) {
-            if is_environment_assignment(word) {
-                index += 1;
-                continue;
-            }
-            if word.starts_with('-') && word.as_str() != "-" {
-                // -u/--unset are the only env flags that consume a
-                // following word; --unset=VAR embeds it instead.
-                index += 1 + usize::from(matches!(word.as_str(), "-u" | "--unset"));
-                continue;
-            }
-            break;
-        }
-    }
-    if matches!(
-        words.get(index).map(|word| command_basename(word)),
-        Some("command" | "exec")
-    ) {
-        index += 1;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandDomain {
+    SourcePreview,
+    Search,
+    BuildTest,
+    Other,
+}
 
-    let executable = words
-        .get(index)
-        .map(|word| command_basename(word))
-        .unwrap_or_default();
-    let arguments = &words[index.saturating_add(1).min(words.len())..];
+fn classify_command_domain(executable: &str, arguments: &[String]) -> CommandDomain {
     match executable {
+        "head" | "tail" => CommandDomain::SourcePreview,
+        "grep" | "rg" | "find" => CommandDomain::Search,
         "cargo" => {
-            // A leading +toolchain argument selects the toolchain and
-            // precedes the subcommand.
             let arguments = &arguments[usize::from(
                 arguments
                     .first()
                     .is_some_and(|argument| argument.starts_with('+')),
             )..];
-            matches!(
+            if matches!(
                 arguments.first().map(String::as_str),
                 Some("build" | "check" | "clippy" | "install" | "test")
-            )
+            ) {
+                CommandDomain::BuildTest
+            } else {
+                CommandDomain::Other
+            }
         }
-        "pytest" => true,
+        "pytest" => CommandDomain::BuildTest,
         executable if is_python_executable(executable) => {
-            matches!(
+            if matches!(
                 arguments,
                 [module, runner, ..] if module == "-m" && runner == "pytest"
-            )
+            ) {
+                CommandDomain::BuildTest
+            } else {
+                CommandDomain::Other
+            }
         }
-        "uv" => matches!(
-            arguments,
-            [run, runner, ..] if run == "run" && (runner == "pytest" || is_python_pytest(arguments, 1))
+        "npm" | "pnpm" => {
+            if package_command_is_build_log_owned(arguments) {
+                CommandDomain::BuildTest
+            } else {
+                CommandDomain::Other
+            }
+        }
+        "npx" | "pnpx" => {
+            if arguments.first().is_some_and(|runner| runner == "jest") {
+                CommandDomain::BuildTest
+            } else {
+                CommandDomain::Other
+            }
+        }
+        "jest" => CommandDomain::BuildTest,
+        "go" => {
+            if matches!(
+                arguments.first().map(String::as_str),
+                Some("build" | "test" | "vet")
+            ) {
+                CommandDomain::BuildTest
+            } else {
+                CommandDomain::Other
+            }
+        }
+        "make" | "gmake" => CommandDomain::BuildTest,
+        _ => CommandDomain::Other,
+    }
+}
+
+fn segment_keeps_native_for(words: &[String], capability: PostToolReplacementCapability) -> bool {
+    let Some(unwrapped) = native_output::unwrap_transparent_prefix(words) else {
+        return false;
+    };
+    let domain = classify_command_domain(unwrapped.executable(), unwrapped.args());
+    match capability {
+        PostToolReplacementCapability::None => false,
+        PostToolReplacementCapability::LosslessOnly => {
+            matches!(domain, CommandDomain::SourcePreview | CommandDomain::Search)
+        }
+        PostToolReplacementCapability::FullRetrievable => matches!(
+            domain,
+            CommandDomain::SourcePreview | CommandDomain::Search | CommandDomain::BuildTest
         ),
-        "npm" | "pnpm" => package_command_is_build_log_owned(arguments),
-        "npx" | "pnpx" => arguments.first().is_some_and(|runner| runner == "jest"),
-        "jest" => true,
-        "go" => matches!(
-            arguments.first().map(String::as_str),
-            Some("build" | "test" | "vet")
-        ),
-        "make" | "gmake" => true,
-        _ => false,
     }
 }
 
@@ -649,16 +687,6 @@ fn is_python_executable(executable: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || byte == b'.')
     })
-}
-
-fn is_python_pytest(arguments: &[String], start: usize) -> bool {
-    matches!(
-        arguments.get(start..),
-        Some([python, module, runner, ..])
-            if is_python_executable(command_basename(python))
-                && module == "-m"
-                && runner == "pytest"
-    )
 }
 
 /// Anchors a PowerShell rewrite to `rtk_launcher`, or returns `None` when an
@@ -1043,6 +1071,11 @@ pub(crate) fn post_tool_with_store(
     };
     let before_tokens = estimate_tokens(&request.content) as u64;
     let routed = if request.result_kind == ResultKind::Retrieve
+        || (request.content_origin == ContentOrigin::CommandOutput
+            && request
+                .command
+                .as_deref()
+                .is_some_and(is_tokenless_retrieve_command))
         || matches!(
             request.status,
             ToolResultStatus::Interrupted | ToolResultStatus::Denied
@@ -1078,6 +1111,7 @@ pub(crate) fn post_tool_with_store(
                 timeout: RESPONSE_PIPELINE_TIMEOUT,
                 max_input_bytes: MAX_INPUT_BYTES,
                 min_input_chars: MIN_RESPONSE_CHARS,
+                error_min_input_chars: post_tool::DEFAULT_ERROR_MIN_CHARS,
                 compression_enabled: options.compression_enabled,
                 search_path_sharing_enabled: options.search_path_sharing_enabled,
                 diff_compression_enabled: options.diff_compression_enabled,
@@ -1101,6 +1135,12 @@ pub(crate) fn post_tool_with_store(
         if let Some(count) = run.stash_errors.filter(|count| *count > 0) {
             return Err(RuntimeError::StashWrite { count });
         }
+        if let Some(violation) = run.fact_guard_violation {
+            crate::warn_soft(&format!(
+                "[tokenless] fact guard rolled back error compression: {}",
+                violation.as_str(),
+            ));
+        }
         (
             run.response,
             run.candidate,
@@ -1112,7 +1152,13 @@ pub(crate) fn post_tool_with_store(
         )
     };
     if request.status == ToolResultStatus::Error {
-        response.additional_context = diagnose_tool_error(&request.tool_name, &request.content);
+        response.additional_context = diagnose_tool_error(&request.tool_name, &request.content)
+            .or_else(|| {
+                request
+                    .stderr
+                    .as_deref()
+                    .and_then(|stderr| diagnose_tool_error(&request.tool_name, stderr))
+            });
         if matches!(
             response.disposition,
             Disposition::Passthrough

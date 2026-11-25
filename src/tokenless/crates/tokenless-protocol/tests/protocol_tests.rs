@@ -31,6 +31,7 @@ fn requests() -> Vec<RequestEnvelope> {
                 capabilities: PreToolCapabilities {
                     replace_arguments: true,
                     block_and_suggest: false,
+                    post_tool_replacement: PostToolReplacementCapability::FullRetrievable,
                 },
             }),
         },
@@ -49,6 +50,10 @@ fn requests() -> Vec<RequestEnvelope> {
                     recovery: tokenless_protocol::RecoveryMethod::None,
                     replace_with_text: true,
                 },
+                exit_code: None,
+                stderr: None,
+                original_command: None,
+                cwd: None,
             }),
         },
         RequestEnvelope {
@@ -303,4 +308,106 @@ fn response_operation_must_match_request() {
         response.ensure_operation(Operation::PostTool),
         Err(ProtocolError::OperationMismatch { .. })
     ));
+}
+
+#[test]
+fn v2_backward_compatible_optional_fields_and_replacement_capabilities_round_trip() {
+    let legacy_pre_tool = r#"{
+        "protocol_version": 2,
+        "operation": "pre_tool",
+        "attribution": {"agent_id": "legacy"},
+        "input": {
+            "tool_name": "Bash",
+            "arguments": {"command": "git status"},
+            "command_field": "command",
+            "capabilities": {"replace_arguments": true, "block_and_suggest": false}
+        }
+    }"#;
+    let parsed = RequestEnvelope::from_json(legacy_pre_tool).unwrap();
+    let Request::PreTool(pre) = &parsed.request else {
+        panic!("expected pre_tool");
+    };
+    assert_eq!(
+        pre.capabilities.post_tool_replacement,
+        PostToolReplacementCapability::FullRetrievable
+    );
+    let reserialized: serde_json::Value = serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
+    assert!(
+        reserialized["input"]["capabilities"]
+            .get("post_tool_replacement")
+            .is_none()
+    );
+
+    for cap in [
+        PostToolReplacementCapability::FullRetrievable,
+        PostToolReplacementCapability::LosslessOnly,
+        PostToolReplacementCapability::None,
+    ] {
+        let env = RequestEnvelope {
+            attribution: attribution(),
+            request: Request::PreTool(PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": "cargo test"}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                    post_tool_replacement: cap,
+                },
+            }),
+        };
+        let wire = env.to_json().unwrap();
+        assert_eq!(RequestEnvelope::from_json(&wire).unwrap(), env);
+    }
+
+    let legacy_post_tool = r#"{
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {"agent_id": "legacy"},
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "Bash",
+            "content": "ok",
+            "status": "success",
+            "content_origin": "command_output",
+            "output_optimization": "none",
+            "capabilities": {"replace_output": true, "recovery": {"kind": "none"}, "replace_with_text": true}
+        }
+    }"#;
+    let parsed_post = RequestEnvelope::from_json(legacy_post_tool).unwrap();
+    let Request::PostTool(post) = &parsed_post.request else {
+        panic!("expected post_tool");
+    };
+    assert_eq!(post.exit_code, None);
+    assert_eq!(post.stderr, None);
+    assert_eq!(post.original_command, None);
+    assert_eq!(post.cwd, None);
+
+    let full_post = RequestEnvelope {
+        attribution: attribution(),
+        request: Request::PostTool(PostToolRequest {
+            result_kind: ResultKind::Tool,
+            tool_name: "Bash".into(),
+            content: "stdout".into(),
+            status: ToolResultStatus::Error,
+            content_origin: ContentOrigin::CommandOutput,
+            command: Some("cargo test".into()),
+            output_optimization: OutputOptimization::None,
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                recovery: RecoveryMethod::Shell,
+                replace_with_text: true,
+            },
+            exit_code: Some(101),
+            stderr: Some("error[E0308]".into()),
+            original_command: Some("cargo test".into()),
+            cwd: Some("/workspace".into()),
+        }),
+    };
+    let wire = full_post.to_json().unwrap();
+    assert_eq!(RequestEnvelope::from_json(&wire).unwrap(), full_post);
+
+    let mut invalid: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    invalid["input"]["unknown_extra"] = json!(1);
+    assert!(RequestEnvelope::from_json(&invalid.to_string()).is_err());
 }

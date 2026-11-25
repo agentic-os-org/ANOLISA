@@ -417,18 +417,31 @@ fn truncated_tail_and_oversized_or_many_chunks_respect_bounds() {
     assert!(long_outcome.output.contains(&long_start));
     assert!(long_outcome.output.contains(HEADER));
 
-    // Any single line exceeding MAX_BYTES (64 KiB) suppresses CTest edits across the result.
+    // Any single line exceeding MAX_BYTES (64 KiB) is skipped without disabling surrounding CTest compression.
     let huge_line = format!("diagnostic payload: {}\n", "x".repeat(MAX_BYTES + 1));
     let with_huge = format!("{huge_line}{}", synthetic_serial_ctest(10));
     let huge_lines = with_huge.split_inclusive('\n').collect::<Vec<_>>();
-    assert!(plan(&huge_lines).is_empty());
+    let edits = plan(&huge_lines);
+    assert!(!edits.is_empty());
+    assert!(!edits.iter().any(|edit| {
+        huge_lines[edit.start..edit.end]
+            .iter()
+            .any(|line| line.len() > MAX_BYTES)
+    }));
+    let wrapped_huge = format!(
+        "{}{huge_line}{}",
+        synthetic_serial_ctest(10),
+        synthetic_serial_ctest(10)
+    );
     let huge_store = InMemoryStore::default();
     let huge_outcome = BuildLogCompressor.compress_with_recovery(
-        &with_huge,
+        &wrapped_huge,
         Some(&huge_store),
         &RecoveryMethod::Shell,
     );
-    assert_eq!(huge_outcome.output, with_huge);
+    assert!(huge_outcome.output.contains(&huge_line));
+    assert_ne!(huge_outcome.output, wrapped_huge);
+    assert_eq!(huge_outcome.output.matches(HEADER).count(), 2);
     assert!(huge_outcome.stash_writes.is_empty());
 
     // 140 serial tests = 280 lines (> MAX_ROWS = 256); the split must never cleave a Start+Result pair.

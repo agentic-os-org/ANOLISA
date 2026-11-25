@@ -2,7 +2,7 @@
 
 ## 一、功能概述
 
-PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给七个领域之一：JSON、Build Log、Tabular、Search Results 路径共享、HTML 页面转写与 Browser Snapshot 重编码默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功的 `command_output` 或 `file_read`，沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略；Browser Snapshot 重编码把 Playwright MCP 的无障碍快照无损重写为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀，解析失败时整体透传；chrome-devtools-mcp 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）。这三个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 保留原始输出并只追加环境诊断；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给七个领域之一：JSON、Build Log、Tabular、Search Results 路径共享、HTML 页面转写与 Browser Snapshot 重编码默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功及带 `exit_code` 的失败 `command_output` 或 `file_read`（失败路径启用 `BuildLogMode::DiagnosticFailure`），沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略；Browser Snapshot 重编码把 Playwright MCP 的无障碍快照无损重写为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀，解析失败时整体透传；chrome-devtools-mcp 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）。这三个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 按 `exit_code` 分级处理：未携带 `exit_code` 或属于硬执行失败/短错误（Level E1）时保留原始输出并只追加环境诊断；携带正常退出码且长度达到门槛的失败进入 Level E2 安全压缩并由 `FactInvariantGuard` 守卫事实；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
 候选全部未命中时，按显式定界的 typed region 逐段压缩混合输出（见「三、递归处理顺序」
 之后的「Mixed Content 领域」一节）。
 
@@ -96,26 +96,19 @@ pnpm 只处理完整 LF 记录。CRLF、裸 CR、TAB、OSC、光标控制或残�
 以 `... ok` 结束的单行测试记录可缩减；失败、跳过、测试汇总、数据库准备、多行描述、npm Warning
 与 Make 目录边界保持可见。不会为了压缩而修改命令参数或宿主成功/失败状态。
 
-超过 8 个遗漏区间时，在写 Stash 前放弃进度省略。每个区间计入真实恢复提示后必须同时减少字符
-与估算 Token，不用布局收益补贴省略开销。无 Stash 或 `recovery: none` 时仍可返回布局候选且零写入。
+遗漏区间按净节省 Token 与字节排序，单次最多保留净收益最高的 **Top-24** 段（`MAX_OMISSION_BLOCKS = 24`）；单行超过 `64 KiB` 时仅关闭当前活动作用域而不中止整份日志的其余段落。每个保留的遗漏区间在计入真实恢复提示后必须同时减少字符、UTF-8 字节与估算 Token，不用布局收益补贴省略开销。无 Stash 或 `recovery: none` 时仍可返回布局候选且零写入。
 省略不划算或写入失败时，压缩器返回布局候选及全部 tentative writes/错误计数；但 Runtime 入口
 仍将 Stash 错误提升为操作错误，宿主可能保留原输出，不能宣称此时布局已生效。
-Runtime 只执行一次全局字符/Token 仲裁和 Stash Commit/Rollback，保留 dry-run、时限与归属保护。
-Tool Error 不进入内容压缩 Pipeline，Core 保留原始工具输出并追加环境诊断信息。
+Runtime 只执行一次全局 **UTF-8 字节数、字符数、估算 Token 三重严格递减仲裁** 和 Stash Commit/Rollback，保留 dry-run、时限与归属保护。
+Tool Error 分层进入管线（向后兼容未传入新字段的旧宿主）：
+- **显式准入前提**：当 `status == error` 时，只有请求显式携带 `exit_code`（`request.exit_code.is_some()`）才会退出兼容直通门，避免未改造 `main` Adapter（如 OpenClaw）丢失 `[tokenless:env]` 诊断；未携带 `exit_code` 时直接透传并在 `tool_error` 分支保留环境诊断。
+- **Level E1（原样直通 + `[tokenless:env]`）**：`exit_code` 为 `126`、`127`、`< 0` 或 `>= 128`（硬执行错误/信号中止），或字符数低于 `error_min_input_chars`（默认 `400` 字符）时，直接保持原样输出并从 `content` 或 `stderr` 提取环境诊断。
+- **Level E2（安全压缩 + 事实守卫）**：其余达到阈值的失败输出跳过 HTML / Browser Snapshot / Tabular / Mixed 等易损域，允许进入 Build Log（`BuildLogMode::DiagnosticFailure`，关闭 `detect_generic` 并保护错误/断言/行首诊断锚点）、Diff 或 JSON branch；提交 Stash 前强制经 `FactInvariantGuard` 校验（提取文本与 JSON/TOON 叶子中的错误码、Summary 行、失败测试名、`file:line` 诊断位置及断言/异常信号，任一丢失或任一类别追踪锚点超出 `256` 上限即触发 fail-safe 回滚并置回 `ToolError`）。传入 `exit_code` 启用错误压缩的宿主在收到 `disposition == "applied"` 时同样必须消费响应中的 `additional_context`，而不能只在 `tool_error` 分支读取它（否则匹配到的 `[tokenless:env]` 诊断会被丢弃）。
 
 两种转换内部统一为 `BuildLogOperation::Reduction`，映射到现有 `AppliedOperation::BuildLogReduction`。
-Wire 保持 Protocol v2，不新增 SDK 枚举；标签简化不改变算法、`done` 边界或 Stash key。
+Wire 保持 Protocol v2，旧调用方省略 `PreToolCapabilities.post_tool_replacement` 与 `PostToolRequest` 可选错误字段时保持既有默认语义；由于 Protocol v2 请求体使用 `#[serde(deny_unknown_fields)]`，向后兼容（旧 SDK/Adapter → 新 Core）成立，但**不前向兼容**——发送新字段的 SDK/Adapter 必须配合或晚于新版 Core 升级，否则旧 Core 会拒绝未知字段。
 
-为避免两个组件依次改写同一输出，PreTool 对明确的 Cargo、pytest、npm/Jest、Go 和 Make
-构建/测试命令直接返回 `passthrough` 与 `output_optimization: "none"`，不调用 RTK；其原生输出
-随后才可能进入 `BuildLogCompressor`。其他受支持命令仍由 RTK 处理，带
-`output_optimization: "rtk"` 的结果默认旁路 PostTool Pipeline。只有同一调用的全部执行回执
-确认输出字节未变、工具执行成功，且 PostTool 的 `command` 与注册的执行命令完全一致时，
-Core 才恢复原命令并继续原有管线；Token 估算持平不代表
-内容未变。已有改写、回执缺失或过期、旧版 RTK 及状态失败均保留旁路。原命令用于保留本地
-HTML 等文件来源保护；命令匹配可防止重试失效操作失败时误用旧回执。目前 PreTool 没有声明
-宿主 PostTool 替换与恢复能力，因此这项命令所有权选择对所有宿主一致；无法应用 Build Log
-缩减的宿主可能暂时原样接收这些命令的输出。`pnpm install` 不在本轮新增原生命令豁免范围，
+PreTool 按宿主声明的 `post_tool_replacement`（默认 `full_retrievable`，可选 `lossless_only` / `none`）决定原生输出豁免范围，并与 PostTool 共享统一的透明包装前缀剥离（`env` 含 `-u`/`--unset`/`-C`/`--chdir`/`-S`/`--split-string`/`-P`/`--` 及如 `-vS`/`-iS`/`-vC` 等短选项簇、`command`/`exec`/`builtin`/`noglob`/`nocorrect`、`uv run`、`timeout`/`time`/`nice`/`nohup`）：`full_retrievable` 保留 `head`/`tail`、搜索与构建/测试域原生输出；`lossless_only` 仅保留预览与搜索；`none` 关闭 PreTool 搜索/构建豁免，恢复 RTK 改写兜底。同时 PostTool 入口识别被透明包装（含 `env -C <dir>`）的 `tokenless retrieve` Shell 调用并原样透传。`pnpm install` 不在本轮新增原生命令豁免范围，
 仍可能被 RTK 改写；pnpm 能力只处理按既有归属规则实际进入 PostTool 的原始内容。
 
 ### Browser Snapshot 领域
@@ -259,8 +252,7 @@ Runtime 执行一次字符/Token 仲裁和一次 Stash Commit/Rollback
 Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 ```
 
-**流水线说明**：`PostToolPipeline` 位于 Runtime 内部。工具错误、`file_content` 来源和
-低于 `min_input_chars` 的输入在入口直接透传。来源由 adapter 按工具分类，shell 工具随请求附带
+**流水线说明**：`PostToolPipeline` 位于 Runtime 内部。`file_content` 来源、未携带 `exit_code` 或触发 Level E1（硬退出码/低于 `error_min_input_chars` 默认 400 字符）的工具错误，以及低于 `min_input_chars` 的输入在入口直接透传；携带 `exit_code` 且满足门槛的错误按 Level E2 安全路由并经 `FactInvariantGuard` 校验后才可采用。来源由 adapter 按工具分类，shell 工具随请求附带
 `command` 字段；Core（`post_tool/file_read.rs`）把只打印本地文件的命令（`cat`、`head`、`tail`、
 `nl`、`less`、`more`、`bat`、打印范围的 `sed -n`，可带 `cd … &&` 前缀，不含管道、重定向或其他命令）
 改判为 `file_read`：其中的数据照常压缩，打印出的 HTML 页面视为可编辑源码而保持原样，
@@ -325,7 +317,7 @@ block 中）；`<svg>`（保留 `xlink:href` 等前缀属性，去除根上纯�
 `html_extraction`，内容类型为 `json`。新增内容域时扩展 `EmbeddedKind` 并复用相应领域压缩
 器，不新增路由流水线。
 
-Diff、HTML 与 Browser Snapshot 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个。
+Diff、HTML 与 Browser Snapshot 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个，且全部采用结果须同时满足 UTF-8 字节数、字符数与估算 Token 三项严格递减。
 Diff、HTML 与 Browser Snapshot 没有可用 Stash 或宿主未声明恢复能力（例如裸 `tokenless` 不在
 Shell `PATH` 中）时，即使已开启环境变量也原文透传。
 纯路径列表至少包含三条 POSIX 路径，统一使用 LF 或 CRLF。固定英文说明后接紧凑 JSON，
@@ -334,8 +326,8 @@ Shell `PATH` 中）时，即使已开启环境变量也原文透传。
 全部路径、顺序、重复项均保留。空行、混合输出、NUL 分隔或歧义格式透传；完整视图的字节数
 和估算 Token 均减少才采用。检测器只采样完整行，压缩器仍验证全部输入。
 
-PreTool 让包含已识别原生 `find`、`grep`、`rg` 调用的整条命令跳过 RTK，包括复合命令及 RTK 内置透明前缀：
-`env`、`command`、`exec`、`noglob`、`nocorrect`、`builtin`、`timeout`、`time`、`nice`、`nohup`
+当宿主声明 `post_tool_replacement` 允许原生路径（默认 `full_retrievable` 或针对预览/搜索的 `lossless_only`）时，PreTool 让包含已识别原生 `find`、`grep`、`rg` 调用的整条命令跳过 RTK（声明 `none` 时恢复 RTK 改写兜底），包括复合命令及 RTK 内置透明前缀：
+`env`（含 `-u`/`--unset`/`-C`/`--chdir`/`-S`/`--split-string`/`-P`、`--` 及 `-vS`/`-iS`/`-vC` 等短选项簇；`-S` 按 GNU 引号/转义/注释与 `\c`/`\_` 拆分，不做 `${VARNAME}` 变量求值）、`command`、`exec`、`noglob`、`nocorrect`、`builtin`、`timeout`、`time`、`nice`、`nohup`
 和 `uv run`；支持嵌套及反斜杠换行续行，进程 Wrapper 的未知参数会停止识别。
 不读取自定义 `hooks.transparent_prefixes`，这些前缀中的调用仍可能被 RTK 改写。
 关闭搜索路径共享只停止后置压缩，仍保留原生搜索和 `find` 的完整输出；混合或不支持的输出因此可能不压缩。

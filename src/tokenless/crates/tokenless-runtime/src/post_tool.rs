@@ -3,9 +3,12 @@
 mod arbitration;
 mod content;
 mod diff;
+mod fact_guard;
 pub(crate) mod file_read;
 mod mixed;
 mod pipeline;
 mod stash_ledger;
 
-pub(crate) use pipeline::{PostToolPipeline, PostToolPipelineConfig};
+#[cfg(test)]
+pub(crate) use fact_guard::FactViolation;
+pub(crate) use pipeline::{DEFAULT_ERROR_MIN_CHARS, PostToolPipeline, PostToolPipelineConfig};

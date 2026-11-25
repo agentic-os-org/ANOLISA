@@ -391,7 +391,13 @@ fn compile_diagnostics_fences_controls_and_oversized_lines_preserve_safety_bound
     let too_huge = format!("diagnostic {}\n", "x".repeat(MAX_BYTES + 1));
     let too_huge_input = format!("{}{too_huge}", rows.concat());
     let lines: Vec<&str> = too_huge_input.split_inclusive('\n').collect();
-    assert!(plan(&lines).is_empty());
+    let edits = plan(&lines);
+    assert!(!edits.is_empty());
+    assert!(!edits.iter().any(|edit| {
+        lines[edit.start..edit.end]
+            .iter()
+            .any(|line| line.len() > MAX_BYTES)
+    }));
 }
 
 #[test]
@@ -415,7 +421,13 @@ fn limits_idempotence_fences_and_anchored_generic_fallback_hold() {
     let huge_line = format!("diagnostic payload: {}\n", "x".repeat(MAX_BYTES + 1));
     let huge_input = format!("{before}{huge_line}{after}");
     let huge_lines: Vec<&str> = huge_input.split_inclusive('\n').collect();
-    assert!(plan(&huge_lines).is_empty());
+    let huge_edits = plan(&huge_lines);
+    assert!(!huge_edits.is_empty());
+    assert!(!huge_edits.iter().any(|edit| {
+        huge_lines[edit.start..edit.end]
+            .iter()
+            .any(|line| line.len() > MAX_BYTES)
+    }));
 
     let large_input = (1..=300)
         .map(|i| format!("[{i}/300] Building CXX object src/CMakeFiles/a.dir/file_{i:03}.cpp.o\n"))

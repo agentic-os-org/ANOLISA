@@ -120,7 +120,7 @@ jq -n \
   PostTool 必须在 `command` 中传入注册的完整执行命令；命令缺失或被修改时保留旁路。
   输出已改变或无法确认时保留旁路；Token 估算持平不能授权回退。回执状态失败会发出警告并保留
   旁路，不会使 PostTool 操作失败。
-- Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
+- 省略 `exit_code` 时，Tool Error 原样透传为 `tool_error`（兼容未改造的旧宿主），并可从 `content` 或 `stderr` 提取限长 `additional_context` 诊断。当调用方显式传入 `exit_code` 时，硬执行失败/信号退出码（`126`、`127`、`< 0`、`>= 128`）或字符数低于 `error_min_input_chars`（默认 `400` 字符）的错误进入 Level E1 原样透传；其余更长的失败进入 Level E2 压缩（覆盖 `BuildLogCompressor` 的 `DiagnosticFailure` 模式、Diff、JSON 与无损搜索路径共享，排除 HTML、Browser Snapshot、Tabular 和 Mixed 域），并在提交 Stash 前由 `FactInvariantGuard` 校验诊断事实（任一事实丢失或任一类别锚点超过 `256` 即回滚为 `tool_error`）。传入 `exit_code` 的 Opt-in 宿主在 `disposition` 为 `"applied"` 时也必须消费 `additional_context`。
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
 - 已识别的成功构建/测试/包安装输出使用 `BuildLogCompressor`。`terminal_cleanup` 清理 SGR
   颜色。现有 `build_log_reduction` 统一表示 pnpm 布局压紧与常规进度缩减，包括两者组合的结果。
@@ -139,7 +139,7 @@ Compressor 列表。
 `before_model` 和 `post_tool` 必须提供 `capabilities.recovery`：`{"kind":"none"}`、
 `{"kind":"shell"}` 或 `{"kind":"tool","name":"tokenless_retrieve"}`。Tool 名称限 1–64 个
 ASCII 字母、数字、下划线或连字符。未知字段、缺失 recovery 和旧的 `retrieval_available`
-布尔字段均会被拒绝。Wire 版本保持 2；BuildLog 沿用现有操作标签，不新增 SDK 枚举。
+布尔字段均会被拒绝。Wire 版本保持 2；BuildLog 沿用现有操作标签，不新增 SDK 枚举。可选的 v2 字段（`PreToolCapabilities.post_tool_replacement` 以及 `PostToolRequest.exit_code`、`stderr`、`original_command`、`cwd`）在省略时保持向后兼容默认语义；由于 Protocol v2 请求结构体启用 `#[serde(deny_unknown_fields)]`，发送这些字段的调用方必须配合或晚于新版 Core 升级。
 只有静态 Tool 能启用 BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，
 不新增或改变 Agent 工具。
 
@@ -161,11 +161,9 @@ Linux 和 macOS 上改写在一个子 `tokenless` 进程中进行，该进程自
 
 `pre_tool` 使用链接进 Tokenless 的 RTK 库改写命令，不会在 `PATH` 中查找独立的 `rtk`
 可执行文件。改写后的命令以绝对路径调用当前运行的 `tokenless`，形式为 `tokenless rtk`，
-因此始终使用同一版本的 RTK。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
-原生形式，使其输出只有一个 PostTool 所有者。包含已识别原生 `find`、`head`、`tail`、`grep` 或 `rg`
-调用的整条命令也保持原生形式。保护覆盖直接调用，以及 RTK 的内置前缀：
-`env`、`command`、`exec`、`noglob`、`nocorrect`、
-`builtin`、`timeout`、`time`、`nice`、`nohup` 和 `uv run`，支持嵌套和 Shell 反斜杠换行续行。
+因此始终使用同一版本的 RTK。在默认的 `capabilities.post_tool_replacement: "full_retrievable"` 能力下，已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令（直接或经内置 Wrapper 调用）保持原生形式，使其输出只有一个 PostTool 所有者；包含已识别原生 `find`、`head`、`tail`、`grep` 或 `rg` 调用的整条命令也保持原生形式。声明 `"lossless_only"` 时仅对 `head`/`tail` 预览与 `find`/`grep`/`rg` 搜索保留原生形式，允许 RTK 改写构建/测试命令；声明 `"none"` 时关闭两类豁免并恢复 RTK 改写。Wrapper 保护覆盖直接调用以及 RTK 的内置前缀：
+`env`（含 `-u`/`--unset`、`-C`/`--chdir`、`-P`、`--`、`-vS`/`-iS`/`-vC` 等短选项簇，以及有界 GNU `-S`/`--split-string` 拆分）、`command`、`exec`、`noglob`、`nocorrect`、
+`builtin`、`timeout`、`time`、`nice`、`nohup` 和 `uv run`，支持嵌套和 Shell 反斜杠换行续行。`post_tool` 共享同一套包装剥离逻辑，识别经包装调用的 `tokenless retrieve` Shell 命令并原样透传。
 进程 Wrapper 参数按随包 RTK 的语法识别，未知参数会停止识别。设置
 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 后仍保持此行为。不会读取自定义 `hooks.transparent_prefixes`，
 此类前缀下的调用仍可能被 RTK 改写；其他受支持命令也仍可由 RTK 改写。

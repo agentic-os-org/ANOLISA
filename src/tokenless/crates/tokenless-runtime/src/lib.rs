@@ -844,6 +844,10 @@ pub fn compress_response_with_store(
             },
             replace_with_text: false,
         },
+        exit_code: None,
+        stderr: None,
+        original_command: None,
+        cwd: None,
     };
     let run = PostToolPipeline::run(
         &request,
@@ -851,6 +855,7 @@ pub fn compress_response_with_store(
             timeout: RESPONSE_PIPELINE_TIMEOUT,
             max_input_bytes: MAX_INPUT_BYTES,
             min_input_chars: 0,
+            error_min_input_chars: post_tool::DEFAULT_ERROR_MIN_CHARS,
             compression_enabled,
             search_path_sharing_enabled: false,
             diff_compression_enabled: false,

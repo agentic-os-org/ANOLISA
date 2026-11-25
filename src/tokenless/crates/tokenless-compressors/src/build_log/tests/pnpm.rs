@@ -490,8 +490,8 @@ fn done_records_and_original_layout_boundaries_never_join_short_runs() {
 }
 
 #[test]
-fn eight_gaps_are_recoverable_but_a_ninth_falls_back_to_layout_before_writing() {
-    for groups in [8, 9] {
+fn top_twenty_four_gaps_are_omitted_and_expanded_identically() {
+    for groups in [8, 24, 26] {
         let mut input = String::new();
         for group in 0..groups {
             input.push_str(&run(group * 100, 12));
@@ -502,19 +502,13 @@ fn eight_gaps_are_recoverable_but_a_ninth_falls_back_to_layout_before_writing() 
         let store = RecordingStore::new(None);
         let outcome =
             BuildLogCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
-        if groups == 8 {
-            assert_eq!(outcome.metrics.omitted_blocks, 8);
-            assert_eq!(store.calls(), 8);
-            assert_eq!(
-                expand_markers(&outcome, &store, &RecoveryMethod::Shell),
-                layout
-            );
-        } else {
-            assert_eq!(outcome.output, layout);
-            assert_eq!(outcome.operations, [BuildLogOperation::Reduction]);
-            assert!(outcome.stash_writes.is_empty());
-            assert_eq!(store.calls(), 0);
-        }
+        let expected_omitted = groups.min(24);
+        assert_eq!(outcome.metrics.omitted_blocks, expected_omitted);
+        assert_eq!(store.calls(), expected_omitted);
+        assert_eq!(
+            expand_markers(&outcome, &store, &RecoveryMethod::Shell),
+            layout
+        );
     }
 }
 

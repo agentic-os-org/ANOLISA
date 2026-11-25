@@ -62,7 +62,10 @@ fn path_lists_respect_file_capability_status_and_policy_gates() {
         match mode {
             0 => req.content_origin = ContentOrigin::FileContent,
             1 => req.content_origin = ContentOrigin::FileRead,
-            2 => req.status = ToolResultStatus::Error,
+            2 => {
+                req.status = ToolResultStatus::Error;
+                req.exit_code = Some(127);
+            }
             3 => req.capabilities.replace_output = false,
             4 => req.capabilities.replace_with_text = false,
             5 => config.search_path_sharing_enabled = false,

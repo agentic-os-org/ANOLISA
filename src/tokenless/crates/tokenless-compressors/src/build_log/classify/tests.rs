@@ -11,7 +11,7 @@ fn error_warning_and_failure_lines_are_diagnostic() {
         (BuildLogFormat::Make, "Segmentation fault (core dumped)"),
     ] {
         assert_eq!(
-            classify(line, format, &templates),
+            classify(line, format, &templates, BuildLogMode::Success),
             LineRole::Diagnostic,
             "line: {line}"
         );
@@ -64,7 +64,7 @@ fn dialects_assign_only_known_progress_to_routine_roles() {
         ),
     ] {
         assert_eq!(
-            classify(line, format, &templates),
+            classify(line, format, &templates, BuildLogMode::Success),
             LineRole::Routine(family)
         );
     }
@@ -73,6 +73,7 @@ fn dialects_assign_only_known_progress_to_routine_roles() {
             "unrecognized but potentially important output",
             BuildLogFormat::Cargo,
             &templates,
+            BuildLogMode::Success,
         ),
         LineRole::Unknown
     );
@@ -88,7 +89,12 @@ fn pytest_nonstandard_outcomes_remain_diagnostic() {
         "XFAIL tests/test_a.py::case - expected failure",
     ] {
         assert_eq!(
-            classify(line, BuildLogFormat::Pytest, &templates),
+            classify(
+                line,
+                BuildLogFormat::Pytest,
+                &templates,
+                BuildLogMode::Success
+            ),
             LineRole::Diagnostic,
             "line: {line}"
         );
@@ -115,6 +121,7 @@ fn npm_warnings_and_make_directories_are_preserved() {
             "npm WARN deprecated old-package@1.0.0",
             BuildLogFormat::Npm,
             &templates,
+            BuildLogMode::Success,
         ),
         LineRole::Diagnostic
     );
@@ -123,7 +130,12 @@ fn npm_warnings_and_make_directories_are_preserved() {
         "make[1]: Leaving directory '/work/lib'",
     ] {
         assert_eq!(
-            classify(line, BuildLogFormat::Make, &templates),
+            classify(
+                line,
+                BuildLogFormat::Make,
+                &templates,
+                BuildLogMode::Success
+            ),
             LineRole::Phase
         );
     }
@@ -137,6 +149,7 @@ fn summaries_and_phase_boundaries_are_not_routine() {
             "Finished `release` profile [optimized] target(s) in 1s",
             BuildLogFormat::Cargo,
             &templates,
+            BuildLogMode::Success,
         ),
         LineRole::Summary
     );
@@ -145,6 +158,7 @@ fn summaries_and_phase_boundaries_are_not_routine() {
             "===== test session starts =====",
             BuildLogFormat::Pytest,
             &templates,
+            BuildLogMode::Success,
         ),
         LineRole::Phase
     );
@@ -158,6 +172,7 @@ fn package_names_containing_error_are_not_diagnostics() {
             "npm http fetch GET 200 https://registry/npm/http-errors 20ms",
             BuildLogFormat::Npm,
             &templates,
+            BuildLogMode::Success,
         ),
         LineRole::Routine(RoutineFamily::NpmFetch)
     );
@@ -166,6 +181,7 @@ fn package_names_containing_error_are_not_diagnostics() {
             "Compiling error-chain v0.12.4",
             BuildLogFormat::Cargo,
             &templates,
+            BuildLogMode::Success,
         ),
         LineRole::Routine(RoutineFamily::CargoCompile)
     );
@@ -176,11 +192,93 @@ fn generic_requires_a_preselected_dominant_template() {
     let line = "progress: item 42 complete";
     let template = generic_progress_template(line).unwrap();
     assert_eq!(
-        classify(line, BuildLogFormat::Generic, &HashSet::new()),
+        classify(
+            line,
+            BuildLogFormat::Generic,
+            &HashSet::new(),
+            BuildLogMode::Success,
+        ),
         LineRole::Unknown
     );
     assert_eq!(
-        classify(line, BuildLogFormat::Generic, &HashSet::from([template]),),
+        classify(
+            line,
+            BuildLogFormat::Generic,
+            &HashSet::from([template.clone()]),
+            BuildLogMode::Success,
+        ),
         LineRole::Routine(RoutineFamily::Generic)
     );
+    assert_eq!(
+        classify(
+            line,
+            BuildLogFormat::Generic,
+            &HashSet::from([template]),
+            BuildLogMode::DiagnosticFailure,
+        ),
+        LineRole::Unknown
+    );
+}
+
+#[test]
+fn diagnostic_failure_mode_locks_failure_anchors_while_preserving_go_pass() {
+    let templates = HashSet::new();
+    assert!(matches!(
+        classify(
+            "--- PASS: TestHealthy (0.00s)",
+            BuildLogFormat::Go,
+            &templates,
+            BuildLogMode::DiagnosticFailure,
+        ),
+        LineRole::Routine(_)
+    ));
+    for (format, line) in [
+        (BuildLogFormat::Cargo, "assertion `left == right` failed"),
+        (BuildLogFormat::Cargo, "   |     ^^^^^^ expected `u32`"),
+        (BuildLogFormat::Pytest, "E       AssertionError: expected 1"),
+        (BuildLogFormat::Generic, "--- failing block marker"),
+    ] {
+        assert_eq!(
+            classify(line, format, &templates, BuildLogMode::DiagnosticFailure),
+            LineRole::Diagnostic,
+            "line: {line}"
+        );
+    }
+}
+
+#[test]
+fn failure_mode_anchors_do_not_promote_midline_substrings_in_routine_lines() {
+    let templates = HashSet::new();
+    for (format, line) in [
+        (BuildLogFormat::Cargo, "   Compiling crate-left:info v0.1.0"),
+        (
+            BuildLogFormat::Cargo,
+            "test suite::checks_Expected:_Actual:_right:_FAILED: ... ok",
+        ),
+        (
+            BuildLogFormat::Cargo,
+            "Compiling BUILD_FAILED_handler v0.1.0",
+        ),
+    ] {
+        assert!(
+            matches!(
+                classify(line, format, &templates, BuildLogMode::DiagnosticFailure),
+                LineRole::Routine(_)
+            ),
+            "expected routine line for `{line}`"
+        );
+    }
+    for (format, line) in [
+        (BuildLogFormat::Cargo, "  left: 1"),
+        (BuildLogFormat::Cargo, " right: 2"),
+        (BuildLogFormat::Jest, "  Expected: 401"),
+        (BuildLogFormat::Jest, "  Actual: 200"),
+        (BuildLogFormat::Generic, "FAILED: build.o"),
+    ] {
+        assert_eq!(
+            classify(line, format, &templates, BuildLogMode::DiagnosticFailure),
+            LineRole::Diagnostic,
+            "expected diagnostic anchor for `{line}`"
+        );
+    }
 }

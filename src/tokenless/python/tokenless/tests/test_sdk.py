@@ -26,6 +26,7 @@ from anolisa_tokenless import (
     ContentType,
     OutputOptimization,
     PostToolCapabilities,
+    PostToolReplacementCapability,
     PostToolRequest,
     PreToolAction,
     PreToolCapabilities,
@@ -959,6 +960,106 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(bypass.output, original)
                     self.assertEqual(bypass.applied_operations, ())
+
+    async def test_pre_tool_replacement_capability_wire_encoding(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        sdk._rtk_launcher = Path("/tmp/stub-tokenless")
+        response_bytes = json.dumps(
+            {
+                "protocol_version": 2,
+                "operation": "pre_tool",
+                "result": {
+                    "arguments": {"command": "cargo test"},
+                    "action": "passthrough",
+                    "output_optimization": "none",
+                },
+            }
+        ).encode("utf-8")
+        for capability, expected in (
+            (PostToolReplacementCapability.FULL_RETRIEVABLE, None),
+            (PostToolReplacementCapability.LOSSLESS_ONLY, "lossless_only"),
+            (PostToolReplacementCapability.NONE, "none"),
+        ):
+            with self.subTest(capability=capability), patch(
+                "anolisa_tokenless.sdk._run_compress", return_value=response_bytes
+            ) as run_compress:
+                await sdk.pre_tool(
+                    PreToolRequest(
+                        tool_name="shell",
+                        arguments={"command": "cargo test"},
+                        command_field="command",
+                        capabilities=PreToolCapabilities(
+                            replace_arguments=True,
+                            block_and_suggest=False,
+                            post_tool_replacement=capability,
+                        ),
+                        attribution=Attribution("sdk-agent", "sdk-session", "cap-1"),
+                    )
+                )
+            envelope = json.loads(run_compress.call_args.args[1].decode("utf-8"))
+            caps = envelope["input"]["capabilities"]
+            if expected is None:
+                self.assertNotIn("post_tool_replacement", caps)
+            else:
+                self.assertEqual(caps["post_tool_replacement"], expected)
+
+    async def test_post_tool_optional_error_fields_wire_encoding(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        ok_response = json.dumps(
+            {
+                "output": "raw",
+                "disposition": "tool_error",
+                "content_type": "build_log",
+                "applied_operations": [],
+                "recoverability": "lossless",
+                "before_tokens": 5,
+                "after_tokens": 5,
+                "stash_keys": [],
+                "tokenizer_id": "heuristic-v1",
+                "additional_context": None,
+            }
+        )
+        with patch.object(sdk, "runtime") as runtime:
+            runtime._post_tool_json.return_value = ok_response
+            await sdk.post_tool(
+                PostToolRequest(
+                    result_kind=ResultKind.TOOL,
+                    tool_name="Bash",
+                    content="raw",
+                    status=ToolResultStatus.ERROR,
+                    content_origin=ContentOrigin.COMMAND_OUTPUT,
+                    output_optimization=OutputOptimization.NONE,
+                    capabilities=PostToolCapabilities(True, RecoveryMethod(), True),
+                    attribution=Attribution("sdk-agent", "sdk-session", "err-default"),
+                )
+            )
+            default_payload = json.loads(runtime._post_tool_json.call_args.args[0])
+            for field_name in ("command", "exit_code", "stderr", "original_command", "cwd"):
+                self.assertNotIn(field_name, default_payload)
+
+            await sdk.post_tool(
+                PostToolRequest(
+                    result_kind=ResultKind.TOOL,
+                    tool_name="Bash",
+                    content="raw",
+                    status=ToolResultStatus.ERROR,
+                    content_origin=ContentOrigin.COMMAND_OUTPUT,
+                    output_optimization=OutputOptimization.NONE,
+                    capabilities=PostToolCapabilities(True, RecoveryMethod.shell(), True),
+                    attribution=Attribution("sdk-agent", "sdk-session", "err-full"),
+                    command="cargo test",
+                    exit_code=101,
+                    stderr="error: linker command not found",
+                    original_command="timeout 30 cargo test",
+                    cwd="/work/repo",
+                )
+            )
+            populated_payload = json.loads(runtime._post_tool_json.call_args.args[0])
+            self.assertEqual(populated_payload["command"], "cargo test")
+            self.assertEqual(populated_payload["exit_code"], 101)
+            self.assertEqual(populated_payload["stderr"], "error: linker command not found")
+            self.assertEqual(populated_payload["original_command"], "timeout 30 cargo test")
+            self.assertEqual(populated_payload["cwd"], "/work/repo")
 
 
 if __name__ == "__main__":

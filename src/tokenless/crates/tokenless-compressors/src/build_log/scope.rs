@@ -3,8 +3,8 @@
 //! Each BuildLog splitter provides its own line grammar while delegating control-character limits,
 //! Markdown fence isolation, `\0` sampled detection, and shell/JVM preamble handling here.
 
-// Lines exceeding MAX_LINE_BYTES close the active scope locally;
-// any single line exceeding MAX_BYTES disables edits for the whole result.
+// Lines exceeding MAX_LINE_BYTES or MAX_BYTES close the active scope locally
+// while keeping surrounding valid build-log blocks eligible for compaction.
 pub(super) const MAX_LINE_BYTES: usize = 4096;
 pub(super) const MAX_ROWS: usize = 256;
 pub(super) const MAX_BYTES: usize = 64 * 1024;

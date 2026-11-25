@@ -685,8 +685,10 @@ fn bounded_blocks_are_rejected_atomically() {
         input.insert_str(input.len() - 1, &"x".repeat(length));
         check(&format!("{CONTEXT}{input}"), bytes == 65536);
     }
-    let input = format!("{CONTEXT}{}{}", downloads(20, ""), "x".repeat(65537));
-    check(&input, false);
+    let huge_tail = "x".repeat(65537);
+    let input = format!("{CONTEXT}{}{huge_tail}", downloads(20, ""));
+    let output = check(&input, true);
+    assert!(output.ends_with(&huge_tail));
 }
 
 #[test]

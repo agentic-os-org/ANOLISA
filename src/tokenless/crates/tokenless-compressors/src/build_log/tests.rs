@@ -537,21 +537,129 @@ fn locally_unprofitable_gap_stays_verbatim() {
 }
 
 #[test]
-fn ninth_profitable_gap_abandons_reduction_before_stashing() {
+fn more_than_twenty_four_profitable_gaps_retains_top_twenty_four() {
     let mut input = "$ cargo build\n".to_owned();
-    for group in 0..9 {
-        for index in 0..12 {
+    // 24 large profitable groups + 2 smaller (still profitable) groups at the end.
+    for group in 0..24 {
+        for index in 0..20 {
             input.push_str(&format!(
-                "Compiling group-{group}-package-{index} with a long repeated compilation description\n"
+                "Compiling large-group-{group}-package-{index} with a long repeated compilation description\n"
             ));
         }
-        input.push_str(&format!("phase boundary {group}\n"));
+        input.push_str(&format!("phase boundary large-{group}\n"));
+    }
+    for group in 0..2 {
+        for index in 0..12 {
+            input.push_str(&format!(
+                "Compiling small-group-{group}-package-{index} with a long repeated compilation description\n"
+            ));
+        }
+        input.push_str(&format!("phase boundary small-{group}\n"));
     }
     let store = InMemoryStore::new();
     let outcome = BuildLogCompressor.compress(&input, Some(&store));
-    assert_eq!(outcome.output, input);
-    assert!(outcome.operations.is_empty());
-    assert_eq!(store.len(), 0);
+    assert_eq!(outcome.operations, vec![BuildLogOperation::Reduction]);
+    assert_eq!(outcome.stash_writes.len(), 24);
+    assert_eq!(store.len(), 24);
+    assert!(outcome.output.contains("Compiling small-group-0-package-0"));
+    assert!(outcome.output.contains("Compiling small-group-1-package-0"));
+    // Leading/trailing context lines of an omitted block remain visible; middle lines are omitted.
+    assert!(
+        !outcome
+            .output
+            .contains("Compiling large-group-0-package-10")
+    );
+}
+
+#[test]
+fn diagnostic_failure_mode_disables_generic_and_preserves_failure_anchors() {
+    let mut input = String::from("$ cargo test\n");
+    for index in 0..20 {
+        input.push_str(&format!(
+            "   Compiling crate-{index:02} v0.1.0 (/work/workspace/packages/crate-{index:02}) with extended build output\n"
+        ));
+    }
+    for step in 1..=14 {
+        input.push_str(&format!("progress: custom stage {step} complete\n"));
+    }
+    input.push_str("test passed_case ... ok\n");
+    input.push_str("thread 'failing_case' panicked at src/lib.rs:42:9:\n");
+    input.push_str("assertion `left == right` failed\n");
+    input.push_str("  left: 1\n");
+    input.push_str(" right: 2\n");
+    input.push_str("   |\n");
+    input.push_str("42 | assert_eq!(1, 2);\n");
+    input.push_str("   | ^^^^^^^^^^^^^^^\n");
+    input.push_str("= note: run with `RUST_BACKTRACE=1` for a backtrace\n");
+    input.push_str(
+        "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+    );
+
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress_with_options(
+        &input,
+        Some(&store),
+        &RecoveryMethod::Shell,
+        BuildLogMode::DiagnosticFailure,
+    );
+    assert!(outcome.output.contains("lines omitted."));
+    assert!(!outcome.output.contains("Compiling crate-10"));
+    // Generic template lines remain verbatim in DiagnosticFailure mode.
+    for step in 1..=14 {
+        assert!(
+            outcome
+                .output
+                .contains(&format!("progress: custom stage {step} complete\n"))
+        );
+    }
+    for required in [
+        "thread 'failing_case' panicked at src/lib.rs:42:9:",
+        "assertion `left == right` failed",
+        "  left: 1",
+        " right: 2",
+        "42 | assert_eq!(1, 2);",
+        "   | ^^^^^^^^^^^^^^^",
+        "= note: run with `RUST_BACKTRACE=1` for a backtrace",
+        "test result: FAILED.",
+    ] {
+        assert!(
+            outcome.output.contains(required),
+            "missing anchor: {required}"
+        );
+    }
+}
+
+#[test]
+fn maven_over_64kib_line_only_isolates_adjacent_runs() {
+    let mut input = String::from(
+        "[INFO] Scanning for projects...\n\
+         [INFO] --- compiler:3.13.0:compile (default-compile) @ sample ---\n",
+    );
+    let downloading = |start: usize| -> String {
+        (start..start + 6)
+            .map(|i| {
+                format!(
+                    "[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/example/mod-{i:02}/1.0/mod-{i:02}-1.0.pom\n\
+                     [INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/example/mod-{i:02}/1.0/mod-{i:02}-1.0.pom (1.2 kB at 45 kB/s)\n"
+                )
+            })
+            .collect()
+    };
+    let huge_line = format!(
+        "[INFO] Diagnostic payload: {}\n",
+        "x".repeat(scope::MAX_BYTES + 1)
+    );
+    input.push_str(&downloading(0));
+    input.push_str(&huge_line);
+    input.push_str(&downloading(10));
+    input.push_str("[INFO] BUILD SUCCESS\n");
+
+    let store = InMemoryStore::new();
+    let outcome =
+        BuildLogCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::Shell);
+    assert!(outcome.output.contains(&huge_line));
+    assert_ne!(outcome.output, input);
+    assert!(outcome.output.len() < input.len());
 }
 
 #[test]
