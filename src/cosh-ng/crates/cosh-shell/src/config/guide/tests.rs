@@ -1092,6 +1092,116 @@ fn failure_context_capacity_is_bounded_and_busy_or_unsafe_state_fails_quietly() 
     assert!(store.save_failure_context(&first, &event, 1000).is_err());
 }
 
+fn append_raw_failure_context(store: &GuideStore, id: &str, expression: &str, observed_at_ms: u64) {
+    let path = store.root.join("failure-contexts.json");
+    let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    raw["entries"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": id,
+            "event": {
+                "expression": expression,
+                "status": 101,
+                "cwd": "/project",
+                "observed_at_ms": observed_at_ms,
+                "scope": "observed_command_fragment",
+                "identity": "external_unshadowed",
+            },
+        }));
+    fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn unsafe_failure_context_entries_do_not_poison_clean_siblings() {
+    use crate::insight::guidance::{BashEvent, CommandIdentity, ExecutionScope};
+    let (_temp, store, _runtime) = fixture();
+    let event = BashEvent {
+        expression: "cargo build".into(),
+        status: 101,
+        cwd: "/project".into(),
+        observed_at_ms: 1000,
+        scope: ExecutionScope::ObservedCommandFragment,
+        identity: CommandIdentity::ExternalUnshadowed,
+    };
+    let clean = uuid::Uuid::new_v4().simple().to_string();
+    store.save_failure_context(&clean, &event, 1000).unwrap();
+    // Leave a secret-bearing record behind, as version drift or an older build would.
+    let unsafe_id = uuid::Uuid::new_v4().simple().to_string();
+    append_raw_failure_context(&store, &unsafe_id, "cargo test --api-key=abc123", 1000);
+
+    assert_eq!(store.load_failure_context(&clean, 1001).unwrap(), event);
+    assert!(store.load_failure_context(&unsafe_id, 1001).is_err());
+
+    let mut next_event = event.clone();
+    next_event.cwd = "/next".into();
+    next_event.observed_at_ms = 1001;
+    let next = uuid::Uuid::new_v4().simple().to_string();
+    store
+        .save_failure_context(&next, &next_event, 1002)
+        .unwrap();
+
+    assert_eq!(store.load_failure_context(&next, 1003).unwrap(), next_event);
+    assert_eq!(store.load_failure_context(&clean, 1003).unwrap(), event);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.root.join("failure-contexts.json")).unwrap())
+            .unwrap();
+    assert!(raw["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["id"] != unsafe_id.as_str()));
+}
+
+#[test]
+fn expired_unsafe_failure_context_no_longer_blocks_new_records() {
+    use crate::insight::guidance::{BashEvent, CommandIdentity, ExecutionScope};
+    let (_temp, store, _runtime) = fixture();
+    let unsafe_id = uuid::Uuid::new_v4().simple().to_string();
+    let path = store.root.join("failure-contexts.json");
+    let seed = serde_json::json!({
+        "version": 1,
+        "entries": [{
+            "id": unsafe_id,
+            "event": {
+                "expression": "cargo test --api-key=abc123",
+                "status": 101,
+                "cwd": "/project",
+                "observed_at_ms": 1000,
+                "scope": "observed_command_fragment",
+                "identity": "external_unshadowed",
+            },
+        }],
+    });
+    fs::write(&path, serde_json::to_vec(&seed).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    // Two hours later the unsafe record is stale; a new failure must still be recorded.
+    let now_ms = 7_200_001;
+    let event = BashEvent {
+        expression: "cargo build".into(),
+        status: 101,
+        cwd: "/project".into(),
+        observed_at_ms: now_ms - 1,
+        scope: ExecutionScope::ObservedCommandFragment,
+        identity: CommandIdentity::ExternalUnshadowed,
+    };
+    let fresh = uuid::Uuid::new_v4().simple().to_string();
+    store.save_failure_context(&fresh, &event, now_ms).unwrap();
+
+    assert_eq!(
+        store.load_failure_context(&fresh, now_ms + 1).unwrap(),
+        event
+    );
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(raw["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["id"] != unsafe_id.as_str()));
+}
+
 #[test]
 fn login_health_same_evidence_is_suppressed_within_window() {
     let (_temp, store, runtime) = fixture();

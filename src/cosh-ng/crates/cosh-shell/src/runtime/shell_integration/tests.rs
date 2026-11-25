@@ -585,6 +585,90 @@ fn shown_context_reference_resolves_to_the_exact_observation() {
     );
 }
 
+fn append_unsafe_failure_context(dir: &tempfile::TempDir, id: &str, observed_at_ms: u64) {
+    let path = dir.path().join("guide/failure-contexts.json");
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw["entries"].as_array_mut().unwrap().push(json!({
+        "id": id,
+        "event": {
+            "expression": "cargo test --api-key=abc123",
+            "status": 101,
+            "cwd": "/project",
+            "observed_at_ms": observed_at_ms,
+            "scope": "observed_command_fragment",
+            "identity": "external_unshadowed",
+        },
+    }));
+    std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn unsafe_sibling_record_keeps_clean_failure_invitations_and_contexts_usable() {
+    let (dir, store, runtime) = fixture();
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    let value = advice(&snapshot.generation);
+    let expected = match request(&value) {
+        Request::Advise { event, .. } => event,
+        _ => unreachable!(),
+    };
+    let first = evaluate(request(&value), 1000, Some((&store, &runtime)), render);
+    assert_eq!(first.decision, Status::Show);
+
+    append_unsafe_failure_context(&dir, &uuid::Uuid::new_v4().simple().to_string(), 1000);
+    assert_eq!(
+        store
+            .load_failure_context(&first.decision_id, 1001)
+            .unwrap(),
+        expected
+    );
+
+    let mut next = advice(&snapshot.generation);
+    next["session"] = json!("session-2");
+    next["event"]["cwd"] = json!("/other");
+    assert_eq!(
+        evaluate(request(&next), 1001, Some((&store, &runtime)), render).decision,
+        Status::Show
+    );
+}
+
+#[test]
+fn expired_unsafe_record_does_not_block_new_failure_contexts() {
+    let (dir, store, runtime) = fixture();
+    let now_ms = 7_200_001;
+    let seed = json!({
+        "version": 1,
+        "entries": [{
+            "id": uuid::Uuid::new_v4().simple().to_string(),
+            "event": {
+                "expression": "cargo test --api-key=abc123",
+                "status": 101,
+                "cwd": "/project",
+                "observed_at_ms": 1000,
+                "scope": "observed_command_fragment",
+                "identity": "external_unshadowed",
+            },
+        }],
+    });
+    let path = dir.path().join("guide/failure-contexts.json");
+    std::fs::write(&path, serde_json::to_vec(&seed).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let snapshot = store.snapshot(Some(&runtime)).unwrap();
+    let mut value = advice(&snapshot.generation);
+    value["event"]["observed_at_ms"] = json!(now_ms - 1);
+    let result = evaluate(
+        request(&value),
+        now_ms,
+        Some((&store, &runtime)),
+        |_, _, id| Some(format!("cosh --ask 'Analyze this failure' --context {id}")),
+    );
+    assert_eq!(result.decision, Status::Show);
+    assert!(store
+        .load_failure_context(&result.decision_id, now_ms + 1)
+        .is_ok());
+}
+
 #[test]
 fn failed_context_persistence_does_not_consume_an_invitation() {
     let (dir, store, runtime) = fixture();
