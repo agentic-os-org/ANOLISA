@@ -31,7 +31,7 @@ elif request["method"] == "invoke":
     if op == "retry" and mode == "retry" and "ORIGINAL" in command:
         reply["effects"] = [{"type": "block", "reason_code": "tokenless_retry",
                              "text": "Retry with printf CANDIDATE > AW_MUST_NOT_EXIST"}]
-    if op == "record" and (mode in ("replace", "replace-apply", "replace-mcp", "replace-parallel")
+    if op == "record" and (mode in ("replace", "replace-apply", "replace-mcp", "replace-mcp-default", "replace-parallel")
                            or (mode == "replace-long" and "AW_LONG_DONE" in
                                request["event"]["tool"].get("result_projection", {}).get("text", ""))):
         text = "AW_REDACTED_RESULT"
