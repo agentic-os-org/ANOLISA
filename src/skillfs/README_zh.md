@@ -158,8 +158,9 @@ skillfs mount --config /path/to/skillfs-mount.toml --managed
 TOML 示例、支持的参数和 OpenClaw 接入限制见
 [配置参考](../../docs/user-guide/zh/skillfs/index.md#挂载配置)。
 
-`explain` 在不挂载的情况下检查当前配置，不查询正在运行的 managed worker。
-参数、JSON 字段、exit code 和不完整结果的语义见
+`explain --config` 检查磁盘上的当前配置。对于运行中的 Linux 托管多来源挂载，
+可用 `skillfs explain --mountpoint /mnt/skillfs --skill demo` 查看工作进程选中的来源，
+以及默认目录是否列出该技能。输出和退出码见
 [诊断参考](../../docs/user-guide/zh/skillfs/index.md#explain)。
 
 ### Managed Mount 模式

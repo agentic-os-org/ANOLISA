@@ -86,6 +86,8 @@ pub struct SkillFs {
     /// filesystems mounted through the blocking entries, which have no
     /// waiter.
     session_signal: Option<Arc<crate::mount::SessionSignal>>,
+    /// Consumed at INIT so observations are bound to this kernel mount.
+    pub(crate) mounted_listing_observer: Option<crate::MountedListingObserver>,
     /// Skill Security policy. The S1 default is
     /// [`SkillMetaProtectionPolicy`], which denies mutating operations
     /// under `.skill-meta/**`. Embedders/tests can swap it for
@@ -267,6 +269,7 @@ impl SkillFs {
             skill_layout: SkillLayout::Flat,
             sync_tx: Some(sync_tx),
             session_signal: None,
+            mounted_listing_observer: None,
             policy: Arc::new(SkillMetaProtectionPolicy),
             event_sink: Arc::new(NoopEventSink),
             active_resolver: None,
@@ -795,8 +798,12 @@ impl Filesystem for SkillFs {
         _req: &Request<'_>,
         _config: &mut fuser::KernelConfig,
     ) -> Result<(), std::os::raw::c_int> {
+        let mount_id = self.session_mount_id();
+        if let (Some(observe), Some(id)) = (self.mounted_listing_observer.take(), mount_id) {
+            observe(id, self.listed_skill_names(false));
+        }
         if let Some(signal) = &self.session_signal {
-            signal.mark_ready(self.session_mount_id());
+            signal.mark_ready(mount_id);
         }
         Ok(())
     }

@@ -17,6 +17,34 @@ use crate::security::{
 use crate::sys::errno;
 
 impl SkillFs {
+    /// Names actually enumerated under the flat /skills directory. A secondary
+    /// skill can still be addressed directly even when absent from this list.
+    pub(in crate::fs) fn listed_skill_names(&self, sorted: bool) -> Vec<String> {
+        let mut names = self.primary_skill_names();
+        names.retain(|n| !is_reserved_lifecycle_name(n));
+        if self.staging_matcher.is_some() {
+            let store = self.store.read();
+            names.retain(|n| !self.store_entry_is_staging_private(&store, n));
+        }
+        if self.pending_install_controller.is_some() {
+            names.retain(|n| !self.is_pending_install(n));
+        }
+        if self.active_resolver.is_some() {
+            names.retain(|n| {
+                n == "skill-discover"
+                    || !matches!(self.resolve_skill_read(n), ReadResolution::Hidden)
+            });
+        }
+        if sorted {
+            names.sort();
+        }
+        // The generated discover entry is available even with an empty store.
+        if !names.iter().any(|n| n == "skill-discover") {
+            names.push("skill-discover".to_owned());
+        }
+        names
+    }
+
     pub(in crate::fs) fn readdir_dynamic(
         &mut self,
         req: &Request,
@@ -106,34 +134,7 @@ impl SkillFs {
                 entries
             }
             PathType::SkillsDir => {
-                let mut skill_names = self.primary_skill_names();
-                // S3: lifecycle namespaces never appear in ordinary
-                // `/skills` listings. The store loader already skips
-                // hidden top-level directories, but defend in depth here
-                // in case a placeholder lands in the store via mkdir
-                // before the S3 mkdir gate fires.
-                skill_names.retain(|n| !is_reserved_lifecycle_name(n));
-                // I2: staging roots are installer-private workspaces,
-                // not skills. Hide them — and any store entry scanned
-                // out of a pre-seeded staging category — from the
-                // /skills listing. One guard covers the whole filter.
-                if self.staging_matcher.is_some() {
-                    let store = self.store.read();
-                    skill_names.retain(|n| !self.store_entry_is_staging_private(&store, n));
-                }
-                // Pending installs are hidden from discovery until
-                // completeness check passes and activation exists.
-                if self.pending_install_controller.is_some() {
-                    skill_names.retain(|n| !self.is_pending_install(n));
-                }
-                // D1.1: mirror the opendir filter so the dynamic
-                // fallback path also hides ledger-hidden skills.
-                if self.active_resolver.is_some() {
-                    skill_names.retain(|n| {
-                        n == "skill-discover"
-                            || !matches!(self.resolve_skill_read(n), ReadResolution::Hidden)
-                    });
-                }
+                let skill_names = self.listed_skill_names(false);
                 let skills_dir_ino = self.skills_dir_ino();
 
                 let mut entries: Vec<(u64, FileType, String)> = vec![
@@ -145,16 +146,6 @@ impl SkillFs {
                     let skill_path = self.skill_inode_path(name);
                     let skill_ino = self.inodes.readdir_ino(&skill_path);
                     entries.push((skill_ino, FileType::Directory, name.clone()));
-                }
-
-                if !skill_names.iter().any(|n| n == "skill-discover") {
-                    let discover_path = self.skill_inode_path("skill-discover");
-                    let discover_ino = self.inodes.readdir_ino(&discover_path);
-                    entries.push((
-                        discover_ino,
-                        FileType::Directory,
-                        "skill-discover".to_string(),
-                    ));
                 }
 
                 // L1: in in-place mode, the FUSE root IS the skills
@@ -847,33 +838,7 @@ impl SkillFs {
                 (entries, dir_file)
             }
             PathType::SkillsDir => {
-                let mut skill_names = self.primary_skill_names();
-                // S3: lifecycle namespaces are hidden from ordinary
-                // `/skills` listings; mirror the `readdir_dynamic` filter
-                // so the snapshot taken at `opendir` cannot leak them
-                // even if a placeholder lands in the store later.
-                skill_names.retain(|n| !is_reserved_lifecycle_name(n));
-                // I2: staging roots — and store entries scanned out of
-                // a pre-seeded staging category — are hidden from the
-                // opendir snapshot. One guard covers the whole filter.
-                if self.staging_matcher.is_some() {
-                    let store = self.store.read();
-                    skill_names.retain(|n| !self.store_entry_is_staging_private(&store, n));
-                }
-                // Pending installs are hidden from opendir snapshot.
-                if self.pending_install_controller.is_some() {
-                    skill_names.retain(|n| !self.is_pending_install(n));
-                }
-                // D1.1: ledger-hidden skills are also dropped from the
-                // opendir snapshot so readdir cannot leak them.
-                // skill-discover is exempt — it is always virtual and
-                // visible.
-                if self.active_resolver.is_some() {
-                    skill_names.retain(|n| {
-                        n == "skill-discover"
-                            || !matches!(self.resolve_skill_read(n), ReadResolution::Hidden)
-                    });
-                }
+                let skill_names = self.listed_skill_names(true);
                 let skills_dir_ino = if self.in_place {
                     FUSE_ROOT_ID
                 } else {
@@ -888,24 +853,10 @@ impl SkillFs {
                     (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
                 ];
 
-                let mut sorted_names = skill_names;
-                sorted_names.sort();
-
-                for name in &sorted_names {
+                for name in &skill_names {
                     let skill_path = self.skill_inode_path(name);
                     let skill_ino = self.inodes.readdir_ino(&skill_path);
                     entries.push((skill_ino, FileType::Directory, name.clone()));
-                }
-
-                // Always include skill-discover
-                if !sorted_names.iter().any(|n| n == "skill-discover") {
-                    let discover_path = self.skill_inode_path("skill-discover");
-                    let discover_ino = self.inodes.readdir_ino(&discover_path);
-                    entries.push((
-                        discover_ino,
-                        FileType::Directory,
-                        "skill-discover".to_string(),
-                    ));
                 }
 
                 // L1: in in-place mode, the inbox lives next to the

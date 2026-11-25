@@ -287,9 +287,8 @@ to report all discovered skills. Text is the default; `--format json` emits one
 JSON object on stdout. Logs use stderr unless an explicit `--log-file` redirects
 them to a file.
 
-The command reads current files, not a running worker's frozen inputs or loaded
-views. It does not prove that a mount exists or that an agent loaded a skill,
-and concurrent edits are not an atomic snapshot. `--mountpoint` is not supported.
+The `--config` target reads current files. A running worker may have loaded
+different sources or views. Concurrent edits are not an atomic snapshot.
 Diagnosis does not create a mountpoint, change configuration/source/managed
 state, emit SLS operation records, or start a supervisor, watcher or FUSE session.
 An explicitly requested log file still follows the existing create/append rules.
@@ -309,9 +308,9 @@ precedence and path; incomplete reports retain only confirmed evidence.
 | --- | --- |
 | `0` | Complete diagnosis, including a completed scan with no exact-name match |
 | `1` | Incomplete diagnosis, or an output error |
-| `2` | Command-line usage error, including `--mountpoint` |
+| `2` | Command-line usage error, such as combining both targets |
 
-JSON schema version 1 uses the following fields. Diagnostic failures after
+The configuration report uses the following JSON schema version 1 fields. Diagnostic failures after
 argument parsing still emit the report, provided stdout can be written.
 
 | Field | Meaning |
@@ -353,6 +352,48 @@ Membership is not exclusive: a skill may belong to the effective default and
 multiple secondary views simultaneously. Later views marked `default = true`
 remain secondary. With no default view, explicitly assigned secondary skills
 stay secondary and unassigned skills remain in the effective default.
+
+#### Inspect the running mount
+
+For a Linux `--managed` mount with at least two distinct configured sources,
+query one exact skill name as the mounting user, in the same mount namespace
+and with the same runtime directory:
+
+```bash
+skillfs explain --mountpoint /mnt/skillfs --skill demo
+skillfs explain --mountpoint /mnt/skillfs --skill demo --format json
+```
+
+Pass the mount root or a symlink to it. The command can read the worker's
+saved selection even when the worker is unresponsive. Looking up a path
+inside the mount can still wait for the worker.
+
+If A and B both provide `demo`, changing the TOML order to put B first can
+make `--config` select B while the existing mount continues to serve A.
+The runtime report uses the read-only worker's observed source selections and
+the default `/skills` listing produced from its loaded views at FUSE startup.
+A secondary skill can still be read by its known path.
+If the winning `SKILL.md` is moved after startup, the report can still show
+`selected` and the directory can still list the skill while opening its
+manifest returns `ENOENT`. Read the file through the mount to check its contents.
+
+The JSON report has `schema_version: 1`, `target: "runtime"`, `mountpoint`,
+`instance_id`, and `requested_skill`. An `available` report (exit 0) includes
+`worker.pid`, Linux process `worker.start_ticks`, kernel `worker.mount_id`,
+and `effective_default`. For `selection_status: "selected"`, `selected` and
+each `shadowed` entry identify a source root and manifest path in precedence
+order. The generated `skill-discover` has status `virtual`. An absent name
+has status `not_discovered`. Both have a null `selected` field.
+
+The instance ID is stable at a given path. The worker generation can change
+when the supervisor recovers or the mount is recreated. A stopped mount, an
+older worker without runtime observations, or an unverifiable generation
+returns `status: "unavailable"`, a reason and exit 1. Retry after a worker
+transition. Restart an older mount with a binary whose `explain --help`
+lists this option to enable runtime diagnosis. The kernel can reuse a mount ID.
+Compare `pid`, `start_ticks`, and `mount_id` together to distinguish generations.
+Renaming the mountpoint's parent can leave the mount serving files while a
+query at its new path returns `unavailable`.
 
 ### validate
 

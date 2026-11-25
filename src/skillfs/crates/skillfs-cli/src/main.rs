@@ -43,7 +43,7 @@ use skillfs_fuse::security::{
     UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
     resolve_events_path_outside_source, resolve_protocol_events_path, spawn_drift_watcher,
 };
-use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
+use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured_observed};
 use tokio::signal;
 use tracing::{debug, error, info, warn};
 
@@ -414,13 +414,27 @@ enum Commands {
         skill_layout: Option<String>,
     },
 
-    /// Explain source selection and visibility from current configuration
+    /// Explain source selection and default visibility in a configuration or running mount
     #[command(long_about = help_text::EXPLAIN_LONG_ABOUT)]
     #[command(after_help = help_text::EXPLAIN_AFTER_HELP)]
     Explain {
         /// Ordered-source mount configuration to inspect without mounting.
-        #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        #[arg(
+            long,
+            value_name = "PATH",
+            required_unless_present = "mountpoint",
+            conflicts_with = "mountpoint"
+        )]
+        config: Option<PathBuf>,
+
+        /// Inspect one skill on a running managed multi-source mount.
+        #[arg(
+            long,
+            value_name = "PATH",
+            required_unless_present = "config",
+            requires = "skill"
+        )]
+        mountpoint: Option<PathBuf>,
 
         /// Report only this exact skill directory name, after full diagnosis.
         #[arg(long, value_name = "EXACT_NAME")]
@@ -735,10 +749,18 @@ async fn run(
         }
         Commands::Explain {
             config,
+            mountpoint,
             skill,
             format,
         } => {
-            if explain::run(&config, skill.as_deref(), format)? {
+            let incomplete = match (config, mountpoint, skill.as_deref()) {
+                (Some(path), None, name) => explain::run(&path, name, format)?,
+                (None, Some(path), Some(name)) => managed::live::explain(&path, name, format)?,
+                _ => {
+                    unreachable!("clap requires exactly one target and a name for runtime queries")
+                }
+            };
+            if incomplete {
                 std::process::exit(1);
             }
             Ok(())
@@ -1801,9 +1823,10 @@ async fn cmd_mount(
     // Load skills into store
     info!("loading skills from source directory");
     let mut store = SkillStore::new();
+    let mut listing_observer = None;
     let config = ParseConfig::default();
     let errors = if let Some(roots) = &sources {
-        store = mount_file::load_sources(roots, &config)?;
+        (store, listing_observer) = managed::live::load_sources(&mountpoint, roots, &config)?;
         Vec::new()
     } else {
         store.load_from_directory(runtime_roots.physical_source_root(), &config)
@@ -2727,7 +2750,7 @@ async fn cmd_mount(
     // lifecycle events (mount_start / heartbeat / mount_end / mount_error).
     let mount_runtime_metrics = runtime_metrics.clone();
     let mut mount_task = tokio::task::spawn_blocking(move || {
-        mount_configured(
+        mount_configured_observed(
             &mountpoint,
             runtime_roots.physical_source_root(),
             shared_store,
@@ -2752,6 +2775,7 @@ async fn cmd_mount(
                 skill_discover_root,
                 max_skill_size: Some(config.max_skill_size),
             },
+            listing_observer,
         )
     });
 

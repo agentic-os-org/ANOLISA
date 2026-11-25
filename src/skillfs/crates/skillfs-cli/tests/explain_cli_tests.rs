@@ -1,4 +1,4 @@
-//! Configuration-only explain reports exercised through the real CLI.
+//! Configuration and managed-worker explain reports exercised through the real CLI.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
+
+#[path = "explain_cli_tests/covered_mount.rs"]
+mod covered_mount;
 
 const VALID: &str =
     "---\nname: metadata-name\ndescription: A valid skill\n---\nPrivate skill body.\n";
@@ -34,13 +37,17 @@ fn skill(source: &Path, name: &str, content: &str) -> PathBuf {
 }
 
 fn config(root: &Path, sources: &[PathBuf]) -> PathBuf {
+    config_at(root, &root.join("new-mount"), sources)
+}
+
+fn config_at(root: &Path, mount: &Path, sources: &[PathBuf]) -> PathBuf {
     let path = root.join("mount.toml");
     let sources: Vec<_> = sources
         .iter()
         .map(|source| source.to_str().expect("UTF-8 fixture path"))
         .collect();
     let value = toml::Value::try_from(json!({
-        "mountpoint": root.join("new-mount"),
+        "mountpoint": mount,
         "sources": sources,
     }))
     .expect("mount config value");
@@ -737,7 +744,7 @@ fn text_reports_configuration_facts_and_escapes_all_tree_controlled_fields() {
 }
 
 #[test]
-fn usage_errors_remain_exit_two_and_runtime_target_is_rejected() {
+fn usage_errors_require_one_target_and_an_exact_name_for_runtime() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
     for args in [
         vec!["explain"],
@@ -748,6 +755,8 @@ fn usage_errors_remain_exit_two_and_runtime_target_is_rejected() {
             "mount.toml",
             "--mountpoint",
             "/not-a-runtime-target",
+            "--skill",
+            "demo",
         ],
         vec!["explain", "--config", "mount.toml", "--format", "yaml"],
     ] {
@@ -756,6 +765,276 @@ fn usage_errors_remain_exit_two_and_runtime_target_is_rejected() {
         assert!(output.stdout.is_empty());
     }
     assert!(!temp.path().join("ops.jsonl").exists());
+}
+
+fn runtime_report(root: &Path, name: &str, code: i32) -> Value {
+    runtime_report_at(root, &root.join("new-mount"), name, code)
+}
+
+fn runtime_report_at(root: &Path, mount: &Path, name: &str, code: i32) -> Value {
+    let output = command(root)
+        .args(["explain", "--mountpoint"])
+        .arg(mount)
+        .args(["--skill", name, "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["target"], "runtime");
+    assert_eq!(result["requested_skill"], name);
+    result
+}
+
+#[test]
+fn unavailable_runtime_query_leaves_an_unmounted_workspace_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let output = runtime_report(root, "missing", 1);
+    assert_eq!(output["status"], "unavailable");
+    assert!(output.get("selected").is_none());
+    assert!(output.get("effective_default").is_none());
+    assert!(fs::read_dir(root).unwrap().next().is_none());
+}
+
+fn live_fuse_available() -> bool {
+    let available = Path::new("/dev/fuse").exists()
+        && Command::new("fusermount3")
+            .arg("--version")
+            .output()
+            .is_ok();
+    if !available {
+        eprintln!("SKIP: real FUSE is required for live explain");
+    }
+    available
+}
+
+struct StopMount<'a>(&'a Path, &'a Path);
+
+impl Drop for StopMount<'_> {
+    fn drop(&mut self) {
+        let _ = command(self.0).arg("stop").arg(self.1).output();
+    }
+}
+
+fn start_mount(root: &Path, config: &Path) {
+    let output = command(root)
+        .args(["mount", "--managed", "--config"])
+        .arg(config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn paused_worker_reports_the_same_snapshot_for_mount_root_aliases() {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    if !live_fuse_available() {
+        return;
+    }
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let root = temp.path();
+    let sources = [root.join("A"), root.join("B")];
+    for source in &sources {
+        skill(source, "demo", VALID);
+    }
+    let config = config(root, &sources);
+    let mount = root.join("new-mount");
+    let _stop = StopMount(root, &mount);
+    start_mount(root, &config);
+    let initial = runtime_report(root, "demo", 0);
+    assert_eq!(initial["selected"]["source"], json!(sources[0]));
+    symlink("new-mount/", root.join("alias")).unwrap();
+    fs::create_dir(root.join("other")).unwrap();
+    fs::create_dir(root.join("sibling")).unwrap();
+    symlink("../sibling", root.join("other/peer")).unwrap();
+
+    struct ResumeWorker(libc::pid_t);
+    impl Drop for ResumeWorker {
+        fn drop(&mut self) {
+            // SAFETY: the positive pid is the worker of this temporary mount.
+            unsafe { libc::kill(self.0, libc::SIGCONT) };
+        }
+    }
+    let pid = i32::try_from(initial["worker"]["pid"].as_u64().unwrap()).unwrap();
+    assert!(pid > 1);
+    // SAFETY: signal only the worker identified by the live report above.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+    let resume = ResumeWorker(pid);
+    let timeout = Duration::from_secs(5);
+    let status_file = format!("/proc/{pid}/status");
+    let paused_at = Instant::now();
+    while !fs::read_to_string(&status_file)
+        .unwrap()
+        .lines()
+        .any(|line| line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T"))
+    {
+        assert!(paused_at.elapsed() < timeout, "worker did not stop");
+        thread::sleep(Duration::from_millis(10));
+    }
+    for path in [
+        "new-mount",
+        "new-mount/",
+        "new-mount/.",
+        "alias",
+        "alias/",
+        "other/peer/../new-mount",
+    ] {
+        let mut query = command(root)
+            .args([
+                "explain",
+                "--mountpoint",
+                path,
+                "--skill",
+                "demo",
+                "--format",
+                "json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        while query.try_wait().unwrap().is_none() {
+            if started.elapsed() >= timeout {
+                // Unblock any pending FUSE request before reaping the query.
+                drop(resume);
+                let _ = query.kill();
+                query.wait().unwrap();
+                panic!("explain waited for the paused worker on {path}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = query.wait_with_output().unwrap();
+        assert!(output.status.success(), "{path}: {output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            initial,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn live_report_follows_the_serving_worker_across_configuration_drift_and_remount() {
+    if !live_fuse_available() {
+        return;
+    }
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let root = temp.path();
+    let a = root.join("A");
+    let b = root.join("B");
+    let mount = root.join("new-mount");
+    let config_path = config(root, &[a.clone(), b.clone()]);
+    for (source, marker) in [(&a, "from-A"), (&b, "from-B")] {
+        skill(
+            source,
+            "demo",
+            &format!("---\nname: demo\ndescription: fixture\n---\n{marker}\n"),
+        );
+        skill(source, "other", VALID);
+    }
+    skill(&a, "skill-discover", VALID);
+    let secondary_demo = "[[view]]\nname = 'secondary'\nskills = ['demo']\n";
+    fs::write(b.join("skillfs-views.toml"), secondary_demo).unwrap();
+    let _stop = StopMount(root, &mount);
+    let listed = || {
+        fs::read_dir(mount.join("skills"))
+            .unwrap()
+            .any(|e| e.unwrap().file_name() == "demo")
+    };
+    start_mount(root, &config_path);
+    let initial = runtime_report(root, "demo", 0);
+    assert_eq!(initial["status"], "available");
+    assert_eq!(initial["selected"]["source"], json!(a));
+    assert_eq!(
+        initial["shadowed"][0]["path"],
+        json!(b.join("demo/SKILL.md"))
+    );
+    assert_eq!(initial["effective_default"], true);
+    assert!(listed());
+    let generated = runtime_report(root, "skill-discover", 0);
+    assert_eq!(generated["selection_status"], "virtual");
+    assert_eq!(generated["effective_default"], true);
+    assert!(generated["selected"].is_null());
+    assert_eq!(generated["shadowed"][0]["source"], json!(a));
+    let missing = runtime_report(root, "missing", 0);
+    assert_eq!(missing["selection_status"], "not_discovered");
+    assert_eq!(missing["effective_default"], false);
+
+    fs::write(a.join("skillfs-views.toml"), secondary_demo).unwrap();
+    let disk = report(root, &config_path, &["--skill", "demo"], 0);
+    assert_eq!(named(&disk, "demo")["effective_default"], false);
+    assert!(listed());
+    assert_eq!(runtime_report(root, "demo", 0), initial);
+
+    config(root, &[b.clone(), a.clone()]);
+    let disk = report(root, &config_path, &["--skill", "demo"], 0);
+    assert_eq!(named(&disk, "demo")["selected"]["source"], json!(b));
+    assert!(
+        fs::read_to_string(mount.join("skills/demo/SKILL.md"))
+            .unwrap()
+            .contains("from-A")
+    );
+    assert_eq!(runtime_report(root, "demo", 0), initial);
+
+    let id = initial["instance_id"].as_str().unwrap();
+    let text = command(root)
+        .args(["explain", "--mountpoint"])
+        .arg(&mount)
+        .args(["--skill", "demo"])
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains(a.join("demo/SKILL.md").to_str().unwrap()));
+    assert!(text.contains("Listed in default /skills: true"));
+    let snapshot = root
+        .join("runtime/skillfs")
+        .join(format!("{id}.state.runtime.json"));
+    let old_bytes = fs::read(&snapshot).unwrap();
+    assert_eq!(
+        fs::metadata(&snapshot).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        command(root)
+            .arg("stop")
+            .arg(&mount)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!snapshot.exists());
+    assert_eq!(runtime_report(root, "demo", 1)["status"], "unavailable");
+    start_mount(root, &config_path);
+    let fresh = runtime_report(root, "demo", 0);
+    assert_eq!(fresh["instance_id"], id);
+    assert_ne!(initial["worker"], fresh["worker"]);
+    assert_eq!(fresh["selected"]["source"], json!(b));
+    assert_eq!(fresh["effective_default"], false);
+    assert!(!listed());
+    assert!(
+        fs::read_to_string(mount.join("skills/demo/SKILL.md"))
+            .unwrap()
+            .contains("from-B")
+    );
+
+    // Even a complete receipt for the same mountpoint must not cross generations.
+    fs::write(snapshot, old_bytes).unwrap();
+    assert_eq!(runtime_report(root, "demo", 1)["status"], "unavailable");
 }
 
 #[test]

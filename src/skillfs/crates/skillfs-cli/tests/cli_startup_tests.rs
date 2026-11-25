@@ -4801,6 +4801,22 @@ grep -F -- "$1/skills/$4" "$1/skills/skill-discover/SKILL.md"
             recorded_process(&supervisor_file).as_ref(),
             Some(&supervisor)
         );
+        let output = Command::new("timeout")
+            .args(["5s", bin_path(), "explain", "--mountpoint"])
+            .arg(&instance.mount)
+            .args(["--skill", hidden, "--format", "json"])
+            .env("XDG_RUNTIME_DIR", &instance.runtime)
+            .output()
+            .expect("bounded runtime query after automatic recovery");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(live["worker"]["pid"], worker.0);
+        assert_eq!(live["selected"]["source"], serde_json::json!(low));
+        assert_eq!(live["effective_default"], false);
         assert_eq!(std::fs::read(state_path).unwrap(), state_bytes);
         assert_eq!(std::fs::read(&frozen).unwrap(), frozen_bytes);
         assert!(!is_mounted(&instance.redirect));
