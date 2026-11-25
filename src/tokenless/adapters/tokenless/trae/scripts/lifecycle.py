@@ -51,6 +51,9 @@ DISPATCHER_SUFFIX = "trae/hooks/run-hook.sh"
 OWNED_SCRIPTS = frozenset(
     {"rewrite_hook.py", "tool_ready_hook.sh", "compress_response_hook.py"}
 )
+# The events the template registers hooks on. Both the readiness count and the
+# removal are scoped to this tuple, so they can never disagree about what "is
+# registered" means.
 MANAGED_EVENTS = ("PreToolUse", "PostToolUse")
 
 
@@ -84,11 +87,20 @@ def is_tokenless_hook(entry: object) -> bool:
 
 
 def owned_entry_count(hooks: object) -> int:
-    """Count adapter-owned hook entries across every event in ``hooks``."""
+    """Count adapter-owned hook entries in the events this adapter manages.
+
+    Scoped to ``MANAGED_EVENTS`` on purpose, so readiness and removal cannot
+    disagree. An owned command that ended up under another event — a user moved
+    the rewrite hook into ``Stop``, say — is not registered: the host only runs
+    it from ``PreToolUse``, so it never fires on ``RunCommand``, and ``strip``
+    will not remove it either. Reporting "ready" for that file would describe a
+    configuration that neither runs nor uninstalls.
+    """
     if not isinstance(hooks, dict):
         return 0
     owned = 0
-    for groups in hooks.values():
+    for event in MANAGED_EVENTS:
+        groups = hooks.get(event)
         if not isinstance(groups, list):
             continue
         for group in groups:

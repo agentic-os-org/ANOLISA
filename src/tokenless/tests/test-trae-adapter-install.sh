@@ -604,6 +604,75 @@ for path in (install_path, uninstall_path, detect_path):
     assert "os.replace" not in script, f"{path} re-implements the config writer"
 PYEOF
 
+# --- Test 25: readiness and removal share one event scope --------------------
+# An adapter-owned command a user moved into `Stop` is not registered: the host
+# only runs the rewrite hook from PreToolUse, so it never fires on RunCommand,
+# and uninstall does not touch Stop either. detect must agree with uninstall
+# instead of reporting ready for a config that neither runs nor removes.
+export HOME="$SANDBOX/home-scope"
+mkdir -p "$HOME/.trae-cn" "$HOME/.local/bin" \
+    "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"
+write_fake_tokenless 0
+run_install >"$SANDBOX/out25i" 2>&1
+python3 - "$HOME/.trae-cn/hooks.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+rewrite = None
+for group in config["hooks"].get("PreToolUse", []):
+    for hook in group.get("hooks", []):
+        if hook.get("command", "").endswith("rewrite_hook.py"):
+            rewrite = hook
+assert rewrite is not None, "install generated no rewrite command"
+config["hooks"] = {"Stop": [{"hooks": [rewrite]}]}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PYEOF
+
+run_detect >"$SANDBOX/out25" 2>&1
+detect_rc=$?
+scope_sha_before="$(file_sha "$HOME/.trae-cn/hooks.json")"
+run_uninstall >"$SANDBOX/out25u" 2>&1
+if [ "$detect_rc" -eq 0 ] \
+    && grep -qF "not installed (no adapter-owned entries)" "$SANDBOX/out25" \
+    && grep -qF "trae: not installed (ready to install)" "$SANDBOX/out25" \
+    && [ "$(file_sha "$HOME/.trae-cn/hooks.json")" = "$scope_sha_before" ] \
+    && grep -qF "rewrite_hook.py" "$HOME/.trae-cn/hooks.json"; then
+    pass "an owned command moved into Stop reads as unregistered, matching what uninstall touches"
+else
+    fail "detect and uninstall disagree about a Stop-only config: rc=$detect_rc $(tail -4 "$SANDBOX/out25")"
+fi
+
+# --- Test 26: basename invocation resolves the script directory --------------
+# `cd scripts && bash install.sh` leaves no slash in BASH_SOURCE[0], so a
+# pattern-expansion dirname would keep the filename and fail the cd. All three
+# entry points must work invoked that way, with no ANOLISA_ADAPTER_DIR help.
+export HOME="$SANDBOX/home-basename"
+mkdir -p "$HOME/.trae-cn"
+BN_HOOKS="$HOME/.trae-cn/hooks.json"
+
+( cd "$ADAPTER_DIR/trae/scripts" && bash install.sh ) >"$SANDBOX/out26-install" 2>&1
+install_rc=$?
+( cd "$ADAPTER_DIR/trae/scripts" && bash detect.sh ) >"$SANDBOX/out26-detect" 2>&1
+detect_rc=$?
+owned_after_install="$(count_tokenless_entries "$BN_HOOKS")"
+
+( cd "$ADAPTER_DIR/trae/scripts" && bash uninstall.sh ) >"$SANDBOX/out26-uninstall" 2>&1
+uninstall_rc=$?
+
+if [ "$install_rc" -eq 0 ] && [ "$owned_after_install" = "3" ] \
+    && [ "$detect_rc" -eq 0 ] \
+    && grep -qE "trae: (ready|not installed \(ready to install\)|missing prerequisites)" "$SANDBOX/out26-detect" \
+    && [ "$uninstall_rc" -eq 0 ] \
+    && [ "$(count_tokenless_entries "$BN_HOOKS")" = "0" ]; then
+    pass "install/detect/uninstall all work when invoked by basename from inside scripts/"
+else
+    fail "basename invocation regressed: install rc=$install_rc (owned=$owned_after_install), detect rc=$detect_rc, uninstall rc=$uninstall_rc; $(head -1 "$SANDBOX/out26-install")"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

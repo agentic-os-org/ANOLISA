@@ -14,7 +14,10 @@ set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-trae}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
-SCRIPT_DIR="$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}" && pwd -P)"
+# `dirname`, not ${BASH_SOURCE[0]%/*}: a basename invocation (`bash install.sh`
+# from inside this directory) has no slash to strip, so the pattern expansion
+# would leave the filename and `cd` into it would fail.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 PLUGIN_DIR="$ADAPTER_DIR/trae"
 HOOKS_TEMPLATE="$PLUGIN_DIR/hooks/hooks.json"
