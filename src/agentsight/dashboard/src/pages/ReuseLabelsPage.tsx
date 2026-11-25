@@ -113,9 +113,13 @@ export const ReuseLabelsPage: React.FC = () => {
   labelFilterRef.current = labelFilter;
   const stateFilterRef = useRef(stateFilter);
   stateFilterRef.current = stateFilter;
+  // Tracks an uncompleted list read so row actions that land after it started
+  // replace that pre-commit snapshot instead of letting it clobber the settled row.
+  const pendingLoadIdRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     const requestId = ++loadRequestIdRef.current;
+    pendingLoadIdRef.current = requestId;
     setLoading(true);
     setError(null);
     try {
@@ -135,6 +139,7 @@ export const ReuseLabelsPage: React.FC = () => {
       }
     } finally {
       if (requestId === loadRequestIdRef.current) {
+        pendingLoadIdRef.current = null;
         setLoading(false);
       }
     }
@@ -194,6 +199,10 @@ export const ReuseLabelsPage: React.FC = () => {
         action: label ? 'override' : 'confirm',
         label,
       });
+      if (pendingLoadIdRef.current !== null) {
+        await load();
+        return;
+      }
       replaceRow(updated);
     });
 
@@ -281,10 +290,18 @@ export const ReuseLabelsPage: React.FC = () => {
     runAction(`rejudge:${row.session_id}`, async () => {
       setJudge(await runReuseJudgements({ sessionIds: [row.session_id] }));
       setPanel('judge');
+      if (pendingLoadIdRef.current !== null) {
+        await load();
+        return;
+      }
       // Refetch and swap the row in place, so the list does not reorder
       // under the reader's cursor — the row itself may well have moved in
       // sort order, since judging bumps `updated_at`.
       const refreshed = await fetchReuseSessions({ limit: PAGE_LIMIT });
+      if (pendingLoadIdRef.current !== null) {
+        await load();
+        return;
+      }
       const updated = refreshed.sessions.find(
         (fresh) => fresh.session_id === row.session_id,
       );
