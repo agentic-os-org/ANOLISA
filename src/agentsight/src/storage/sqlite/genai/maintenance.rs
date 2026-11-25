@@ -35,6 +35,27 @@ impl GenAISqliteStore {
         {
             return Ok(false);
         }
+        let result = self.maintain_step_inner(max_db_size_mb, cursor);
+        if self.maintenance_only
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(|error| is_sqlite_busy(error.as_ref()))
+        {
+            log::debug!(
+                "GenAI maintenance step deferred to the next pass because capture is writing"
+            );
+            cursor.retry_after = Some(Instant::now() + Duration::from_secs(1));
+            return Ok(false);
+        }
+        result
+    }
+
+    fn maintain_step_inner(
+        &self,
+        max_db_size_mb: u64,
+        cursor: &mut MaintenanceCursor,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let _timer = crate::runtime_metrics::StageTimer::start("genai_maintenance_step");
         if cursor.phase == 0 && cursor.cutoff.is_none() && self.storage_policy.retention_days > 0 {
             let now = SystemTime::now()
@@ -102,6 +123,23 @@ impl GenAISqliteStore {
         }
         Ok(false)
     }
+}
+
+fn is_sqlite_busy(error: &(dyn std::error::Error + 'static)) -> bool {
+    let sqlite_err = error.downcast_ref::<rusqlite::Error>().or_else(|| {
+        match error.downcast_ref::<agentsight_sqlite_lifecycle::LifecycleError>() {
+            Some(agentsight_sqlite_lifecycle::LifecycleError::Sqlite(err)) => Some(err),
+            _ => None,
+        }
+    });
+    matches!(
+        sqlite_err,
+        Some(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
 }
 
 #[cfg(test)]
@@ -252,5 +290,58 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn maintenance_only_step_defers_instead_of_failing_when_writer_holds_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("genai.db");
+        let policy = crate::config::PeriodicStoragePolicy {
+            retention_days: 1,
+            max_db_size_mb: 0,
+            ..Default::default()
+        };
+        let capture = GenAISqliteStore::new_with_path(&path, policy).unwrap();
+        capture.use_managed_checkpoints().unwrap();
+        capture
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO genai_events(event_type,start_timestamp_ns,event_json)
+                 VALUES('llm_call',1,'{}')",
+                [],
+            )
+            .unwrap();
+        let maintenance =
+            GenAISqliteStore::open_maintenance_existing(&path, policy, &capture).unwrap();
+
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+
+        let mut cursor = MaintenanceCursor::default();
+        let step = maintenance
+            .maintain_step(0, &mut cursor)
+            .expect("maintenance_only maintain_step must defer on SQLITE_BUSY");
+        assert!(!step);
+        assert_eq!(cursor.phase, 0);
+
+        writer.execute_batch("COMMIT;").unwrap();
+        cursor.retry_after = None;
+        let mut completed = false;
+        for _ in 0..16 {
+            if maintenance.maintain_step(0, &mut cursor).unwrap() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed);
+        let remaining: i64 = capture
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 }
