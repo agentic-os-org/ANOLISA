@@ -1,7 +1,7 @@
 //! Semantic delivery shares parsed JSON without a full body serialization round trip.
 
 use super::super::result::{AnalysisResult, HttpContext, HttpRecord};
-use super::super::token::{TokenRecord, merge_usage_from_event};
+use super::super::token::{TokenRecord, UsageFoldState};
 use super::Analyzer;
 use crate::aggregator::AggregatedResult;
 use serde_json::Value;
@@ -112,19 +112,23 @@ impl Analyzer {
             context.retain_raw = true;
         }
         let timer = crate::runtime_metrics::StageTimer::start("analyzer");
-        let usage = match context.response.as_ref() {
+        let mut state = UsageFoldState::default();
+        match context.response.as_ref() {
             Some(Value::Array(events)) => {
-                events
-                    .iter()
-                    .fold(None, |usage, event| match self.token.parse_json(event) {
-                        Some(parsed) => merge_usage_from_event(usage, parsed, event),
-                        None => usage,
-                    })
+                for event in events {
+                    if let Some(parsed) = self.token.parse_json(event) {
+                        state.merge_from_event(parsed, event);
+                    }
+                }
             }
-            Some(value) => self.token.parse_json(value),
-            None => None,
-        };
-        let usage = self.merge_continuation_usage(usage, sse_continuation_bytes(result));
+            Some(value) => {
+                if let Some(parsed) = self.token.parse_json(value) {
+                    state.merge_from_event(parsed, value);
+                }
+            }
+            None => {}
+        }
+        let usage = self.merge_continuation_usage_with_state(state, sse_continuation_bytes(result));
         let mut token = usage
             .map(|usage| {
                 TokenRecord::new(
