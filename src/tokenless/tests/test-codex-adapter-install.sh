@@ -306,6 +306,55 @@ else
     fail "uninstall left the marketplace directory or the binary behind"
 fi
 
+# ── detect.sh publishes the adapter status next to the binary state ──────
+# The exit code stays 0 either way (fail-open - plugin activation is controlled
+# by capabilities), so `tokenless init` reads the published `status` instead.
+# This detector probes the tokenless binary and never asks codex whether the
+# plugin is registered, so it must never claim `ready`.
+DETECT_SH="$ADAPTER_DIR/codex/scripts/detect.sh"
+detect_env() {  # <PATH> -> detect.sh stdout, host scrubbed out
+    env -i PATH="$1" HOME="$FAKE_HOME" XDG_DATA_HOME="$XDG" \
+        ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" ANOLISA_COMPONENT=tokenless \
+        ANOLISA_TARGET=codex bash "$DETECT_SH" 2>/dev/null
+}
+detect_status() {  # <json> -> the published status, jq's spacing removed
+    printf '%s' "$1" | tr -d ' \n' | sed -n 's/.*"status":"\([a-z_]*\)".*/\1/p'
+}
+detect_flat() {  # <json> -> the whole object on one line
+    printf '%s' "$1" | tr -d ' \n'
+}
+
+write_tokenless_stub
+detect_out="$(detect_env "$PREFIX/bin:$SANDBOX/bin:/usr/bin:/bin")"
+detect_rc=$?
+if [ "$detect_rc" -eq 0 ]; then
+    pass "detect stays fail-open with the binary present"
+else
+    fail "detect exited $detect_rc with the binary present"
+fi
+if [ "$(detect_status "$detect_out")" = installable ]; then
+    pass "detect publishes installable, not ready, for a binary on PATH"
+else
+    fail "detect published '$(detect_status "$detect_out")' for a binary on PATH"
+fi
+case "$(detect_flat "$detect_out")" in
+    *'"installed":true'*) pass "detect still reports the binary it found" ;;
+    *) fail "detect dropped the installed field: $detect_out" ;;
+esac
+
+rm -f "$TOKENLESS_BIN"
+if [ -n "$HOST_BIN" ]; then
+    skip "no-binary detect status ($HOST_BIN answers the absolute fallback)"
+else
+    detect_out="$(detect_env "$SANDBOX/bin:/usr/bin:/bin")"
+    detect_rc=$?
+    if [ "$detect_rc" -eq 0 ] && [ "$(detect_status "$detect_out")" = installable ]; then
+        pass "detect publishes installable without the tokenless binary"
+    else
+        fail "detect reported rc=$detect_rc status='$(detect_status "$detect_out")' without the binary"
+    fi
+fi
+
 echo ""
 echo "Codex adapter tests: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]

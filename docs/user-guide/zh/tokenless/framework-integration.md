@@ -438,21 +438,42 @@ tokenless init --all
 tokenless init
 ```
 
-`tokenless init` 读取适配器清单，运行各框架的 `detect.sh`，报告适配器状态（就绪 / 可安装 / 缺少前置依赖），然后为选定框架执行 `install.sh`。
+`tokenless init` 读取适配器清单，运行各框架的 `detect.sh`，报告适配器状态（就绪 / 可安装 / 缺少前置依赖），然后为选定框架执行 `install.sh`。安装脚本的 stdout 与 stderr 都会原样透出，因此安装失败时脚本自身的诊断信息仍然是输出的一部分。
 
-若适配器目录不存在，`tokenless init` 将报错退出：
+`--framework` 已经指定了唯一目标，因此不能与 `--all` 或 `--list` 组合使用。选定目标全部已就绪或安装成功时退出码为 `0`；只要有一个选定目标无法安装（包括清单中未声明 install 动作的目标），退出码就是 `1`。
+
+**状态如何判定。** 探测器报告的是它自己这个适配器的状态，而不是该适配器所依赖的宿主二进制的状态，因此 `tokenless init` 按以下顺序解读探测结果：
+
+1. stdout 上携带 `"status": "ready" | "installable" | "missing_prereqs"` 的 JSON 对象。退出码另有含义的探测器用它显式声明：Codex 探测的是 tokenless 二进制，Qoder 探测的是宿主 CLI 能力，QwenWork 无论插件是否已 sideload 都返回 `0`。
+2. 共用的三态退出码 —— `0` = 适配器已注册且就绪，`1` = 未注册但可安装，`2`（或其他任何退出码）= 缺少前置依赖。OpenClaw、Hermes、Claude Code、OpenCode、Qwen Code 和 QwenPaw 遵循该约定。
+
+只带 `installed` 而没有 `status` 的 JSON 属于该约定之前的旧格式；`installed: false` 仍会把退出码 `0` 降级为可安装，因此仅探测可用性的脚本不会被当作适配器已注册。
+
+**适配器目录的查找顺序。** 以下位置中第一个包含 `manifest.json`（或模板 `manifest.json.in`）的目录生效：
+
+1. `$ANOLISA_ADAPTER_DIR`（若已设置）—— 自定义安装前缀时使用。
+2. `$XDG_DATA_HOME/anolisa/adapters/tokenless`（`XDG_DATA_HOME` 为绝对路径时）。
+3. `~/.local/share/anolisa/adapters/tokenless`。
+4. `/usr/share/anolisa/adapters/tokenless`，随后是 `/usr/local/share/anolisa/adapters/tokenless`。
+
+该顺序与打包布局一致：安装包把用户数据根目录解析为 `${XDG_DATA_HOME:-$HOME/.local/share}`。
+
+若上述位置都没有清单文件，`tokenless init` 将报错退出：
 
 ```
 Adapter directory not found.
 Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+For a custom location, set ANOLISA_ADAPTER_DIR to the directory containing manifest.json.
 ```
 
-请先安装 tokenless 包再重试：
+请先安装 tokenless 包，或把 `ANOLISA_ADAPTER_DIR` 指向已存在的适配器目录后重试：
 
 ```bash
 npm install -g anolisa-tokenless
 # 或
 anolisa install tokenless
+# 或者，非标准安装前缀
+export ANOLISA_ADAPTER_DIR=/opt/anolisa/share/anolisa/adapters/tokenless
 ```
 
 ### 手动安装脚本

@@ -68,8 +68,14 @@ Or install from the marketplace (once published).
 
 ```bash
 ./scripts/detect.sh
-# {"installed": true, "version": "1.0.0", "path": "/home/user/.local/bin/tokenless"}
+# {"installed": true, "status": "installable", "version": "1.0.0", "path": "/home/user/.local/bin/tokenless"}
 ```
+
+`installed` describes the tokenless binary. `status` describes this adapter and
+is what `tokenless init` reads: `detect.sh` never asks Codex whether the plugin
+is registered, so it always reports `installable` rather than let a binary on
+`PATH` read as a registered adapter. `install.sh` is idempotent, so re-running
+it against an already registered host is safe.
 
 ## Hook Output Format
 

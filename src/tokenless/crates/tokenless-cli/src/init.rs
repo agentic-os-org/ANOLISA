@@ -3,17 +3,43 @@
 //! Scans the adapter directory for framework-specific `detect.sh` scripts,
 //! reports each framework's status, and optionally runs `install.sh` to
 //! register the tokenless adapter with the selected framework.
+//!
+//! # Detector contract
+//!
+//! A detector reports the state of *its own adapter*, never merely the host
+//! binary that adapter talks to. Two shapes are understood, in this order:
+//!
+//! 1. An explicit JSON object on stdout carrying
+//!    `"status": "ready" | "installable" | "missing_prereqs"`. Detectors whose
+//!    exit code already means something else publish it: `codex` probes the
+//!    tokenless binary, `qoder` probes host-CLI capability, and `qwenwork`
+//!    returns 0 whether or not its plugin is sideloaded.
+//! 2. The shared tri-state exit code — `0` = adapter registered and ready,
+//!    `1` = not registered but installable, `2` (or any other code) = missing
+//!    prerequisites. `openclaw`, `hermes`, `claude-code`, `opencode`,
+//!    `qwencode` and `qwenpaw` follow it.
+//!
+//! A JSON object carrying `installed` but no `status` predates this contract.
+//! `installed: false` still downgrades exit 0 to installable, so an
+//! availability-only probe is never read as a registered adapter.
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::io::{self, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
-/// Sub-path from a share root to the tokenless adapter directory.
+/// Sub-path from a data root to the tokenless adapter directory.
+///
+/// Mirrors the packaged layout: `packaging/install.sh` installs adapters under
+/// `$data_root/$AWPRJ/adapters/tokenless`, with `AWPRJ` defaulting to `anolisa`.
 const ADAPTER_SUBPATH: &str = "anolisa/adapters/tokenless";
+
+/// System-wide data roots, in the order the packager writes them.
+const SYSTEM_DATA_ROOTS: [&str; 2] = ["/usr/share", "/usr/local/share"];
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -51,6 +77,16 @@ impl DetectStatus {
             Self::NotChecked => "n/a",
         }
     }
+
+    /// Parse the `status` value a detector publishes as JSON.
+    fn from_published(value: &serde_json::Value) -> Option<Self> {
+        match value.as_str()? {
+            "ready" => Some(Self::Ready),
+            "installable" => Some(Self::Installable),
+            "missing_prereqs" => Some(Self::MissingPrereqs),
+            _ => None,
+        }
+    }
 }
 
 struct FrameworkInfo {
@@ -60,31 +96,61 @@ struct FrameworkInfo {
     install_script: Option<String>,
 }
 
+/// Why one target the caller selected could not be installed.
+enum InstallError {
+    /// The manifest declares no `actions.install` for the target.
+    NoScript,
+    /// The install script ran and reported failure.
+    Failed(String),
+}
+
 /// Find the adapter directory by checking known locations.
 ///
 /// An explicit `ANOLISA_ADAPTER_DIR` environment variable takes precedence,
-/// which also supports custom install prefixes outside the default Unix
-/// share paths.
+/// which also supports custom install prefixes outside the default data roots.
 fn find_adapter_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("ANOLISA_ADAPTER_DIR") {
-        let p = PathBuf::from(dir);
-        if has_manifest(&p) {
-            return Some(p);
+    adapter_dir_candidates()
+        .into_iter()
+        .find(|candidate| has_manifest(candidate))
+}
+
+/// Adapter directory candidates, most specific first.
+fn adapter_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(dir) = env::var("ANOLISA_ADAPTER_DIR")
+        && !dir.trim().is_empty()
+    {
+        candidates.push(PathBuf::from(dir));
+    }
+    candidates.extend(
+        data_roots()
+            .into_iter()
+            .map(|root| root.join(ADAPTER_SUBPATH)),
+    );
+    candidates
+}
+
+/// Data roots the packager can install into, most specific first.
+///
+/// `XDG_DATA_HOME` comes first because `packaging/install.sh` resolves the user
+/// data root as `${XDG_DATA_HOME:-$HOME/.local/share}`. Honoring only the
+/// fallback left an XDG installation invisible to `tokenless init`, which then
+/// told the user to install a package that was already there. A relative
+/// `XDG_DATA_HOME` is skipped, matching the installer's own validation.
+fn data_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(xdg) = env::var("XDG_DATA_HOME") {
+        let xdg = PathBuf::from(xdg);
+        if xdg.is_absolute() {
+            roots.push(xdg);
         }
     }
     if let Some(home) = dirs::home_dir() {
-        let p = home.join(".local/share").join(ADAPTER_SUBPATH);
-        if has_manifest(&p) {
-            return Some(p);
-        }
+        roots.push(home.join(".local/share"));
     }
-    for prefix in ["/usr/share", "/usr/local/share"] {
-        let p = PathBuf::from(prefix).join(ADAPTER_SUBPATH);
-        if has_manifest(&p) {
-            return Some(p);
-        }
-    }
-    None
+    roots.extend(SYSTEM_DATA_ROOTS.map(PathBuf::from));
+    roots.dedup();
+    roots
 }
 
 fn has_manifest(dir: &Path) -> bool {
@@ -119,7 +185,7 @@ fn extract_hooks(cap: &Option<serde_json::Value>) -> Vec<String> {
     }
 }
 
-/// Run `detect.sh` for a framework and interpret the tri-state exit code.
+/// Run `detect.sh` for a framework and map the result to an adapter status.
 fn run_detect(adapter_dir: &Path, name: &str, detect_script: &str) -> DetectStatus {
     let script = adapter_dir.join(detect_script);
     if !script.exists() {
@@ -132,68 +198,220 @@ fn run_detect(adapter_dir: &Path, name: &str, detect_script: &str) -> DetectStat
         .env("ANOLISA_ADAPTER_DIR", adapter_dir)
         .output()
     {
-        Ok(out) => match out.status.code() {
-            Some(0) => {
-                // Detectors may emit JSON. Only treat the adapter as Ready
-                // when the output explicitly claims installed: true;
-                // otherwise prefer Installable so missing adapters are not
-                // silently reported as ready.
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-                    match v.get("installed") {
-                        Some(&serde_json::Value::Bool(true)) => return DetectStatus::Ready,
-                        Some(&serde_json::Value::Bool(false)) => return DetectStatus::Installable,
-                        _ => {}
-                    }
-                }
-                DetectStatus::Installable
-            }
-            Some(1) => DetectStatus::Installable,
-            _ => DetectStatus::MissingPrereqs,
-        },
+        Ok(out) => interpret_detect(out.status.code(), &String::from_utf8_lossy(&out.stdout)),
+        // A detector that cannot be spawned has an unusable host toolchain.
         Err(_) => DetectStatus::MissingPrereqs,
     }
 }
 
-/// Run `install.sh` for a framework, streaming output to the terminal.
+/// Map one detector run to the status of *its adapter*.
+///
+/// Split out from `run_detect` so both detector contracts can be exercised
+/// without spawning a script. `exit_code` is `None` when the detector was
+/// terminated by a signal.
+fn interpret_detect(exit_code: Option<i32>, stdout: &str) -> DetectStatus {
+    let published = json_objects(stdout);
+    let explicit = published
+        .iter()
+        .find_map(|object| object.get("status").and_then(DetectStatus::from_published));
+    if let Some(status) = explicit {
+        return status;
+    }
+    match exit_code {
+        Some(0) => {
+            // Legacy availability-only JSON. `installed` describes a
+            // prerequisite such as the tokenless binary, so `installed: false`
+            // may not read as a registered adapter.
+            let uninstalled = published
+                .iter()
+                .any(|object| object.get("installed") == Some(&serde_json::Value::Bool(false)));
+            if uninstalled {
+                DetectStatus::Installable
+            } else {
+                DetectStatus::Ready
+            }
+        }
+        Some(1) => DetectStatus::Installable,
+        _ => DetectStatus::MissingPrereqs,
+    }
+}
+
+/// JSON objects a detector published on stdout.
+///
+/// The whole output is tried first because `codex` pretty-prints a single
+/// object across several lines, then each line on its own so a detector may log
+/// to stdout around a one-line status object.
+fn json_objects(stdout: &str) -> Vec<serde_json::Value> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(value @ serde_json::Value::Object(_)) =
+        serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        return vec![value];
+    }
+    trimmed
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .filter(|value| value.is_object())
+        .collect()
+}
+
+/// Run `install.sh` for a framework with both streams attached to ours.
+///
+/// Installers print actionable guidance on stdout — OpenCode's restart note,
+/// Codex's `plugin list` hint — and diagnostics on stderr. Capturing the child
+/// instead discarded stdout entirely and reduced a failing installer to its
+/// exit code, so the reason it failed never reached the user.
 fn run_install(adapter_dir: &Path, name: &str, install_script: &str) -> Result<(), String> {
     let script = adapter_dir.join(install_script);
     if !script.exists() {
         return Err(format!("install script not found: {}", script.display()));
     }
-    let out = Command::new("bash")
+    let status = Command::new("bash")
         .arg(&script)
         .env("ANOLISA_COMPONENT", "tokenless")
         .env("ANOLISA_TARGET", name)
         .env("ANOLISA_ADAPTER_DIR", adapter_dir)
-        .output()
-        .map_err(|e| format!("failed to run install.sh: {}", e))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stderr_snippet = stderr.trim();
-        if stderr_snippet.is_empty() {
-            Err(format!(
-                "install.sh for {} exited with code {}",
-                name,
-                out.status.code().unwrap_or(-1)
-            ))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("failed to run {}: {}", script.display(), e))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(match status.code() {
+        Some(code) => format!("install.sh for {} exited with code {}", name, code),
+        None => format!("install.sh for {} was terminated by a signal", name),
+    })
+}
+
+/// Install one target the caller selected.
+///
+/// A target with no `actions.install` is an error rather than a skip: the
+/// caller asked for that target, so exiting successfully would report work that
+/// never happened.
+fn install_selected(adapter_dir: &Path, fw: &FrameworkInfo) -> Result<(), InstallError> {
+    let Some(script) = fw.install_script.as_deref() else {
+        return Err(InstallError::NoScript);
+    };
+    println!("\nInstalling {} adapter...", fw.name);
+    if let Err(e) = run_install(adapter_dir, &fw.name, script) {
+        return Err(InstallError::Failed(e));
+    }
+    println!("{} adapter installed successfully.", fw.name);
+    Ok(())
+}
+
+/// Detect every target the manifest declares, sorted by name.
+fn collect_frameworks(adapter_dir: &Path, manifest: &Manifest) -> Vec<FrameworkInfo> {
+    let mut frameworks: Vec<FrameworkInfo> = manifest
+        .targets
+        .iter()
+        .map(|(name, target)| {
+            let capabilities = extract_hooks(&target.capabilities);
+            let Some(actions) = &target.actions else {
+                return FrameworkInfo {
+                    name: name.clone(),
+                    status: DetectStatus::NotChecked,
+                    capabilities,
+                    install_script: None,
+                };
+            };
+            let status = match &actions.detect {
+                Some(detect) => run_detect(adapter_dir, name, detect),
+                None => DetectStatus::NotChecked,
+            };
+            FrameworkInfo {
+                name: name.clone(),
+                status,
+                capabilities,
+                install_script: actions.install.clone(),
+            }
+        })
+        .collect();
+    frameworks.sort_by(|a, b| a.name.cmp(&b.name));
+    frameworks
+}
+
+/// Print the status table, then flag targets that cannot be installed.
+fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path) {
+    println!("\nTokenless Adapter Status\n");
+    println!("{:<14} {:<16} Hooks", "Framework", "Status");
+    println!("{:-<14} {:-<16} {:-<40}", "", "", "");
+    for fw in frameworks {
+        let caps = if fw.capabilities.is_empty() {
+            "—".to_string()
         } else {
-            Err(format!(
-                "install.sh for {} exited with code {}: {}",
-                name,
-                out.status.code().unwrap_or(-1),
-                stderr_snippet
-            ))
+            fw.capabilities.join(", ")
+        };
+        println!("{:<14} {:<16} {}", fw.name, fw.status.label(), caps);
+    }
+    println!("\nAdapter directory: {}", adapter_dir.display());
+
+    // A detector can report installable for a target whose manifest declares no
+    // install action. Selecting such a target fails, so say so up front.
+    let unactionable: Vec<&str> = frameworks
+        .iter()
+        .filter(|fw| fw.status == DetectStatus::Installable && fw.install_script.is_none())
+        .map(|fw| fw.name.as_str())
+        .collect();
+    if !unactionable.is_empty() {
+        println!();
+        for name in unactionable {
+            println!(
+                "warning: {} reports installable but declares no install action; selecting it fails.",
+                name
+            );
         }
     }
 }
 
+/// Run one named `--framework` operation and end with its result.
+fn run_named(
+    adapter_dir: &Path,
+    frameworks: &[FrameworkInfo],
+    name: &str,
+) -> Result<(), (String, i32)> {
+    let Some(fw) = frameworks.iter().find(|fw| fw.name == name) else {
+        return Err((format!("unknown framework: {}", name), 1));
+    };
+    match fw.status {
+        DetectStatus::Ready => {
+            println!("\n{} is already installed and ready.", fw.name);
+            Ok(())
+        }
+        DetectStatus::Installable => match install_selected(adapter_dir, fw) {
+            Ok(()) => Ok(()),
+            Err(InstallError::NoScript) => {
+                Err((format!("no install script configured for {}", fw.name), 1))
+            }
+            Err(InstallError::Failed(e)) => {
+                Err((format!("{} adapter installation failed: {}", fw.name, e), 1))
+            }
+        },
+        other => Err((
+            format!("{} is not installable (status: {})", fw.name, other.label()),
+            1,
+        )),
+    }
+}
+
 pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), (String, i32)> {
+    // `--framework` already names the single target to act on, so the other two
+    // selection modes have nothing left to select. clap rejects both
+    // combinations first; these guards keep `run` correct for direct callers.
     if framework.is_some() && list_only {
         return Err((
             "--framework and --list cannot be used together".to_string(),
+            1,
+        ));
+    }
+    if framework.is_some() && all {
+        return Err((
+            "--framework and --all cannot be used together; --framework already names one target"
+                .to_string(),
             1,
         ));
     }
@@ -210,86 +428,14 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
 
     let manifest = load_manifest(&adapter_dir).map_err(|e| (e, 1))?;
 
-    let mut frameworks: Vec<FrameworkInfo> = Vec::new();
-    for (name, target) in &manifest.targets {
-        let caps = extract_hooks(&target.capabilities);
-        let actions = match &target.actions {
-            Some(a) => a,
-            None => {
-                frameworks.push(FrameworkInfo {
-                    name: name.clone(),
-                    status: DetectStatus::NotChecked,
-                    capabilities: caps,
-                    install_script: None,
-                });
-                continue;
-            }
-        };
-        let status = match &actions.detect {
-            Some(d) => run_detect(&adapter_dir, name, d),
-            None => DetectStatus::NotChecked,
-        };
-        frameworks.push(FrameworkInfo {
-            name: name.clone(),
-            status,
-            capabilities: caps,
-            install_script: actions.install.clone(),
-        });
-    }
+    let frameworks = collect_frameworks(&adapter_dir, &manifest);
+    print_status(&frameworks, &adapter_dir);
 
-    frameworks.sort_by(|a, b| a.name.cmp(&b.name));
-
-    println!("\nTokenless Adapter Status\n");
-    println!("{:<14} {:<16} Hooks", "Framework", "Status");
-    println!("{:-<14} {:-<16} {:-<40}", "", "", "");
-    for fw in &frameworks {
-        let caps = if fw.capabilities.is_empty() {
-            "—".to_string()
-        } else {
-            fw.capabilities.join(", ")
-        };
-        println!("{:<14} {:<16} {}", fw.name, fw.status.label(), caps);
-    }
-    println!("\nAdapter directory: {}", adapter_dir.display());
-
-    // --framework: check/install one specific framework
+    // A named operation ends with its own result. Falling through to the
+    // generic selection below would reuse the statuses collected *before* the
+    // install and offer the same target a second time.
     if let Some(name) = &framework {
-        let fw = frameworks.iter().find(|f| &f.name == name);
-        match fw {
-            Some(f) if f.status == DetectStatus::Installable => {
-                if let Some(script) = &f.install_script {
-                    println!("\nInstalling {} adapter...", f.name);
-                    match run_install(&adapter_dir, &f.name, script) {
-                        Ok(()) => println!("{} adapter installed successfully.", f.name),
-                        Err(e) => {
-                            return Err((
-                                format!("{} adapter installation failed: {}", f.name, e),
-                                1,
-                            ));
-                        }
-                    }
-                } else {
-                    return Err((format!("no install script configured for {}", f.name), 1));
-                }
-            }
-            Some(f) if f.status == DetectStatus::Ready => {
-                println!("\n{} is already installed and ready.", f.name);
-                return Ok(());
-            }
-            Some(f) => {
-                return Err((
-                    format!(
-                        "{} is not installable (status: {})",
-                        f.name,
-                        f.status.label()
-                    ),
-                    1,
-                ));
-            }
-            None => {
-                return Err((format!("unknown framework: {}", name), 1));
-            }
-        }
+        return run_named(&adapter_dir, &frameworks, name);
     }
 
     if list_only {
@@ -340,17 +486,13 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
 
     let mut failed: Vec<String> = Vec::new();
     for fw in &to_install {
-        let script = match &fw.install_script {
-            Some(s) => s,
-            None => {
+        match install_selected(&adapter_dir, fw) {
+            Ok(()) => {}
+            Err(InstallError::NoScript) => {
                 eprintln!("tokenless: no install script for {}", fw.name);
-                continue;
+                failed.push(fw.name.clone());
             }
-        };
-        println!("\nInstalling {} adapter...", fw.name);
-        match run_install(&adapter_dir, &fw.name, script) {
-            Ok(()) => println!("{} adapter installed successfully.", fw.name),
-            Err(e) => {
+            Err(InstallError::Failed(e)) => {
                 eprintln!("{} adapter installation failed: {}", fw.name, e);
                 failed.push(fw.name.clone());
             }
@@ -367,4 +509,110 @@ pub fn run(framework: Option<String>, all: bool, list_only: bool) -> Result<(), 
 fn print_install_hints() {
     println!("\nRun `tokenless init --framework <name>` to install a specific adapter.");
     println!("Run `tokenless init --all` to install all installable adapters.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tri_state_exit_codes_map_to_adapter_status() {
+        assert_eq!(interpret_detect(Some(0), ""), DetectStatus::Ready);
+        assert_eq!(interpret_detect(Some(1), ""), DetectStatus::Installable);
+        assert_eq!(interpret_detect(Some(2), ""), DetectStatus::MissingPrereqs);
+        assert_eq!(interpret_detect(None, ""), DetectStatus::MissingPrereqs);
+    }
+
+    #[test]
+    fn human_readable_detector_output_uses_the_exit_code() {
+        let stdout = "[tokenless] opencode: ready (1.2.3)\n";
+        assert_eq!(interpret_detect(Some(0), stdout), DetectStatus::Ready);
+        let stdout = "[tokenless] opencode: detected (1.2.3), plugin not installed\n";
+        assert_eq!(interpret_detect(Some(1), stdout), DetectStatus::Installable);
+    }
+
+    #[test]
+    fn published_status_wins_over_the_exit_code() {
+        let compact = r#"{"status":"installable"}"#;
+        assert_eq!(
+            interpret_detect(Some(0), compact),
+            DetectStatus::Installable
+        );
+        let pretty = "{\n  \"status\": \"missing_prereqs\"\n}\n";
+        assert_eq!(
+            interpret_detect(Some(0), pretty),
+            DetectStatus::MissingPrereqs
+        );
+        assert_eq!(
+            interpret_detect(Some(1), r#"{"status":"ready"}"#),
+            DetectStatus::Ready
+        );
+    }
+
+    #[test]
+    fn published_status_is_found_beside_log_lines() {
+        let stdout = "[tokenless] qoder: detected compatible qodercli at /usr/bin/qodercli\n\
+                      {\"status\":\"installable\"}\n";
+        assert_eq!(interpret_detect(Some(0), stdout), DetectStatus::Installable);
+    }
+
+    #[test]
+    fn unknown_published_status_falls_back_to_the_exit_code() {
+        assert_eq!(
+            interpret_detect(Some(0), r#"{"status":"banana"}"#),
+            DetectStatus::Ready
+        );
+        assert_eq!(
+            interpret_detect(Some(1), r#"{"status":42}"#),
+            DetectStatus::Installable
+        );
+    }
+
+    #[test]
+    fn legacy_installed_false_is_not_ready() {
+        assert_eq!(
+            interpret_detect(Some(0), r#"{"installed": false}"#),
+            DetectStatus::Installable
+        );
+        let pretty = "{\n  \"installed\": false\n}\n";
+        assert_eq!(interpret_detect(Some(0), pretty), DetectStatus::Installable);
+    }
+
+    #[test]
+    fn legacy_installed_does_not_override_a_failing_exit_code() {
+        assert_eq!(
+            interpret_detect(Some(1), r#"{"installed": true}"#),
+            DetectStatus::Installable
+        );
+        assert_eq!(
+            interpret_detect(Some(2), r#"{"installed": true}"#),
+            DetectStatus::MissingPrereqs
+        );
+    }
+
+    #[test]
+    fn json_objects_ignores_non_object_output() {
+        assert!(json_objects("").is_empty());
+        assert!(json_objects("[1, 2]").is_empty());
+        assert_eq!(json_objects("not json\n{\"status\":\"ready\"}\n").len(), 1);
+    }
+
+    #[test]
+    fn detect_status_parses_published_values() {
+        let value = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        assert_eq!(
+            DetectStatus::from_published(&value("\"ready\"")),
+            Some(DetectStatus::Ready)
+        );
+        assert_eq!(
+            DetectStatus::from_published(&value("\"installable\"")),
+            Some(DetectStatus::Installable)
+        );
+        assert_eq!(
+            DetectStatus::from_published(&value("\"missing_prereqs\"")),
+            Some(DetectStatus::MissingPrereqs)
+        );
+        assert_eq!(DetectStatus::from_published(&value("\"Ready\"")), None);
+        assert_eq!(DetectStatus::from_published(&value("true")), None);
+    }
 }

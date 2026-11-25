@@ -494,21 +494,42 @@ tokenless init --all
 tokenless init
 ```
 
-`tokenless init` reads the adapter manifest, runs each framework's `detect.sh`, and reports whether the adapter is ready, installable, or missing prerequisites — then runs `install.sh` for the selected framework.
+`tokenless init` reads the adapter manifest, runs each framework's `detect.sh`, and reports whether the adapter is ready, installable, or missing prerequisites — then runs `install.sh` for the selected framework. Installer output is passed through on both stdout and stderr, so a failing installer's own diagnostics stay part of the report.
 
-If the adapter directory is absent, `tokenless init` exits with an error:
+`--framework` names the single target to act on, so it cannot be combined with `--all` or `--list`. The command exits `0` when every selected target was already ready or was installed, and `1` when a selected target could not be installed — including one whose manifest declares no install action.
+
+**How a status is decided.** A detector reports the state of its own adapter, not of the host binary that adapter talks to, so `tokenless init` reads a detector in this order:
+
+1. A JSON object on stdout carrying `"status": "ready" | "installable" | "missing_prereqs"`. Detectors whose exit code already means something else publish it: Codex probes the tokenless binary, Qoder probes host-CLI capability, and QwenWork returns `0` whether or not its plugin is sideloaded.
+2. The shared tri-state exit code — `0` = adapter registered and ready, `1` = not registered but installable, `2` (or any other code) = missing prerequisites. OpenClaw, Hermes, Claude Code, OpenCode, Qwen Code, and QwenPaw follow it.
+
+A JSON object carrying `installed` but no `status` predates this contract; `installed: false` still downgrades exit `0` to installable, so an availability-only probe is never read as a registered adapter.
+
+**Where the adapter directory is looked for.** The first location below that contains `manifest.json` (or the `manifest.json.in` template) wins:
+
+1. `$ANOLISA_ADAPTER_DIR`, when set — use it for a custom install prefix.
+2. `$XDG_DATA_HOME/anolisa/adapters/tokenless`, when `XDG_DATA_HOME` is an absolute path.
+3. `~/.local/share/anolisa/adapters/tokenless`.
+4. `/usr/share/anolisa/adapters/tokenless`, then `/usr/local/share/anolisa/adapters/tokenless`.
+
+This mirrors the packaged layout, which resolves the user data root as `${XDG_DATA_HOME:-$HOME/.local/share}`.
+
+If none of them holds a manifest, `tokenless init` exits with an error:
 
 ```
 Adapter directory not found.
 Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+For a custom location, set ANOLISA_ADAPTER_DIR to the directory containing manifest.json.
 ```
 
-Resolve this by installing the tokenless package first:
+Resolve this by installing the tokenless package first, or by pointing `ANOLISA_ADAPTER_DIR` at an adapter directory that already exists:
 
 ```bash
 npm install -g anolisa-tokenless
 # or
 anolisa install tokenless
+# or, for a non-standard prefix
+export ANOLISA_ADAPTER_DIR=/opt/anolisa/share/anolisa/adapters/tokenless
 ```
 
 ### Manual install scripts

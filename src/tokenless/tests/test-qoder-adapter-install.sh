@@ -140,6 +140,16 @@ else
     fail "detect rejected a compatible qodercli"
 fi
 
+# `tokenless init` reads the JSON status detect publishes, not its exit code:
+# this script probes the host CLI, so a compatible one is a prerequisite for
+# installing, never evidence that the adapter is registered.
+detect_out="$(HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$DETECT_SH" 2>/dev/null)"
+if printf '%s\n' "$detect_out" | grep -Fqx '{"status":"installable"}'; then
+    pass "detect publishes installable for a compatible CLI"
+else
+    fail "detect did not publish installable for a compatible CLI"
+fi
+
 if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" >/dev/null; then
     pass "native plugin installation succeeds"
 else
@@ -190,6 +200,27 @@ if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
     fail "detect accepted a CLI without plugins list support"
 else
     pass "detect rejects an incomplete plugin lifecycle"
+fi
+
+detect_out="$(HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        QODER_STUB_MISSING_LIST=1 bash "$DETECT_SH" 2>/dev/null || true)"
+if printf '%s\n' "$detect_out" | grep -Fqx '{"status":"missing_prereqs"}'; then
+    pass "detect publishes missing_prereqs for an incomplete lifecycle"
+else
+    fail "detect did not publish missing_prereqs for an incomplete lifecycle"
+fi
+
+# An absent qodercli exits 1 too, and `tokenless init` used to read that 1 as
+# "installable" and offer to install an adapter no host could load.
+absent_home="$SANDBOX/absent-home"
+mkdir -p "$absent_home"
+bash_bin="$(command -v bash)"
+detect_out="$(HOME="$absent_home" PATH="/usr/bin:/bin" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        "$bash_bin" "$DETECT_SH" 2>/dev/null || true)"
+if printf '%s\n' "$detect_out" | grep -Fqx '{"status":"missing_prereqs"}'; then
+    pass "detect publishes missing_prereqs when qodercli is absent"
+else
+    fail "detect did not publish missing_prereqs when qodercli is absent"
 fi
 
 if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$UNINSTALL_SH" >/dev/null; then

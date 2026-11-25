@@ -188,7 +188,11 @@ enum Commands {
     /// Detect installed agent frameworks and install tokenless adapters
     Init {
         /// Install a specific framework by name (e.g. claude-code, qoder)
-        #[arg(long)]
+        ///
+        /// Names the single target to act on, so it cannot be combined with
+        /// the other selection modes: `--all` would install unrelated adapters
+        /// after the named one, and `--list` promises not to install anything.
+        #[arg(long, conflicts_with_all = ["all", "list"])]
         framework: Option<String>,
         /// Install all installable frameworks without prompting
         #[arg(long)]
