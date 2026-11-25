@@ -42,6 +42,16 @@
 //! without `jq` twice interpolated a path it had not escaped, and each time the
 //! exit 0 that followed claimed a registration nobody had verified.
 //!
+//! That document shares stdout with whatever else writes to it. The lifecycle
+//! scripts inherit the caller's environment, so a `BASH_ENV` startup file that
+//! prints a line lands ahead of the status, and a detector may log a line of
+//! its own around a pretty-printed document. The status is therefore read
+//! wherever it appears in the stream — as the whole of it, or as any balanced
+//! object span inside it — and a document that was opened and could not be
+//! parsed stays [`DetectStatus::Unreadable`] whatever precedes it. For a
+//! detector that publishes JSON the exit code is a constant that describes no
+//! adapter, so it may not stand in for a status the parser lost.
+//!
 //! Every lifecycle script is Bash, so a host without it cannot report any
 //! status. A detector that cannot be launched is an error rather than an
 //! adapter state: folding it into `missing prereqs` let `--all` exit 0 with
@@ -377,20 +387,47 @@ fn interpret_detect(
 /// True when a detector meant to publish a JSON status and produced something
 /// unparseable.
 ///
-/// Every shipped text detector starts its output with `[tokenless]`, so a
-/// leading brace is a deliberate JSON document — a partial one is a bug in the
-/// detector, not a prose line that happens to look like JSON. The whole output
-/// has to fail: a document that parses and merely carries no recognised field
-/// is the detector's answer, not a broken one.
+/// Two shapes establish that intent, because the document does not have to be
+/// the whole of the output: a leading brace, which is what a detector that
+/// publishes nothing else emits, and a brace followed by a double quote
+/// anywhere in the stream, which is how an object literal begins. Every shipped
+/// text detector starts its own lines with `[tokenless]`, so neither shape is a
+/// prose line that happens to hold a brace — a partial document is a bug in the
+/// detector. Honouring only the leading brace let one line of Bash startup
+/// output hide a broken document, and the exit code that followed reported a
+/// registration nobody had verified.
+///
+/// The whole output still has to fail: a document that parses and merely
+/// carries no recognised field is the detector's answer, not a broken one.
 fn status_unreadable(stdout: &str) -> bool {
-    stdout.trim_start().starts_with('{') && json_objects(stdout).is_empty()
+    opens_json_document(stdout) && json_objects(stdout).is_empty()
+}
+
+/// True when `stdout` holds the opening of a JSON object literal.
+fn opens_json_document(stdout: &str) -> bool {
+    if stdout.trim_start().starts_with('{') {
+        return true;
+    }
+    let bytes = stdout.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'{'
+            && bytes[index + 1..]
+                .iter()
+                .find(|byte| !byte.is_ascii_whitespace())
+                == Some(&b'"')
+    })
 }
 
 /// JSON objects a detector published on stdout.
 ///
-/// The whole output is tried first because `codex` pretty-prints a single
-/// object across several lines, then each line on its own so a detector may log
-/// to stdout around a one-line status object.
+/// The whole output is tried first because a detector that publishes nothing
+/// else parses in one step. Failing that, every balanced `{...}` span is tried
+/// on its own, so a document survives whatever shares the stream with it:
+/// `codex` pretty-prints one object across several lines, a detector may log
+/// around it, and the lifecycle scripts inherit the caller's environment — so
+/// a `BASH_ENV` startup file that writes to stdout lands ahead of the status.
+/// Reading line by line lost that document, and the exit code that followed
+/// reported a registration nobody had verified.
 fn json_objects(stdout: &str) -> Vec<serde_json::Value> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
@@ -401,11 +438,58 @@ fn json_objects(stdout: &str) -> Vec<serde_json::Value> {
     {
         return vec![value];
     }
-    trimmed
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+    json_object_spans(trimmed)
+        .into_iter()
+        .filter_map(|span| serde_json::from_str::<serde_json::Value>(span).ok())
         .filter(|value| value.is_object())
         .collect()
+}
+
+/// Every balanced `{...}` span in `text`, in the order the spans open.
+///
+/// A brace inside a JSON string does not close a document, so a path holding
+/// one still yields a single span. Quotes are tracked only inside a candidate
+/// object: prose around it may quote anything without hiding the document that
+/// follows. A span that never closes is dropped, which leaves the output with
+/// no published object for [`status_unreadable`] to report.
+fn json_object_spans(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut spans: Vec<&str> = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if in_string {
+            match byte {
+                b'\\' => escaped = !escaped,
+                b'"' => {
+                    // A quoted quote stays inside the string.
+                    in_string = escaped;
+                    escaped = false;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' if depth > 0 => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = index;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    spans.push(&text[start..=index]);
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
 }
 
 /// Run `install.sh` for a framework with both streams attached to ours.
@@ -1067,6 +1151,108 @@ mod tests {
         assert!(!status_unreadable("{\n  \"installed\": false\n}\n"));
         assert!(status_unreadable("{\"status\": }"));
         assert!(status_unreadable("  { broken"));
+        // A document no longer has to open the output to be recognised: one
+        // line of inherited Bash startup output may precede it.
+        assert!(status_unreadable(
+            "shell-initialized\n{\n  \"status\": \"ready\"\n"
+        ));
+        assert!(status_unreadable("shell-initialized\n{\"status\": }"));
+        assert!(!status_unreadable(
+            "shell-initialized\n{\"status\": \"ready\"}\n"
+        ));
+        // Prose that holds a brace but never opens an object literal is not a
+        // document, so it cannot disable a detector that reports by exit code.
+        assert!(!status_unreadable("[tokenless] run: jq '{status: 1}'\n"));
+    }
+
+    /// One line of Bash startup output: the lifecycle scripts inherit the
+    /// caller's environment, so a `BASH_ENV` file that writes to stdout lands
+    /// ahead of whatever the detector itself publishes.
+    const STARTUP_LINE: &str = "shell-initialized\n";
+
+    /// What the shipped Codex detector emits without `jq`: one object spread
+    /// over several lines, so it is neither the whole output nor one line of it
+    /// once something else shares the stream.
+    const PRETTY_CODEX_STATUS: &str = "{\n  \"installed\": true,\n  \"status\": \"missing_prereqs\",\n  \"version\": \"9.9.9\",\n  \"path\": \"/opt/bin/tokenless\"\n}\n";
+
+    #[test]
+    fn published_status_survives_a_bash_startup_line() {
+        let stdout = format!("{STARTUP_LINE}{PRETTY_CODEX_STATUS}");
+        assert_eq!(declared(Some(0), &stdout), DetectStatus::MissingPrereqs);
+        // The exit code of a detector that publishes its status is a constant,
+        // so losing the document may not read as a verified registration.
+        assert_ne!(declared(Some(0), &stdout), DetectStatus::Ready);
+        assert_ne!(declared(Some(0), &stdout), DetectStatus::Installable);
+        assert_eq!(
+            legacy_host_only(Some(0), &stdout),
+            DetectStatus::MissingPrereqs
+        );
+        assert_eq!(
+            legacy_tri_state(Some(0), &stdout),
+            DetectStatus::MissingPrereqs
+        );
+    }
+
+    #[test]
+    fn published_status_survives_output_on_both_sides_of_it() {
+        // A startup file may print after the document as well, and a detector
+        // may log a line of its own around a compact status.
+        let after = format!("{STARTUP_LINE}{PRETTY_CODEX_STATUS}{STARTUP_LINE}");
+        assert_eq!(declared(Some(0), &after), DetectStatus::MissingPrereqs);
+        let around = format!(
+            "[tokenless] qoder: detected compatible qodercli\n{{\"status\":\"installable\"}}\n{STARTUP_LINE}"
+        );
+        assert_eq!(declared(Some(0), &around), DetectStatus::Installable);
+    }
+
+    #[test]
+    fn json_objects_reads_a_multiline_document_beside_prose() {
+        let stdout = format!("{STARTUP_LINE}{PRETTY_CODEX_STATUS}");
+        let objects = json_objects(&stdout);
+        assert_eq!(objects.len(), 1, "{objects:?}");
+        assert_eq!(
+            objects[0].get("status").and_then(|value| value.as_str()),
+            Some("missing_prereqs")
+        );
+        // Two documents on one line are two answers, neither of them lost.
+        assert_eq!(json_objects("{\"a\": 1} {\"status\": \"ready\"}").len(), 2);
+    }
+
+    #[test]
+    fn json_object_spans_track_strings_and_nesting() {
+        // A quoted startup line, a brace inside a path and an escaped quote
+        // must not hide or split the document.
+        let stdout = "echo \"shell initialized\"\n{\"path\": \"/opt/we{ird}/to\\\"kenless\", \"status\": \"ready\"}\n";
+        assert_eq!(json_objects(stdout).len(), 1, "{stdout}");
+        assert_eq!(declared(Some(1), stdout), DetectStatus::Ready);
+        // A nested object is one document, not two.
+        assert_eq!(json_object_spans("{\"a\": {\"b\": 1}}").len(), 1);
+        // A document that never closes publishes nothing, which is what makes
+        // it unreadable rather than an answer.
+        assert!(json_object_spans("{\"a\": \"x").is_empty());
+        assert!(json_object_spans("no braces here").is_empty());
+    }
+
+    #[test]
+    fn an_unparseable_document_behind_a_startup_line_is_still_unreadable() {
+        // The escaping bug of the previous round, one startup line later: the
+        // document was opened, so nothing it failed to say may be replaced by
+        // the exit code that followed it.
+        let stdout = format!("{STARTUP_LINE}{BROKEN_CODEX_STATUS}");
+        assert!(status_unreadable(&stdout));
+        for contract in [
+            DetectorContract::Declared,
+            DetectorContract::LegacyTriState,
+            DetectorContract::LegacyHostOnly,
+        ] {
+            for exit_code in [Some(0), Some(1), Some(2), None] {
+                assert_eq!(
+                    interpret_detect(exit_code, &stdout, contract),
+                    DetectStatus::Unreadable,
+                    "{contract:?} exit {exit_code:?}"
+                );
+            }
+        }
     }
 
     #[test]

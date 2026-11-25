@@ -1467,3 +1467,367 @@ fn a_detector_that_runs_is_not_reported_as_unavailable() {
     assert_eq!(status_of(&run.stdout, "one"), "installable");
     assert!(!run.combined().contains("unavailable"), "{}", run.stdout);
 }
+
+// ---------------------------------------------------------------------------
+// P2-07 — output the CLI does not own must not hide the status
+// ---------------------------------------------------------------------------
+
+/// A `BASH_ENV` file, which Bash sources before every lifecycle script. The CLI
+/// inherits the caller's environment and collects the detector's stdout, so one
+/// line printed here lands ahead of whatever the detector publishes.
+const STARTUP_ECHO: &str = "echo shell-initialized\n";
+
+/// The same message on the other stream, which never reaches the parser.
+const STARTUP_ECHO_STDERR: &str = "echo shell-initialized >&2\n";
+
+/// A detector that pretty-prints its status across several lines and exits 0:
+/// the shape both branches of the shipped Codex detector emit for a binary they
+/// found. Read line by line, the document is no line of the output.
+const PRETTY_MISSING_PREREQS_DETECT: &str = r#"#!/usr/bin/env bash
+printf '%s\n' '{' '  "installed": true,' '  "status": "missing_prereqs"' '}'
+exit 0
+"#;
+
+/// The same document reporting a target that can be registered.
+const PRETTY_INSTALLABLE_DETECT: &str = r#"#!/usr/bin/env bash
+printf '%s\n' '{' '  "installed": true,' '  "status": "installable"' '}'
+exit 0
+"#;
+
+/// Write a startup file and return it, ready to be handed to `BASH_ENV`.
+fn startup_file(root: &Path, body: &str) -> PathBuf {
+    let path = root.join("bashenv.sh");
+    fs::write(&path, body).expect("write BASH_ENV startup file");
+    path
+}
+
+/// A `tokenless` the shipped Codex detector can resolve, so it publishes the
+/// multi-line document rather than its one-line "binary not found" answer.
+fn with_tokenless_stub(fixture: &CodexFixture) {
+    write_script(
+        &fixture.bin.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+}
+
+#[test]
+fn a_startup_line_does_not_hide_a_pretty_printed_status() {
+    let fixture = Fixture::new(&[
+        Target::new("absent", PRETTY_MISSING_PREREQS_DETECT),
+        Target::new("fresh", PRETTY_INSTALLABLE_DETECT),
+    ]);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    // What the two detectors publish when nothing else shares the stream.
+    let plain = run(&fixture, &["init", "--list"]);
+    plain.assert_code(0);
+    assert_eq!(status_of(&plain.stdout, "absent"), "missing prereqs");
+    assert_eq!(status_of(&plain.stdout, "fresh"), "installable");
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    // Both detectors exit 0, so only the published status tells them apart:
+    // losing the document behind the startup line read both as ready.
+    assert_eq!(
+        status_of(&list.stdout, "absent"),
+        "missing prereqs",
+        "startup output hid the status:\n{}",
+        list.stdout
+    );
+    assert_eq!(status_of(&list.stdout, "fresh"), "installable");
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "absent"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("absent is not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("already installed and ready"),
+        "a host that cannot register was reported ready:\n{}",
+        named.combined()
+    );
+
+    let batch = finish(
+        fixture
+            .command()
+            .args(["init", "--all"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["fresh".to_string()],
+        "batch mode selected the wrong targets:\n{}",
+        batch.combined()
+    );
+}
+
+#[test]
+fn a_startup_line_does_not_resurrect_a_broken_status_document() {
+    // The document of the previous round's escaping bug, one startup line
+    // later: it was still opened, so it still publishes no answer, and the
+    // exit 0 that follows it may not stand in for one.
+    let fixture = Fixture::new(&[Target::new("one", BROKEN_STATUS_DETECT)]);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "one"),
+        "unreadable",
+        "a broken document behind a startup line was read as an answer:\n{}",
+        list.stdout
+    );
+    assert!(
+        list.stdout.contains("not parseable JSON"),
+        "the unreadable answer was not reported:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "one"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command reached the installer: {:?}",
+        fixture.installed()
+    );
+
+    let batch = finish(
+        fixture
+            .command()
+            .args(["init", "--all"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(0);
+    assert!(
+        fixture.installed().is_empty(),
+        "batch mode selected an unreadable target: {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn startup_output_on_stderr_gives_the_same_answer() {
+    // The control for the case above: the same message on the stream the
+    // parser never reads left the answer intact, so both streams now agree.
+    let fixture = Fixture::new(&[Target::new("one", PRETTY_MISSING_PREREQS_DETECT)]);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO_STDERR);
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "one"), "missing prereqs");
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "one"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn a_startup_line_does_not_hide_the_shipped_codex_status() {
+    let fixture = CodexFixture::new();
+    with_tokenless_stub(&fixture);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    let list = finish(
+        fixture
+            .command(&["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", fixture.bin.join("absent-codex"))
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "codex"),
+        "missing prereqs",
+        "the shipped detector's status was lost behind startup output:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command(&["init", "--framework", "codex"])
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", fixture.bin.join("absent-codex"))
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("codex is not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a host that cannot register was reported as installed:\n{}",
+        named.combined()
+    );
+    assert_eq!(fixture.install_runs(), 0, "the installer ran");
+}
+
+#[test]
+fn a_startup_line_does_not_skip_the_shipped_codex_install() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    with_tokenless_stub(&fixture);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    let list = finish(
+        fixture
+            .command(&["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "installable");
+
+    let named = finish(
+        fixture
+            .command(&["init", "--framework", "codex"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    // Reporting ready here skipped the registration entirely: the detector
+    // never claims more than installable, because it does not ask the host.
+    assert!(
+        !named.combined().contains("already installed and ready"),
+        "a fresh Codex was reported ready:\n{}",
+        named.combined()
+    );
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "a fresh install never reached the installer:\n{}",
+        named.combined()
+    );
+}
+
+/// The shipped detector on a jq-free PATH, where the multi-line document is
+/// emitted by the detector's own `printf` rather than by `jq`.
+#[test]
+#[cfg(unix)]
+fn a_startup_line_does_not_hide_the_shipped_codex_status_without_jq() {
+    let fixture = CodexFixture::new();
+    with_tokenless_stub(&fixture);
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if !link_shell_tools(&tools) {
+        // No way to build a jq-free PATH on this host; the case with `jq`
+        // covers the same parser.
+        return;
+    }
+    let path = format!("{}:{}", fixture.bin.display(), tools.display());
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+    let unusable_pin = fixture._root.path().join("absent-codex");
+
+    let list = finish(
+        fixture
+            .command_with_path(&["init", "--list"], &path)
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "codex"),
+        "missing prereqs",
+        "the jq-free document was lost behind startup output:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "the shipped detector emitted unparseable JSON:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert_eq!(fixture.install_runs(), 0, "the installer ran");
+
+    // The same PATH with a host the resolver can find: installable, and the
+    // registration is reached.
+    fixture.with_codex_stub();
+    let installed = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    installed.assert_code(0);
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "a fresh install never reached the installer:\n{}",
+        installed.combined()
+    );
+}
