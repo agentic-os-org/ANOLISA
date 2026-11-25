@@ -132,27 +132,7 @@ impl GenAIBuilder {
                                 message.parts.insert(0, reasoning.clone());
                             }
                         }
-                        let missing_ids = message
-                            .parts
-                            .iter()
-                            .any(|part| matches!(part, MessagePart::ToolCall { id: None, .. }));
-                        if missing_ids
-                            || !message
-                                .parts
-                                .iter()
-                                .any(|part| matches!(part, MessagePart::ToolCall { .. }))
-                        {
-                            if missing_ids {
-                                message.parts.retain(|part| {
-                                    !matches!(part, MessagePart::ToolCall { id: None, .. })
-                                });
-                            }
-                            message.parts.extend(
-                                parts
-                                    .into_iter()
-                                    .filter(|part| matches!(part, MessagePart::ToolCall { .. })),
-                            );
-                        }
+                        Self::merge_sse_tool_calls(&mut message.parts, parts);
                         if message.finish_reason.is_none() {
                             message.finish_reason = finish_reason;
                         }
@@ -915,6 +895,51 @@ impl GenAIBuilder {
         }
     }
 
+    fn non_empty_id(id: &str) -> Option<String> {
+        (!id.is_empty()).then(|| id.to_owned())
+    }
+
+    /// Merge SSE-recovered `ToolCall` parts into `parts` without duplicating existing identified
+    /// calls or dropping orphan calls when enrichment cannot supply any new ID.
+    fn merge_sse_tool_calls(parts: &mut Vec<MessagePart>, sse_parts: Vec<MessagePart>) {
+        let has_tool_calls = parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::ToolCall { .. }));
+        let has_missing_ids = parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::ToolCall { id: None, .. }));
+        if has_tool_calls && !has_missing_ids {
+            return;
+        }
+        let sse_calls: Vec<MessagePart> = sse_parts
+            .into_iter()
+            .filter(|part| matches!(part, MessagePart::ToolCall { .. }))
+            .collect();
+        if !has_tool_calls {
+            parts.extend(sse_calls);
+            return;
+        }
+        let existing_ids: std::collections::HashSet<String> = parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolCall { id: Some(id), .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let supplies_new_id = sse_calls.iter().any(|part| match part {
+            MessagePart::ToolCall { id: Some(id), .. } => !existing_ids.contains(id),
+            _ => false,
+        });
+        if !supplies_new_id {
+            return;
+        }
+        parts.retain(|part| !matches!(part, MessagePart::ToolCall { id: None, .. }));
+        parts.extend(sse_calls.into_iter().filter(|part| match part {
+            MessagePart::ToolCall { id: Some(id), .. } => !existing_ids.contains(id),
+            _ => true,
+        }));
+    }
+
     fn anthropic_content_block_to_part(
         block: &crate::analyzer::message::AnthropicContentBlock,
     ) -> Option<MessagePart> {
@@ -930,11 +955,7 @@ impl GenAIBuilder {
             }
             crate::analyzer::message::AnthropicContentBlock::ToolUse { id, name, input } => {
                 Some(MessagePart::ToolCall {
-                    id: if id.is_empty() {
-                        None
-                    } else {
-                        Some(id.clone())
-                    },
+                    id: Self::non_empty_id(id),
                     name: name.clone(),
                     arguments: Some(input.clone()),
                 })
@@ -953,7 +974,7 @@ impl GenAIBuilder {
                     (None, None) => serde_json::Value::Null,
                 };
                 Some(MessagePart::ToolCallResponse {
-                    id: Some(tool_use_id.clone()),
+                    id: Self::non_empty_id(tool_use_id),
                     response,
                 })
             }
@@ -1017,11 +1038,7 @@ impl GenAIBuilder {
                                 } => {
                                     // Anthropic tool_use: convert to MessagePart::ToolCall
                                     parts.push(MessagePart::ToolCall {
-                                        id: if id.is_empty() {
-                                            None
-                                        } else {
-                                            Some(id.clone())
-                                        },
+                                        id: Self::non_empty_id(id),
                                         name: name.clone(),
                                         arguments: Some(input.clone()),
                                     });
@@ -1043,7 +1060,7 @@ impl GenAIBuilder {
                                         (None, None) => serde_json::Value::Null,
                                     };
                                     parts.push(MessagePart::ToolCallResponse {
-                                        id: Some(tool_use_id.clone()),
+                                        id: Self::non_empty_id(tool_use_id),
                                         response: response_val,
                                     });
                                 }
@@ -1172,16 +1189,6 @@ impl GenAIBuilder {
                             .parts
                             .iter()
                             .any(|p| matches!(p, MessagePart::Reasoning { .. }));
-                        // Check if any tool_call is missing id
-                        let has_tool_calls_without_id = msg
-                            .parts
-                            .iter()
-                            .any(|p| matches!(p, MessagePart::ToolCall { id, .. } if id.is_none()));
-                        let has_tool_calls = msg
-                            .parts
-                            .iter()
-                            .any(|p| matches!(p, MessagePart::ToolCall { .. }));
-
                         if let Some((extra, sse_finish)) = Self::extract_parts_from_sse_body(body) {
                             if !has_reasoning {
                                 if let Some(r) = extra
@@ -1191,19 +1198,7 @@ impl GenAIBuilder {
                                     msg.parts.insert(0, r.clone());
                                 }
                             }
-                            // Always try to enrich tool_calls if missing id or no tool_calls
-                            if !has_tool_calls || has_tool_calls_without_id {
-                                // Remove existing tool_calls without id, replace with SSE ones
-                                if has_tool_calls_without_id {
-                                    msg.parts.retain(|p| !matches!(p, MessagePart::ToolCall { id, .. } if id.is_none()));
-                                }
-                                for p in extra
-                                    .into_iter()
-                                    .filter(|p| matches!(p, MessagePart::ToolCall { .. }))
-                                {
-                                    msg.parts.push(p);
-                                }
-                            }
+                            Self::merge_sse_tool_calls(&mut msg.parts, extra);
                             // Enrich finish_reason if missing
                             if msg.finish_reason.is_none() {
                                 msg.finish_reason = sse_finish;
@@ -3569,5 +3564,164 @@ mod tests {
         assert_eq!(id, None);
         assert_eq!(name, "");
         assert_eq!(arguments, Some(serde_json::json!({"cmd": "pwd"})));
+
+        let result_block = crate::analyzer::message::AnthropicContentBlock::ToolResult {
+            tool_use_id: String::new(),
+            content: Some(serde_json::json!("ok")),
+            is_error: None,
+        };
+        let Some(MessagePart::ToolCallResponse { id, .. }) =
+            GenAIBuilder::anthropic_content_block_to_part(&result_block)
+        else {
+            panic!("expected MessagePart::ToolCallResponse");
+        };
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn mixed_orphan_and_identified_anthropic_calls_are_not_duplicated() {
+        let chunks = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_mixed",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "usage": {"input_tokens": 10, "output_tokens": 0}
+                }
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"cmd\":\"pwd\"}"}
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"Cargo.toml\"}"}
+            },
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 12}
+            }
+        ]);
+        let req_val = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let parsed = crate::analyzer::message::MessageParser::new()
+            .parse_by_path("/v1/messages", Some(&req_val), Some(&chunks))
+            .expect("parsed mixed stream");
+
+        // 1. Compact delivery path (`HttpContext` with `context.response = Some(chunks)`)
+        let mut http = make_http("/v1/messages", None, None);
+        http.is_sse = true;
+        let compact_results = vec![
+            AnalysisResult::HttpContext(crate::analyzer::HttpContext {
+                http: http.clone(),
+                request: Some(req_val.clone()),
+                response: Some(chunks.clone()),
+                retain_raw: false,
+            }),
+            AnalysisResult::Message(parsed.clone()),
+        ];
+        let mapper = ResponseSessionMapper::default();
+        let pid_cache = std::collections::HashMap::new();
+        let (output, _) = GenAIBuilder::new().build_for_owned_delivery(
+            &compact_results,
+            &mapper,
+            &pid_cache,
+            false,
+        );
+        let call = output
+            .events
+            .iter()
+            .find_map(|event| match event {
+                crate::genai::GenAISemanticEvent::LLMCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("compact LLMCall");
+        let compact_tool_ids: Vec<Option<&str>> = call.response.messages[0]
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::ToolCall { id, .. } => Some(id.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compact_tool_ids, vec![None, Some("toolu_1")]);
+
+        // 2. Raw-body SSE path (`http.response_body`, no `context.response`)
+        let raw_sse_body = chunks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| format!("data: {c}\n\n"))
+            .collect::<String>();
+        let mut raw_http = make_http(
+            "/v1/messages",
+            Some(req_val.to_string()),
+            Some(raw_sse_body),
+        );
+        raw_http.is_sse = true;
+        let raw_results = vec![http_result(raw_http), AnalysisResult::Message(parsed)];
+        let raw_call = build_call(&GenAIBuilder::new(), &raw_results).expect("raw LLMCall");
+        let raw_tool_ids: Vec<Option<&str>> = raw_call.response.messages[0]
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::ToolCall { id, .. } => Some(id.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raw_tool_ids, vec![None, Some("toolu_1")]);
+
+        // 3. Enrichment that actually recovers a missing ID still avoids duplicating existing IDs
+        let mut parts = vec![
+            MessagePart::ToolCall {
+                id: None,
+                name: "Bash".into(),
+                arguments: Some(serde_json::json!({"cmd": "pwd"})),
+            },
+            MessagePart::ToolCall {
+                id: Some("call_1".into()),
+                name: "Read".into(),
+                arguments: Some(serde_json::json!({"path": "Cargo.toml"})),
+            },
+        ];
+        GenAIBuilder::merge_sse_tool_calls(
+            &mut parts,
+            vec![
+                MessagePart::ToolCall {
+                    id: Some("call_0".into()),
+                    name: "Bash".into(),
+                    arguments: Some(serde_json::json!({"cmd": "pwd"})),
+                },
+                MessagePart::ToolCall {
+                    id: Some("call_1".into()),
+                    name: "Read".into(),
+                    arguments: Some(serde_json::json!({"path": "Cargo.toml"})),
+                },
+            ],
+        );
+        let recovered_ids: Vec<Option<&str>> = parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::ToolCall { id, .. } => Some(id.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(recovered_ids, vec![Some("call_1"), Some("call_0")]);
     }
 }
