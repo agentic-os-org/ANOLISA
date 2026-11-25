@@ -10,7 +10,7 @@
 
 use std::ffi::CString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use common::{MountFixture, create_skill_dir};
 
@@ -19,37 +19,27 @@ mod common;
 // ─────────────────────────────────────────────────────────────────────────────
 // Umask RAII guard
 //
-// `umask(2)` mutates process-global state, so two tests that change it must
-// not run concurrently. `cargo test` defaults to multi-threaded execution
-// and FUSE-backed tests in this suite all serialize on this mutex via the
-// `umask_guard()` helper. The guard's `Drop` restores the previous umask
-// even when an assertion panics mid-test, which is the constraint the
-// reviewer explicitly called out for T0.1.
+// Fixture creation also observes the process umask. Take the lock before
+// starting a fixture and hold it until the mount and temporary files are gone.
 // ─────────────────────────────────────────────────────────────────────────────
 
 static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
+fn lock_test_umask() -> MutexGuard<'static, ()> {
+    UMASK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct UmaskGuard {
     previous: libc::mode_t,
-    // Held for the lifetime of the guard so other umask-touching tests
-    // are forced to serialize. The compiler-unused field is intentional.
-    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl UmaskGuard {
-    fn new(mask: libc::mode_t) -> Self {
-        // Poisoned-mutex recovery: if a prior test panicked under this
-        // lock the umask may already be wrong. Take the poisoned guard
-        // and forcefully re-establish a known state.
-        let lock = UMASK_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn new(mask: libc::mode_t, _lock: &MutexGuard<'_, ()>) -> Self {
         // SAFETY: umask is async-signal-safe and always succeeds.
         let previous = unsafe { libc::umask(mask) };
-        Self {
-            previous,
-            _lock: lock,
-        }
+        Self { previous }
     }
 }
 
@@ -74,6 +64,7 @@ const CREATE_CASES: &[(libc::mode_t, libc::mode_t, libc::mode_t)] = &[
 
 #[test]
 fn test_create_honors_mode_and_umask() {
+    let lock = lock_test_umask();
     skip_if_no_fuse!();
 
     let fx = MountFixture::normal(|src| {
@@ -89,7 +80,7 @@ fn test_create_honors_mode_and_umask() {
         let source_path = sandbox_src.join(&name);
 
         let perm = {
-            let _guard = UmaskGuard::new(mask);
+            let _guard = UmaskGuard::new(mask, &lock);
             let c_path = CString::new(mount_path.to_str().unwrap()).expect("CString path");
             let fd = unsafe {
                 libc::open(
@@ -135,6 +126,7 @@ const MKDIR_CASES: &[(libc::mode_t, libc::mode_t, libc::mode_t)] = &[
 
 #[test]
 fn test_mkdir_honors_mode_and_umask() {
+    let lock = lock_test_umask();
     skip_if_no_fuse!();
 
     let fx = MountFixture::normal(|src| {
@@ -150,7 +142,7 @@ fn test_mkdir_honors_mode_and_umask() {
         let source_path = sandbox_src.join(&name);
 
         let perm = {
-            let _guard = UmaskGuard::new(mask);
+            let _guard = UmaskGuard::new(mask, &lock);
             let c_path = CString::new(mount_path.to_str().unwrap()).expect("CString path");
             let rc = unsafe { libc::mkdir(c_path.as_ptr(), mode as libc::c_uint) };
             assert_eq!(
@@ -179,6 +171,7 @@ fn test_mkdir_honors_mode_and_umask() {
 
 #[test]
 fn test_passthrough_getattr_ino_matches_lookup() {
+    let _lock = lock_test_umask();
     skip_if_no_fuse!();
 
     let fx = MountFixture::normal(|src| {
