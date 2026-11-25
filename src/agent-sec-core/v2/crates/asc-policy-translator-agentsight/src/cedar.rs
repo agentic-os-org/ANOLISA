@@ -21,7 +21,18 @@ type Result<T> = std::result::Result<T, &'static str>;
 pub(super) fn translate(
     policies: &cedar_policy::pst::PolicySet,
 ) -> std::result::Result<FileProtectionPolicy, TranslationRejection> {
+    translate_with_origins(policies, 0, |_, _| {})
+}
+
+// Projection and subject removal preserve the order of the retained positive operation
+// equalities. Track their original indices through Boolean lowering, before target merging.
+pub(super) fn translate_with_origins(
+    policies: &cedar_policy::pst::PolicySet,
+    origin_count: usize,
+    mut record: impl FnMut(usize, &FileProtectionTarget),
+) -> std::result::Result<FileProtectionPolicy, TranslationRejection> {
     let mut targets = Vec::new();
+    let mut origins = 0..origin_count;
     for (index, (id, policy)) in policies.policies.iter().enumerate() {
         // Projection retains SDK statement identities even when HTTP statements precede them.
         let index = id
@@ -67,17 +78,21 @@ pub(super) fn translate(
                 ..Branch::default()
             }];
             for clause in body.clauses() {
-                let (expr, negate) = match clause {
-                    Clause::When(expr) => (expr, false),
-                    Clause::Unless(expr) => (expr, true),
+                let lowered = match clause {
+                    Clause::When(expr) => expression(expr, false, 0, &mut origins)?,
+                    Clause::Unless(expr) => expression(expr, true, 0, &mut (0..0))?,
                 };
-                branches = and(branches, &expression(expr, negate, 0)?)?;
+                branches = and(branches, &lowered)?;
             }
-            for branch in branches {
+            for mut branch in branches {
                 if branch.operations & !(DELETE | WRITE | READ) != 0 {
                     return Err("UNSUPPORTED_OPERATION");
                 }
+                let sources = std::mem::take(&mut branch.origins);
                 if let Some(mut item) = target(branch)? {
+                    for index in sources {
+                        record(index, &item);
+                    }
                     // Identical scopes may share operation bits. Different exclusions
                     // on the same root are rejected by Sight's structured protocol.
                     item.exclusions.sort_by(|a, b| a.path.cmp(&b.path));

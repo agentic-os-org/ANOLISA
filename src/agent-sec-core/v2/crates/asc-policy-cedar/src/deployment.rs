@@ -175,12 +175,26 @@ pub fn selected_pst(
     source: &CedarPolicySource,
     selection: &DeploymentSelection,
 ) -> Result<PolicySet, CedarError> {
+    if !selection
+        .fragments
+        .keys()
+        .all(|id| selection.statement_ids.contains(id))
+    {
+        return Err(CedarError::Unsupported {
+            policy_id: "policy-set".into(),
+            reason: "fragment has no matching selected statement",
+        });
+    }
     let mut syntax = crate::pst(source)?;
     let mut selected = syntax.policies.clone();
     selected.clear();
     for (id, policy) in &syntax.policies {
         if selection.statement_ids.contains(&id.to_string()) {
-            selected.insert(id.clone(), split_subject(policy)?.1);
+            let residual = deployment_fragment(
+                policy,
+                selection.fragments.get(&id.to_string()).map(String::as_str),
+            )?;
+            selected.insert(id.clone(), residual);
         }
     }
     if selected.len() != selection.statement_ids.len() {
@@ -193,8 +207,48 @@ pub fn selected_pst(
     Ok(syntax)
 }
 
+fn deployment_fragment(
+    original: &StaticPolicy,
+    fragment: Option<&str>,
+) -> Result<StaticPolicy, CedarError> {
+    let (source_subject, source_residual) = split_subject(original)?;
+    let Some(text) = fragment else {
+        return Ok(source_residual);
+    };
+    let id = original.id();
+    let parsed = cedar_policy::Policy::parse(Some(id.clone().into()), text)
+        .map_err(Box::new)?
+        .to_pst()
+        .map_err(|e| CedarError::Representation(Box::new(e.into())))?;
+    let cedar_policy::pst::Policy::Static(fragment) = parsed else {
+        return Err(CedarError::Unsupported {
+            policy_id: id.to_string(),
+            reason: "selected fragment must be a static Cedar statement",
+        });
+    };
+    let source_body = original.body();
+    let fragment_body = fragment.body();
+    let (target, residual) = split_subject(&fragment)?;
+    if fragment_body.principal != source_body.principal
+        || fragment_body.action != source_body.action
+        || fragment_body.resource != source_body.resource
+        || fragment_body.effect != source_body.effect
+        || fragment_body.annotations != source_body.annotations
+        || target != source_subject
+    {
+        return Err(CedarError::Unsupported {
+            policy_id: id.to_string(),
+            reason: "selected fragment differs from its source header or target",
+        });
+    }
+    Ok(residual)
+}
+
 /// Process deployment information for an individual authored statement.
+#[derive(Debug)]
 pub struct StatementTarget {
+    original: cedar_policy::Policy,
+    pub(crate) syntax: StaticPolicy,
     pub id: String,
     pub subject: Result<Option<SubjectSelector>, CedarError>,
     action: ActionConstraint,
@@ -203,6 +257,26 @@ pub struct StatementTarget {
 }
 
 impl StatementTarget {
+    /// Original validated statement, including conditions and annotations.
+    #[must_use]
+    pub fn policy(&self) -> &cedar_policy::Policy {
+        &self.original
+    }
+
+    /// Lower a selected statement after verifying its preserved process selector.
+    ///
+    /// # Errors
+    /// Rejects an unrepresentable selector or inconsistent fragment identity.
+    pub fn deployment_rule(&self, fragment: Option<&str>) -> Result<StaticPolicy, CedarError> {
+        deployment_fragment(&self.syntax, fragment)
+    }
+
+    /// Complete Cedar text of this statement.
+    #[must_use]
+    pub fn cedar(&self) -> String {
+        self.original.to_string()
+    }
+
     /// Whether the header can match a request in the consumer's action and resource domain.
     #[must_use]
     pub fn may_match(&self, actions: &[&str], resource: &str) -> bool {
@@ -254,9 +328,11 @@ pub enum Placement<'a> {
 }
 
 /// Registered by the daemon; PAP groups the results without interpreting backend policy.
+#[derive(Clone, Copy)]
 pub struct DeploymentSelector {
     pub backend: DeploymentBackend,
-    pub select: for<'a> fn(&'a StatementTarget) -> Placement<'a>,
+    pub select: crate::selection::Select,
+    pub place: for<'a> fn(&'a StatementTarget) -> Placement<'a>,
 }
 
 /// Read source identities, subject predicates, and action/resource headers once per Policy.
@@ -264,6 +340,12 @@ pub struct DeploymentSelector {
 /// Rejects source that cannot be validated or represented in the Cedar syntax tree.
 pub fn statements(source: &CedarPolicySource) -> Result<Vec<StatementTarget>, CedarError> {
     let (policies, _) = crate::validation::parse_and_validate(source)?;
+    statements_from_policies(&policies)
+}
+
+pub(crate) fn statements_from_policies(
+    policies: &cedar_policy::PolicySet,
+) -> Result<Vec<StatementTarget>, CedarError> {
     policies
         .policies()
         .map(|policy| {
@@ -288,6 +370,8 @@ pub fn statements(source: &CedarPolicySource) -> Result<Vec<StatementTarget>, Ce
             Ok(StatementTarget {
                 id,
                 subject: split_subject(&statement).map(|(subject, _)| subject),
+                original: policy.clone(),
+                syntax: statement,
                 action: policy.action_constraint(),
                 resource: policy.resource_constraint(),
                 credential_rule,
@@ -347,6 +431,7 @@ mod tests {
             &DeploymentSelection {
                 backend: DeploymentBackend::ActPlane,
                 statement_ids: ["policy0".into()].into(),
+                fragments: std::collections::BTreeMap::new(),
             },
         )
         .unwrap();

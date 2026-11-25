@@ -2,11 +2,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asc_foundation_types::{ResourceId, Revision};
-use asc_policy_cedar::deployment::{self, DeploymentSelector, Placement};
+use asc_policy_cedar::deployment::{self, Placement, StatementTarget};
+use asc_policy_cedar::selection::SelectedStatement;
 use asc_policy_types::authoring::PolicySource;
 use asc_policy_types::policy::{DeploymentBackend, DeploymentSelection, PreparedPolicy};
 use asc_policy_types::scope::{PreparedScope, ProcessMatcher, ScopeSelector, ScopeStatus};
 use sha2::{Digest, Sha224};
+use std::sync::Arc;
 
 use crate::{AutomaticDiagnostic, PapError};
 
@@ -39,6 +41,7 @@ impl Group {
 }
 
 type Members = BTreeMap<usize, BTreeSet<String>>;
+type Groups = BTreeMap<Group, (Members, BTreeSet<Grant>)>;
 
 pub(super) struct Candidate {
     group: Group,
@@ -62,8 +65,9 @@ impl Include {
     }
 }
 
-pub(super) struct Derived<'a> {
-    policies: &'a [PreparedPolicy],
+pub(super) struct Derived {
+    policies: Arc<Vec<PreparedPolicy>>,
+    views: crate::selection::DeploymentViews,
     source_bytes: Vec<usize>,
     includes: Vec<Include>,
     pub sources: Vec<(ResourceId, Revision)>,
@@ -71,7 +75,7 @@ pub(super) struct Derived<'a> {
     pub diagnostics: Vec<AutomaticDiagnostic>,
 }
 
-impl Derived<'_> {
+impl Derived {
     fn members(&self, scope: &Candidate) -> Members {
         let mut members = scope.bound.clone();
         for rule in &self.includes {
@@ -85,6 +89,35 @@ impl Derived<'_> {
         members
     }
 
+    fn fragments(
+        &self,
+        backend: DeploymentBackend,
+        index: usize,
+        ids: &BTreeSet<String>,
+    ) -> BTreeMap<String, String> {
+        let Some((_, view)) = self
+            .views
+            .iter()
+            .find(|(selector, _)| selector.backend == backend)
+        else {
+            return BTreeMap::new();
+        };
+        let Some((_, rows)) = view.policy(index) else {
+            return BTreeMap::new();
+        };
+        rows.iter()
+            .filter_map(|row| {
+                let id = &row.source.statement_id;
+                match &row.selected {
+                    SelectedStatement::Fragment { cedar, .. } if ids.contains(id) => {
+                        Some((id.clone(), cedar.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     fn unchanged(&self, old: &PreparedScope, planned: &Candidate) -> bool {
         let members = self.members(planned);
         members.len() == old.policy_snapshots.len()
@@ -95,10 +128,11 @@ impl Derived<'_> {
                     let source = &self.policies[*index];
                     saved.policy_id == source.policy_id
                         && saved.revision == source.revision
-                        && saved
-                            .deployment
-                            .as_ref()
-                            .is_some_and(|selection| selection.statement_ids == *ids)
+                        && saved.deployment.as_ref().is_some_and(|selection| {
+                            selection.statement_ids == *ids
+                                && selection.fragments
+                                    == self.fragments(planned.group.backend, *index, ids)
+                        })
                 })
     }
 
@@ -121,6 +155,7 @@ impl Derived<'_> {
             let mut policy = self.policies[index].clone();
             policy.deployment = Some(DeploymentSelection {
                 backend: scope.group.backend,
+                fragments: self.fragments(scope.group.backend, index, &statement_ids),
                 statement_ids,
             });
             snapshots.push(policy);
@@ -158,35 +193,33 @@ impl Derived<'_> {
     }
 }
 
-pub(super) fn derive<'a>(
-    policies: &'a [PreparedPolicy],
+pub(super) fn derive(
+    policies: Arc<Vec<PreparedPolicy>>,
     matchers: Result<&BTreeMap<String, ProcessMatcher>, &String>,
-    selectors: &[DeploymentSelector],
-) -> Result<Derived<'a>, PapError> {
+    views: crate::selection::DeploymentViews,
+) -> Result<Derived, PapError> {
     let mut diagnostics = Vec::new();
     let mut sources = Vec::new();
     let mut source_bytes = vec![0; policies.len()];
     // Each bound statement creates a group. Other statements can only add rules
     // to groups already established by a backend selector.
-    let mut groups: BTreeMap<Group, (Members, BTreeSet<Grant>)> = BTreeMap::new();
+    let mut groups = Groups::new();
     let mut includes = Vec::new();
     for (index, policy) in policies
         .iter()
         .enumerate()
         .filter(|(_, p)| is_automatic_source(p))
     {
-        let PolicySource::Cedar(source) = &policy.template else {
-            continue;
-        };
         sources.push((policy.policy_id.clone(), policy.revision));
         source_bytes[index] = serde_json::to_vec(policy)
             .map_err(|_| PapError::Persistence)?
             .len();
-        for rule in
-            deployment::statements(source).map_err(|e| PapError::InvalidCedar(e.diagnostic()))?
-        {
-            for selector in selectors {
-                let backend = selector.backend;
+        for (selector, view) in &views {
+            let Some((parsed, selections)) = view.policy(index) else {
+                continue;
+            };
+            let backend = selector.backend;
+            for (rule, row) in parsed.statements.iter().zip(selections) {
                 let mut diagnose = |reason: String| {
                     diagnostics.push(AutomaticDiagnostic {
                         policy_id: policy.policy_id.clone(),
@@ -198,7 +231,13 @@ pub(super) fn derive<'a>(
                         reason: Some(reason),
                     });
                 };
-                let placement = (selector.select)(&rule);
+                if let SelectedStatement::Unsupported(reason) = &row.selected {
+                    diagnose(reason.clone());
+                }
+                if !row.selected.is_selected() {
+                    continue;
+                }
+                let placement = (selector.place)(rule);
                 let matchers = match matchers {
                     Ok(matchers) => matchers,
                     Err(reason) => {
@@ -238,13 +277,7 @@ pub(super) fn derive<'a>(
                         matcher: matcher.clone(),
                         uid: subject.owner_uid,
                     };
-                    let (members, grants) = groups.entry(group).or_default();
-                    members.entry(index).or_default().insert(rule.id.clone());
-                    if backend == DeploymentBackend::Gateway
-                        && let Some(grant) = &rule.credential_rule
-                    {
-                        add_grant(grants, policy, grant.clone());
-                    }
+                    bind_rule(&mut groups, group, index, policy, rule);
                 } else {
                     includes.push(Include {
                         backend,
@@ -258,6 +291,7 @@ pub(super) fn derive<'a>(
     }
     Ok(Derived {
         policies,
+        views,
         source_bytes,
         includes,
         sources,
@@ -266,9 +300,22 @@ pub(super) fn derive<'a>(
     })
 }
 
-fn index_candidates(
-    groups: BTreeMap<Group, (Members, BTreeSet<Grant>)>,
-) -> Result<BTreeMap<ResourceId, Candidate>, PapError> {
+fn bind_rule(
+    groups: &mut Groups,
+    group: Group,
+    index: usize,
+    policy: &PreparedPolicy,
+    rule: &StatementTarget,
+) {
+    let credential = group.backend == DeploymentBackend::Gateway;
+    let (members, grants) = groups.entry(group).or_default();
+    members.entry(index).or_default().insert(rule.id.clone());
+    if credential && let Some(grant) = &rule.credential_rule {
+        add_grant(grants, policy, grant.clone());
+    }
+}
+
+fn index_candidates(groups: Groups) -> Result<BTreeMap<ResourceId, Candidate>, PapError> {
     let mut scopes = BTreeMap::new();
     for (group, (bound, grants)) in groups {
         scopes.insert(
@@ -356,7 +403,7 @@ fn grants(scope: &PreparedScope) -> Result<BTreeSet<Grant>, PapError> {
 /// restriction can occur in several Scopes but cannot cause a credential transfer.
 pub(super) fn publications(
     current: &BTreeMap<ResourceId, PreparedScope>,
-    desired: &Derived<'_>,
+    desired: &Derived,
 ) -> Result<Vec<Vec<ResourceId>>, PapError> {
     // Ordinary additions and unchanged Scopes are independent singleton publications.
     let mut neighbors: BTreeMap<_, BTreeSet<ResourceId>> = desired

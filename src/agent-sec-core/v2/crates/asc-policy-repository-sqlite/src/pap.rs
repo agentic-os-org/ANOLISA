@@ -7,7 +7,10 @@ use crate::{
     },
 };
 use asc_foundation_types::{ResourceId, Revision};
-use asc_pap::{Page, PapError, PapRepository, PolicyRevisionState, ScopeDiscoverySeed};
+use asc_pap::{
+    Page, PapError, PapRepository, PolicyRevisionState, PolicySnapshot, PolicySnapshotKind,
+    ScopeDiscoverySeed,
+};
 use asc_policy_repository::{BindingIntentReceipt, BindingStateSnapshot, StoreError};
 use asc_policy_types::{
     Validate,
@@ -69,6 +72,7 @@ impl PapRepository for SqlitePolicyRepository {
                  current_json=excluded.current_json",
                 params![policy.policy_id.as_str(), policy.revision.get(), encoded],
             )?;
+            advance_policy_generation(tx)?;
             Ok(policy.clone())
         })
         .map_err(RepositoryError::pap)
@@ -103,46 +107,21 @@ impl PapRepository for SqlitePolicyRepository {
         })
         .map_err(RepositoryError::pap)
     }
-    fn all_current_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
-        self.access(false, |tx| {
-            let mut statement = tx.prepare(
-                "SELECT policy_id FROM policies WHERE current_json IS NOT NULL ORDER BY policy_id",
-            )?;
-            let keys = statement.query_map([], |row| row.get::<_, String>(0))?;
-            let mut policies = Vec::new();
-            let mut bytes = 0;
-            for key in keys {
-                let policy = read_policy(tx, &id(key?)?)?
-                    .and_then(|state| state.current)
-                    .ok_or(StoreError::Corrupt)?;
-                bytes += encode(&policy)?.len();
-                // Bound one in-process snapshot, failing closed rather than dropping members.
-                if policies.len() >= 4096 || bytes > 16 * 1024 * 1024 {
-                    return Err(PapError::InvalidPolicy(
-                        asc_policy_types::error::ValidationError::new(
-                            "authorizationPolicies",
-                            "current policy snapshot exceeds 4096 records or 16 MiB",
-                        ),
-                    )
-                    .into());
-                }
-                policies.push(policy);
-            }
-            Ok(policies)
-        })
-        .map_err(RepositoryError::pap)
+    fn policy_generation(&self) -> Result<u64, PapError> {
+        self.access(false, read_policy_generation)
+            .map_err(RepositoryError::pap)
     }
-    fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
+    fn policy_snapshot(&self, kind: PolicySnapshotKind) -> Result<PolicySnapshot, PapError> {
         self.access(false, |tx| {
-            check_automatic_capacity(tx, None)?;
-            automatic_sources(tx)?
-                .into_iter()
-                .map(|(key, _)| {
-                    read_policy(tx, &key)?
-                        .and_then(|state| state.current)
-                        .ok_or(StoreError::Corrupt.into())
-                })
-                .collect()
+            let generation = read_policy_generation(tx)?;
+            let policies = match kind {
+                PolicySnapshotKind::AllCurrent => all_current_policies(tx)?,
+                PolicySnapshotKind::Automatic => automatic_policies(tx)?,
+            };
+            Ok(PolicySnapshot {
+                generation,
+                policies,
+            })
         })
         .map_err(RepositoryError::pap)
     }
@@ -189,6 +168,7 @@ impl PapRepository for SqlitePolicyRepository {
                 "UPDATE policies SET current_json=NULL WHERE policy_id=?1",
                 [key.as_str()],
             )?;
+            advance_policy_generation(tx)?;
             Ok(current)
         })
         .map_err(RepositoryError::pap)
@@ -579,6 +559,71 @@ impl PapRepository for SqlitePolicyRepository {
         })
         .map_err(RepositoryError::pap)
     }
+}
+
+pub(crate) fn read_policy_generation(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<u64, RepositoryError> {
+    tx.query_row(
+        "SELECT generation FROM policy_generation WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or(StoreError::Corrupt.into())
+}
+
+fn advance_policy_generation(tx: &rusqlite::Transaction<'_>) -> Result<(), RepositoryError> {
+    if tx.execute(
+        "UPDATE policy_generation SET generation=generation+1 WHERE singleton=1",
+        [],
+    )? != 1
+    {
+        return Err(StoreError::Corrupt.into());
+    }
+    Ok(())
+}
+
+fn all_current_policies(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<Vec<PreparedPolicy>, RepositoryError> {
+    let mut statement = tx.prepare(
+        "SELECT policy_id FROM policies WHERE current_json IS NOT NULL ORDER BY policy_id",
+    )?;
+    let keys = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut policies = Vec::new();
+    let mut bytes = 0;
+    for key in keys {
+        let policy = read_policy(tx, &id(key?)?)?
+            .and_then(|state| state.current)
+            .ok_or(StoreError::Corrupt)?;
+        bytes += encode(&policy)?.len();
+        // Bound one in-process snapshot, failing closed rather than dropping members.
+        if policies.len() >= 4096 || bytes > 16 * 1024 * 1024 {
+            return Err(
+                PapError::InvalidPolicy(asc_policy_types::error::ValidationError::new(
+                    "authorizationPolicies",
+                    "current policy snapshot exceeds 4096 records or 16 MiB",
+                ))
+                .into(),
+            );
+        }
+        policies.push(policy);
+    }
+    Ok(policies)
+}
+fn automatic_policies(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<Vec<PreparedPolicy>, RepositoryError> {
+    check_automatic_capacity(tx, None)?;
+    automatic_sources(tx)?
+        .into_iter()
+        .map(|(key, _)| {
+            read_policy(tx, &key)?
+                .and_then(|state| state.current)
+                .ok_or(StoreError::Corrupt.into())
+        })
+        .collect()
 }
 
 fn public_binding(mut binding: BindingView) -> BindingView {

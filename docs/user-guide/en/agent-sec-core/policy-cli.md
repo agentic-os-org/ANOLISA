@@ -556,8 +556,8 @@ saved with the Policy and selects its schema revision. `agent-sec-cli policy def
 Cedar file that these commands accept; `policy default --json` prints it as a
 JSON source envelope instead.
 
-Use `--schema-revision 3` to write a policy that the Sandbox PDP reads in full.
-Identify an agent family with `principal has agentType && principal.agentType == "qoder"`.
+Use `--schema-revision 3` to target an agent family in Cedar, for example
+`principal has agentType && principal.agentType == "qoder"`.
 Use `context.agent.agentType` in Sandbox or Hook requests.
 An optional `ownerUid` can narrow a process assignment. A Sandbox request supplies
 the available agent category and omits the process owner. Manual `scope create` accepts
@@ -653,11 +653,16 @@ Sandbox runtime authorization uses the same Cedar Policy objects. The OS authori
 Agent subjects, `process.spawn` and supported permit advice. Authorization is enabled
 by default, without a separate permission-ceiling configuration. Decisions must be
 accepted within 60 seconds; accepted approval waits and execution may finish later.
-See the [sandbox guide](sandbox.md#use-policy-authorization). Each evaluation reads current
-PAP policies together. The PDP loads v3 sources in full. Existing v1/v2 principal routing still determines which legacy sources it loads. Use `principal is SecCore::Subject` with the optional `agentType` attribute to match requests. Updates and deletions
-affect subsequent requests; an empty set denies, and read or validation failures stop
-new authorization. Existing Scope/Binding
-snapshots and accepted decisions retain their own bound versions.
+For v3, the PDP loads the Cedar statements or fragments selected for Sandbox.
+It reuses them while the PAP policy-set generation is unchanged and evaluates
+each request with its own attributes. Use `principal is SecCore::Subject` with
+the optional `agentType` attribute to match requests. For v1/v2, the existing
+principal-header rules determine which policies are eligible.
+
+Updates and deletions take effect on subsequent requests. An empty set denies
+authorization. Read or validation failures stop new authorizations. Existing
+Scope/Binding snapshots and accepted decisions retain their bound versions.
+See the [sandbox guide](sandbox.md#use-policy-authorization).
 
 ## Manage Scopes
 

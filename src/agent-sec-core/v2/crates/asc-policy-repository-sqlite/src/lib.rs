@@ -272,21 +272,21 @@ fn open_connection(lease: &DatabaseLease) -> Result<Connection, RepositoryError>
     if journal != "wal" {
         return Err(StoreError::Incompatible.into());
     }
-    migration::migrate(&mut connection)?;
     let mut expected = Connection::open_in_memory()?;
-    migration::migrate(&mut expected)?;
+    migration::stage_migrations(&mut expected)?.commit()?;
+    let tx = migration::stage_migrations(&mut connection)?;
     let schema =
         |db: &Connection| -> Result<Vec<(String, String, Option<String>)>, rusqlite::Error> {
             db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY type,name")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect()
         };
-    if schema(&connection)? != schema(&expected)? {
+    if schema(&tx)? != schema(&expected)? {
         return Err(StoreError::Incompatible.into());
     }
-    let check: String = connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    let check: String = tx.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok"
-        || connection
+        || tx
             .prepare("PRAGMA foreign_key_check")?
             .query([])?
             .next()?
@@ -294,7 +294,6 @@ fn open_connection(lease: &DatabaseLease) -> Result<Connection, RepositoryError>
     {
         return Err(StoreError::Corrupt.into());
     }
-    let tx = connection.transaction()?;
     records::validate_records(&tx)?;
     tx.commit()?;
     lease.verify()?;

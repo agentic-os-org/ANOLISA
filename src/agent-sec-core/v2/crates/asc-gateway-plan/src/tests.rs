@@ -629,6 +629,7 @@ fn automatic_scope_compiles_only_selected_rules_and_requires_their_registered_pa
     policy.deployment = Some(DeploymentSelection {
         backend: DeploymentBackend::Gateway,
         statement_ids: ["policy0".to_owned()].into_iter().collect(),
+        fragments: std::collections::BTreeMap::new(),
     });
     let plan = compile_scope(&scope(std::slice::from_ref(&policy))).unwrap();
     assert_eq!(plan.rules.len(), 1);
@@ -637,4 +638,37 @@ fn automatic_scope_compiles_only_selected_rules_and_requires_their_registered_pa
         .credential_bindings
         .retain(|binding| binding.rule_id != "github-rest-auto");
     assert!(compile_scope(&scope(&[policy])).is_err());
+}
+
+#[test]
+fn selector_excludes_file_rules_and_retains_uncertain_http_restrictions() {
+    use asc_policy_cedar::selection::{SelectedStatement, ValidatedPolicy, ValidatedStatement};
+    let source = asc_policy_types::cedar::CedarPolicySource {
+        schema: asc_policy_cedar::schema::principal_reference(),
+        text: r#"forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+            when { principal has agentType && principal.agentType == "qoder" }
+            when { context.input.operation == SecCore::WriteOperation::"write" ||
+                   context.input.operation == SecCore::WriteOperation::"rename" };
+        forbid(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
+            when { principal has agentType && principal.agentType == "qoder" }
+            when { context.input.method == "POST" };"#.into(),
+    };
+    let policy = ValidatedPolicy::parse(&source).unwrap();
+    for rule in &policy.statements {
+        let result = (crate::selection::SELECTOR.select)(&ValidatedStatement {
+            policy_id: &asc_policy_types::identifiers::ResourceId::new("mixed").unwrap(),
+            revision: asc_policy_types::identifiers::Revision::new(1).unwrap(),
+            schema: &source.schema,
+            rule,
+        });
+        assert!(result.deviations.is_empty());
+        assert_eq!(
+            result.selected,
+            if rule.id == "policy0" {
+                SelectedStatement::Unrelated
+            } else {
+                SelectedStatement::Undetermined
+            }
+        );
+    }
 }

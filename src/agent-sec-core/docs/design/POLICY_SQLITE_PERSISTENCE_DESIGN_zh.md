@@ -131,12 +131,12 @@ checkpoint 负责回收 WAL，成功 checkpoint 不是每次业务提交的额�
 
 ### 3.3 schema 版本与错误
 
-当前 `PRAGMA user_version=1`。仅全新、空且无业务 schema 的 version 0 数据库可以初始化。
+当前 `PRAGMA user_version=2`。仅全新、空且无业务 schema 的 version 0 数据库可以初始化。
 表定义位于 [table.rs](../../v2/crates/asc-policy-repository-sqlite/src/table.rs)，
 使用与事件存储一致的声明方式，由共享生成器生成建表和索引 SQL。
 迁移入口为 [migration.rs](../../v2/crates/asc-policy-repository-sqlite/src/migration.rs)，
 `Migration` 函数接收当前事务，有序 `MIGRATIONS` 列表中的第 N 项负责 N→N+1。
-当前只注册 0→1 初始化，不导入旧 Policy 数据库，也不提供生产 v2 迁移。
+0→1 初始化三个业务表。1→2 创建单行 `policy_generation` 表并从 0 开始计数，保留已有策略、Scope 和 Binding。每次提交策略新增、变更或删除都在同一事务递增计数。PEP 可以单独读取此值检查缓存，重建时在一个读事务中取得计数和源策略。
 
 runner 在同一个 `BEGIN IMMEDIATE` 事务中读取版本、顺序执行缺失步骤并更新 `user_version`；
 DDL、数据转换及版本号一并提交，失败回滚。步骤可以执行 SQL 或转换持久 JSON，但不得自行
@@ -145,7 +145,7 @@ DDL、数据转换及版本号一并提交，失败回滚。步骤可以执行 S
 
 以后发生真实 schema 变化时，在列表末尾添加升级函数及所需 SQL，保持已发布的
 v1 `TableSpec` 和迁移步骤不变；同步更新数据解码和旧版本 fixture。
-例如新增字段通过 1→2 步骤执行 `ALTER TABLE` 及必要的数据回填；仅修改 Rust 表声明
+例如新增字段通过后续升级步骤执行 `ALTER TABLE` 及必要的数据回填；仅修改 Rust 表声明
 不会升级已有数据库。Policy 不使用事件存储的 `extra_columns` 自动补列机制。
 schema 校验的预期结构由同一迁移链在内存空库中生成，随新增迁移步骤推进，
 不再单独使用 v1 DDL 代表所有后续版本。
@@ -167,7 +167,7 @@ SQLite 的部分错误可能终止语句或整个事务，处理须核对连接�
 此次已决定不兼容旧开发期 Policy 数据库，不实现旧模板 JSON 转换；这是本次变更的明确边界，
 不取消后续版本的迁移入口。
 
-按首版交付处理，保持 `PRAGMA user_version=1` 及既有三个业务表。
+首版通用规则改造沿用当时的 `PRAGMA user_version=1` 和三个业务表。
 物理表/列无需变化；首版 JSON 编码统一使用通用规则。全新空 version 0 数据库经既有
 初始化入口事务创建，后续真实版本升级继续使用第 3.3 节的有序事务迁移入口。
 本次不增加格式升级步骤，不导入旧开发期模板，不提供自动降级。

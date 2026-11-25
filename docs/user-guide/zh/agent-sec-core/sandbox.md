@@ -300,8 +300,8 @@ resource 和 context 的公共 PARC 信封，旧 OS 载荷会被拒绝。
 请求通过 `context.agent.agentType` 提供可选 Agent 分类，不要求 Agent 身份或 UID 登记。
 类型由调用方自报，未经认证；本阶段不按身份隔离单个 Agent。
 
-使用 `seccore.system` revision 3 时，PAP 将完整 Cedar 原文交给 PDP。
-PDP 按本次请求提供的可选 `principal.agentType` 求值。Sandbox 请求省略
+使用 `seccore.system` revision 3 时，PAP 保存 Cedar 原文。PDP 装载 Sandbox
+选中的语句或片段，按每次请求提供的可选 `principal.agentType` 求值。Sandbox 请求省略
 `ownerUid`，因此 `principal has ownerUid` 为假。以下规则允许 Cosh 启动进程。
 
 ```cedar
@@ -315,9 +315,10 @@ revision 1 和 2 沿用已有分流规则。每条语句都有显式 principal h
 混用裸 header 和显式约束会被拒绝，原生 JSON 和全部使用裸 header 的旧版策略走下发路径。
 使用旧字段名 `agent_type` 的客户端和 Cedar 策略须改用 `agentType`。
 
-每次 evaluate 拉取一个一致的当前策略快照，摘要覆盖成员、版本、schema 和正文。
-未变化时复用编译缓存，变化后整体验证成功才替换。读取、验证或运行兼容性失败时停止授权，
-不回退旧策略。创建、删除和 header 资格变化在下一次请求生效；空集替换缓存并拒绝请求。
+每次请求先检查 PAP 策略集版本。同一版本复用已编译的规则，缓存未命中时，daemon
+从一致的快照中筛选并装载规则。回执中的 `policy_version` 是可参与请求授权的源策略集合的摘要，
+涵盖成员、修订、schema 和原文。当前策略读取、校验或装载失败时，即使留有旧版缓存，新请求也无法获得授权。
+策略创建、删除或请求授权资格的变化在下一次请求生效。策略集为空时拒绝授权。
 整个集合中匹配的 forbid 优先于 permit。Scope/Binding 的部署、固定版本和清理独立保持原状。
 
 旧配置项 `baseline_policy`、`task_policy` 不再使用。调整旧请求策略时必须人工核对原来的

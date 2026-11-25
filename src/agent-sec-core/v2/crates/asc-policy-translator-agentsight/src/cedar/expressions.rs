@@ -19,6 +19,7 @@ pub(super) struct Branch {
     pub(super) operations: u8,
     pub(super) range: Option<Range>,
     pub(super) excluded: Vec<Range>,
+    pub(super) origins: Vec<usize>,
 }
 
 impl Default for Branch {
@@ -27,6 +28,7 @@ impl Default for Branch {
             operations: ALL_OPERATIONS,
             range: None,
             excluded: Vec::new(),
+            origins: Vec::new(),
         }
     }
 }
@@ -57,6 +59,7 @@ pub(super) fn and(left: Vec<Branch>, right: &[Branch]) -> Result<Vec<Branch>> {
                 operations,
                 range,
                 excluded,
+                origins: a.origins.iter().chain(&b.origins).copied().collect(),
             });
         }
     }
@@ -119,7 +122,12 @@ fn equality(field: &Expr, value: &Expr, negate: bool) -> Result<Vec<Branch>> {
     Err("UNSUPPORTED_CONDITION")
 }
 
-pub(super) fn expression(expr: &Expr, negate: bool, depth: usize) -> Result<Vec<Branch>> {
+pub(super) fn expression(
+    expr: &Expr,
+    negate: bool,
+    depth: usize,
+    origins: &mut std::ops::Range<usize>,
+) -> Result<Vec<Branch>> {
     if depth > 64 {
         return Err("EXPRESSION_LIMIT_EXCEEDED");
     }
@@ -135,14 +143,14 @@ pub(super) fn expression(expr: &Expr, negate: bool, depth: usize) -> Result<Vec<
         Expr::UnaryOp {
             op: UnaryOp::Not,
             expr,
-        } => expression(expr, !negate, depth + 1),
+        } => expression(expr, !negate, depth + 1, &mut (0..0)),
         Expr::BinaryOp {
             op: BinaryOp::And | BinaryOp::Or,
             left,
             right,
         } => {
-            let a = expression(left, negate, depth + 1)?;
-            let b = expression(right, negate, depth + 1)?;
+            let a = expression(left, negate, depth + 1, origins)?;
+            let b = expression(right, negate, depth + 1, origins)?;
             let conjunction = matches!(
                 expr,
                 Expr::BinaryOp {
@@ -153,23 +161,25 @@ pub(super) fn expression(expr: &Expr, negate: bool, depth: usize) -> Result<Vec<
             if conjunction { and(a, &b) } else { or(a, b) }
         }
         Expr::BinaryOp {
-            op: BinaryOp::Eq | BinaryOp::NotEq,
+            op: op @ (BinaryOp::Eq | BinaryOp::NotEq),
             left,
             right,
         } => {
-            let negate = negate
-                != matches!(
-                    expr,
-                    Expr::BinaryOp {
-                        op: BinaryOp::NotEq,
-                        ..
-                    }
-                );
-            if matches!(left.as_ref(), Expr::Literal(_)) {
-                equality(right, left, negate)
+            let (field, value) = if matches!(left.as_ref(), Expr::Literal(_)) {
+                (right, left)
             } else {
-                equality(left, right, negate)
+                (left, right)
+            };
+            let mut branches = equality(field, value, negate != (*op == BinaryOp::NotEq))?;
+            if *op == BinaryOp::Eq
+                && operation_field(field)
+                && let Some(origin) = origins.next()
+            {
+                for branch in &mut branches {
+                    branch.origins.push(origin);
+                }
             }
+            Ok(branches)
         }
         Expr::BinaryOp {
             op: BinaryOp::Contains,

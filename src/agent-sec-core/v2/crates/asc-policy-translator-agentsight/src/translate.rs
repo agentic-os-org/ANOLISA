@@ -112,6 +112,13 @@ fn compile_policy(
         PolicySource::Cedar(source) => {
             let policy = if let Some(syntax) = syntax {
                 crate::cedar::translate(syntax)?
+            } else if let Some(selected) = &binding.policy.deployment {
+                if selected.backend != asc_policy_types::policy::DeploymentBackend::ActPlane {
+                    return Err(rejection("INVALID_DEPLOYMENT_BACKEND"));
+                }
+                let files = asc_policy_cedar::deployment::selected_pst(source, selected)
+                    .map_err(|_| rejection("INVALID_CEDAR_POLICY"))?;
+                crate::cedar::translate(&files)?
             } else {
                 let syntax =
                     asc_policy_cedar::pst(source).map_err(|_| rejection("INVALID_CEDAR_POLICY"))?;

@@ -27,7 +27,7 @@ pub(crate) struct PlanningDiagnostics {
     unassigned: Vec<AutomaticDiagnostic>,
 }
 
-impl Derived<'_> {
+impl Derived {
     /// Move the same membership data used for deployment into the completed pass.
     pub(crate) fn into_diagnostics(
         mut self,

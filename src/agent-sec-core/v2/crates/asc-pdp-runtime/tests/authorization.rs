@@ -191,6 +191,103 @@ fn evaluate_v3(text: &str, agent_type: Option<&str>) -> OsPermissionSet {
 }
 
 #[test]
+fn selected_fragments_drive_sandbox_decisions_without_losing_path_or_subject() {
+    use asc_pdp_runtime::selection::select;
+    use asc_policy_cedar::selection::{SelectedStatement, ValidatedPolicy, ValidatedStatement};
+
+    let mut member = member("qoder", "");
+    member.source.schema = asc_policy_cedar::schema::principal_reference();
+    member.source.text = r#"
+        permit(principal, action == SecCore::Action::"process.spawn", resource);
+        permit(principal, action == SecCore::Action::"file.read", resource);
+        permit(principal, action == SecCore::Action::"file.write", resource);
+        forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+        when { principal has agentType && principal.agentType == "qoder" }
+        when { resource.path == "/work/reports" || resource.path like "/work/reports/*" }
+        when { context.input.operation == SecCore::WriteOperation::"write" ||
+               context.input.operation == SecCore::WriteOperation::"delete" ||
+               context.input.operation == SecCore::WriteOperation::"rename" };
+        forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+        when { (context.input.operation == SecCore::WriteOperation::"write" && resource.path == "/work/A") ||
+               (context.input.operation == SecCore::WriteOperation::"delete" && resource.path == "/work/B") };
+        forbid(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint);
+        @advice("{\"verdict\":\"warn\",\"message\":\"Confirm the report destination\"}")
+        permit(principal, action == SecCore::Action::"file.write", resource)
+        when { context.input.operation == SecCore::WriteOperation::"write" ||
+               context.input.operation == SecCore::WriteOperation::"delete" };
+    "#.into();
+    let parsed = ValidatedPolicy::parse(&member.source).unwrap();
+    let statement = |rule| ValidatedStatement {
+        policy_id: &member.policy_id,
+        revision: member.revision,
+        schema: &member.source.schema,
+        rule,
+    };
+    let choices: Vec<_> = parsed
+        .statements
+        .iter()
+        .map(|rule| select(&statement(rule)))
+        .collect();
+    let choice = |id: &str| {
+        &choices
+            .iter()
+            .find(|s| s.source.statement_id == id)
+            .unwrap()
+            .selected
+    };
+    let SelectedStatement::Fragment { cedar, branches } = choice("policy3") else {
+        panic!("expected the ordinary-write fragment");
+    };
+    assert_eq!(branches.len(), 1);
+    assert_eq!(branches[0].operation, "write");
+    assert!(cedar.contains("qoder") && cedar.contains("/work/reports"));
+    assert!(!cedar.contains(r#""delete""#) && !cedar.contains(r#""rename""#));
+    assert!(matches!(choice("policy5"), SelectedStatement::Unrelated));
+    let mismatched = (&parsed.statements[0], &choices[1]);
+    assert!(matches!(
+        PdpRuntime::from_selected(
+            "qoder-revision".into(),
+            [(statement(mismatched.0), mismatched.1)]
+        ),
+        Err(asc_pdp_runtime::PdpError::Configuration(_))
+    ));
+
+    let runtime = PdpRuntime::from_selected(
+        "qoder-revision".into(),
+        parsed
+            .statements
+            .iter()
+            .zip(&choices)
+            .map(|(rule, selection)| (statement(rule), selection)),
+    )
+    .unwrap();
+    for (agent, reports_restricted) in [("qoder", true), ("cosh", false)] {
+        let mut input = request();
+        input.context.agent.agent_type = Some(agent.into());
+        let decision = runtime.evaluate(&input, 100).unwrap();
+        assert!(
+            decision
+                .warnings
+                .iter()
+                .any(|message| message == "Confirm the report destination")
+        );
+        let effective = decision
+            .effective_permissions
+            .expect("the command itself is permitted");
+        let write_denied = |path| {
+            effective.filesystem.rules.iter().any(|rule| {
+                rule.effect == RuleEffect::Deny
+                    && rule.rights.contains(&FileRight::Write)
+                    && rule.covers_path(path, true)
+            })
+        };
+        assert_eq!(write_denied("/work/reports/q1.txt"), reports_restricted);
+        assert!(write_denied("/work/A"));
+        assert!(!write_denied("/work/B"));
+    }
+}
+
+#[test]
 fn v3_mixed_source_preserves_the_qoder_file_forbid_without_granting_network() {
     let text = format!(
         "{}\n{}",

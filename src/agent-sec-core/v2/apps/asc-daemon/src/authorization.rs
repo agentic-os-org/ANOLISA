@@ -1,16 +1,15 @@
-//! Reads current PAP policies at each authorization boundary.
+//! Checks the PAP generation at each authorization boundary.
 
 use asc_daemon_core::{AuthorizationError, AuthorizationEvaluator};
 use asc_daemon_protocol::authorization::{Decision, OsAuthorizationRequest};
-use asc_pap::{PapRepository, PapService};
-use asc_pdp_runtime::PdpRuntime;
+use asc_pap::{ConsumerPolicySet, PapRepository, PapService};
+use asc_pdp_runtime::{PdpRuntime, selection};
 use std::sync::{Arc, Mutex};
 
-/// Compiled cache for the complete current PAP authorization set.
-/// The cache never substitutes for a successful current-policy read.
+/// The launch PDP compiled from the current Sandbox selection.
 pub struct PapAuthorizationPolicy<R> {
     pap: PapService<R>,
-    active: Mutex<Option<Arc<PdpRuntime>>>,
+    active: Mutex<Option<(u64, Arc<PdpRuntime>)>>,
 }
 
 impl<R: PapRepository> PapAuthorizationPolicy<R> {
@@ -23,21 +22,28 @@ impl<R: PapRepository> PapAuthorizationPolicy<R> {
     }
 
     fn current_runtime(&self) -> Result<Arc<PdpRuntime>, PublishedPolicyError> {
+        self.current_runtime_with(compile)
+    }
+
+    fn current_runtime_with(
+        &self,
+        load: impl FnOnce(&ConsumerPolicySet) -> Result<PdpRuntime, PublishedPolicyError>,
+    ) -> Result<Arc<PdpRuntime>, PublishedPolicyError> {
         let mut active = self
             .active
             .lock()
             .map_err(|_| PublishedPolicyError::State)?;
         let result = (|| {
             // Hold the cache lock across the read and load: an older read cannot publish last.
-            let policies = self.pap.authorization_policies()?;
-            if let Some(runtime) = active
+            let policies = self.pap.sandbox_selections(selection::select)?;
+            if let Some((_, runtime)) = active
                 .as_ref()
-                .filter(|cached| cached.policy_version() == policies.version)
+                .filter(|(generation, _)| *generation == policies.generation)
             {
                 return Ok(Arc::clone(runtime));
             }
-            let runtime = Arc::new(PdpRuntime::from_policy_set(policies)?);
-            *active = Some(Arc::clone(&runtime));
+            let runtime = Arc::new(load(&policies)?);
+            *active = Some((policies.generation, Arc::clone(&runtime)));
             Ok(runtime)
         })();
         if result.is_err() {
@@ -46,6 +52,11 @@ impl<R: PapRepository> PapAuthorizationPolicy<R> {
         }
         result
     }
+}
+
+fn compile(policies: &ConsumerPolicySet) -> Result<PdpRuntime, PublishedPolicyError> {
+    let version = policies.authorization_version()?;
+    Ok(PdpRuntime::from_selected(version, policies.iter())?)
 }
 
 impl<R: PapRepository> AuthorizationEvaluator for PapAuthorizationPolicy<R> {
@@ -90,9 +101,13 @@ mod tests {
     use asc_policy_types::authoring::PolicySource;
 
     fn source(text: &str) -> PolicySource {
+        schema_source(1, text)
+    }
+
+    fn schema_source(revision: u32, text: &str) -> PolicySource {
         PolicySource::Cedar(
             serde_json::from_value(serde_json::json!({
-                "schema":{"schemaId":"seccore.system","revision":1},"text":text
+                "schema":{"schemaId":"seccore.system","revision":revision},"text":text
             }))
             .unwrap(),
         )
@@ -203,35 +218,122 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_refreshes_cannot_publish_an_old_snapshot_after_the_new_one() {
+    fn requests_started_after_revocation_never_use_the_pending_old_load() {
+        use asc_daemon_protocol::authorization::DecisionVerdict;
+        use std::sync::{Barrier, mpsc};
+
         let (pap, authorization) = fixture();
         let policy = pap.list_policies(1, 0).unwrap().items.remove(0);
-        let old = authorization.current_runtime().unwrap();
+        let launch = r#"permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource);"#;
+        let read = r#"permit(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource);"#;
+        pap.update_policy(
+            &policy.policy_id,
+            "read allowed",
+            &source(&format!("{launch} {read}")),
+        )
+        .unwrap();
+        let input = readable_request();
         std::thread::scope(|scope| {
-            for _ in 0..4 {
-                let authorization = &authorization;
-                scope.spawn(move || {
-                    for _ in 0..4 {
-                        authorization.current_runtime().unwrap();
-                    }
-                });
+            let (loaded, loaded_rx) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            let authorization = &authorization;
+            let old = scope.spawn(move || {
+                authorization
+                    .current_runtime_with(|snapshot| {
+                        let runtime = compile(snapshot)?;
+                        loaded.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(runtime)
+                    })
+                    .unwrap()
+            });
+            loaded_rx.recv().unwrap();
+            pap.update_policy(&policy.policy_id, "read revoked", &source(launch))
+                .unwrap();
+            let waiting = Arc::new(Barrier::new(5));
+            let input = &input;
+            let requests: Vec<_> = (0..4)
+                .map(|_| {
+                    let waiting = Arc::clone(&waiting);
+                    scope.spawn(move || {
+                        waiting.wait();
+                        authorization.evaluate(input, 101).unwrap()
+                    })
+                })
+                .collect();
+            waiting.wait();
+            release.send(()).unwrap();
+
+            let old = old.join().unwrap();
+            assert_eq!(
+                old.evaluate(input, 100).unwrap().verdict,
+                DecisionVerdict::Allow
+            );
+            let current = authorization.current_runtime().unwrap();
+            assert_ne!(current.policy_version(), old.policy_version());
+            for request in requests {
+                let decision = request.join().unwrap();
+                assert_eq!(decision.verdict, DecisionVerdict::Deny);
+                assert_eq!(decision.policy_version, current.policy_version());
             }
-            pap.update_policy(&policy.policy_id, "deny", &source(
-                "forbid(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource);"
-            )).unwrap();
-            let latest = authorization.current_runtime().unwrap();
-            assert_ne!(latest.policy_version(), old.policy_version());
         });
-        let latest = authorization.current_runtime().unwrap();
-        assert_ne!(latest.policy_version(), old.policy_version());
-        assert!(Arc::ptr_eq(
-            &latest,
-            authorization.active.lock().unwrap().as_ref().unwrap()
-        ));
     }
 
     #[test]
-    fn agent_type_matches_policy_without_identity_registration() {
+    fn manual_v2_scope_update_preserves_sandbox_decision_and_receipt() {
+        use asc_daemon_protocol::authorization::DecisionVerdict;
+        use asc_pap::{PapError, ScopeDiscovery, ScopeDiscoverySeed};
+        use asc_policy_types::identifiers::ResourceId;
+        use asc_policy_types::scope::{PolicyReference, ScopeSelector};
+
+        struct Discovery;
+        impl ScopeDiscovery for Discovery {
+            fn start(&self, _: &ScopeDiscoverySeed) -> Result<(), PapError> {
+                Ok(())
+            }
+            fn stop(&self, _: &ResourceId) -> Result<(), PapError> {
+                Ok(())
+            }
+        }
+
+        let (pap, authorization) = fixture();
+        let pap = pap.with_scope_discovery(Arc::new(Discovery));
+        let permit = r#"permit(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource);"#;
+        pap.create_policy("read", &source(permit)).unwrap();
+        let before = authorization.evaluate(&readable_request(), 100).unwrap();
+        assert_eq!(before.verdict, DecisionVerdict::Allow);
+        let manual = |path| {
+            schema_source(
+                2,
+                &format!(
+                    r#"forbid(principal, action == SecCore::Action::"file.read", resource) when {{resource.path == "{path}"}};"#
+                ),
+            )
+        };
+        let first = pap.create_policy("manual", &manual("/private")).unwrap();
+        let scope = pap
+            .create_scope_assignment(
+                &ScopeSelector::Pid { pid: 4242 },
+                &[PolicyReference {
+                    policy_id: first.policy_id.clone(),
+                    policy_revision: first.revision,
+                }],
+                None,
+            )
+            .unwrap();
+        pap.update_policy(&first.policy_id, "manual", &manual("/usr/bin/true"))
+            .unwrap();
+        assert_eq!(
+            pap.get_scope(&scope.scope_id).unwrap().policy_snapshots,
+            [first]
+        );
+        let current = authorization.evaluate(&readable_request(), 101).unwrap();
+        assert_eq!(current.verdict, before.verdict);
+        assert_eq!(current.policy_version, before.policy_version);
+    }
+
+    #[test]
+    fn one_compiled_sandbox_evaluates_1000_requests_with_their_own_agent_types() {
         use asc_daemon_protocol::authorization::DecisionVerdict;
         let (pap, authorization) = fixture();
         let policy = pap.list_policies(1, 0).unwrap().items.remove(0);
@@ -240,23 +342,32 @@ mod tests {
             when { principal has agentType && principal.agentType == "codex" };
             permit(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource);
         "#)).unwrap();
-        let mut input = request();
-        input.context.requested_permissions.filesystem.rules =
-            serde_json::from_value(serde_json::json!([
-                {"effect":"allow","path":"/","rights":["read"]}
-            ]))
-            .unwrap();
-        assert_eq!(
-            authorization.evaluate(&input, 100).unwrap().verdict,
-            DecisionVerdict::Allow
-        );
-        for agent_type in [Some("qoder".into()), None] {
-            input.context.agent.agent_type = agent_type;
-            assert_eq!(
-                authorization.evaluate(&input, 100).unwrap().verdict,
-                DecisionVerdict::Deny
-            );
+        let runtime = authorization.current_runtime().unwrap();
+        let mut input = readable_request();
+        let cases = [
+            (Some("codex"), DecisionVerdict::Allow),
+            (Some("qoder"), DecisionVerdict::Deny),
+            (None, DecisionVerdict::Deny),
+        ];
+        for (agent_type, expected) in cases.iter().cycle().take(1_000) {
+            input.context.agent.agent_type = agent_type.map(str::to_owned);
+            let decision = authorization.evaluate(&input, 100).unwrap();
+            assert_eq!(decision.verdict, *expected);
+            assert_eq!(decision.policy_version, runtime.policy_version());
         }
+        assert!(Arc::ptr_eq(
+            &runtime,
+            &authorization.current_runtime().unwrap()
+        ));
+    }
+
+    fn readable_request() -> OsAuthorizationRequest {
+        let mut input = request();
+        input.context.requested_permissions.filesystem.rules = serde_json::from_value(
+            serde_json::json!([{"effect":"allow","path":"/","rights":["read"]}]),
+        )
+        .unwrap();
+        input
     }
 
     fn request() -> OsAuthorizationRequest {

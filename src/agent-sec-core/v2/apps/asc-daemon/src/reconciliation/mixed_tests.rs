@@ -437,6 +437,7 @@ fn automatic_file_and_gateway_plans_use_only_their_selected_source_statements() 
     );
     let selection = |backend, ids: &[&str]| {
         Some(DeploymentSelection {
+            fragments: std::collections::BTreeMap::new(),
             backend,
             statement_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
         })

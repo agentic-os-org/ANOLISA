@@ -1,5 +1,5 @@
 use asc_foundation_types::{ResourceId, Revision};
-use asc_pap::{PapError, PapRepository};
+use asc_pap::{PapError, PapRepository, PolicySnapshotKind};
 use asc_policy_repository::*;
 use asc_policy_repository_sqlite::SqlitePolicyRepository;
 use asc_policy_types::{
@@ -408,6 +408,57 @@ fn strict_open_rejects_unknown_schema_and_preserves_files() {
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
         99
+    );
+}
+
+fn restore_v1_schema(db: &rusqlite::Connection) {
+    db.execute_batch("DROP TABLE policy_generation; PRAGMA user_version=1")
+        .unwrap();
+}
+
+fn assert_v1_schema(db: &rusqlite::Connection) {
+    let state: (i64, bool) = db
+        .query_row(
+            "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_schema WHERE name='policy_generation')
+             FROM pragma_user_version",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, (1, false));
+}
+
+#[test]
+fn v1_schema_mismatch_rolls_back_until_the_database_is_repaired() {
+    use asc_policy_repository_sqlite::RepositoryError;
+
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let saved = seed(&repo);
+    drop(repo);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    restore_v1_schema(&db);
+    db.execute_batch("CREATE TABLE extra AS SELECT 'kept' AS value")
+        .unwrap();
+    assert!(matches!(
+        SqlitePolicyRepository::open(&path),
+        Err(RepositoryError::Storage(StoreError::Incompatible))
+    ));
+    assert_v1_schema(&db);
+    let value: String = db
+        .query_row("SELECT value FROM extra", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(value, "kept");
+    db.execute("DROP TABLE extra", []).unwrap();
+    drop(db);
+
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    assert_eq!(repo.policy_generation().unwrap(), 0);
+    assert_eq!(
+        repo.get_binding_state(&saved.binding.spec.binding_id)
+            .unwrap(),
+        Some(saved)
     );
 }
 
@@ -1068,7 +1119,7 @@ fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_sche
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        1
+        2
     );
     let saved: String = db
         .query_row("SELECT spec_json FROM bindings", [], |r| r.get(0))
@@ -1174,6 +1225,7 @@ fn startup_reports_legacy_agent_type_in_current_and_pinned_revisions() {
     })
     .to_string();
     let db = rusqlite::Connection::open(&path).unwrap();
+    restore_v1_schema(&db);
     db.execute(
         "UPDATE policies SET last_allocated_revision=?2,
          current_json=json_set(current_json, '$.revision', ?2, '$.template', json(?1))",
@@ -1190,7 +1242,14 @@ fn startup_reports_legacy_agent_type_in_current_and_pinned_revisions() {
         [&legacy],
     )
     .unwrap();
-    drop(db);
+    let saved_sources = || -> (String, String, String) {
+        db.query_row(
+            "SELECT current_json, assignment_json, spec_json FROM policies CROSS JOIN scopes CROSS JOIN bindings",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap()
+    };
+    let before = saved_sources();
     let Err(error @ RepositoryError::LegacyAgentType(_)) = SqlitePolicyRepository::open(&path)
     else {
         panic!("startup must report all stored revisions that require migration");
@@ -1207,6 +1266,8 @@ fn startup_reports_legacy_agent_type_in_current_and_pinned_revisions() {
         .into()
     );
     assert!(error.to_string().contains("Migrate to principal.agentType"));
+    assert_v1_schema(&db);
+    assert_eq!(saved_sources(), before);
 }
 
 #[test]
@@ -1276,6 +1337,73 @@ fn principal_policy(id: &str) -> asc_policy_types::policy::PreparedPolicy {
             "text":r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource is SecCore::File) when {resource.path == "/secret"};"#
         }}
     })).unwrap()
+}
+
+#[test]
+fn committed_policy_set_generation_covers_both_snapshot_kinds_and_survives_reopen() {
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    assert_eq!(repo.policy_generation().unwrap(), 0);
+    let legacy = seed(&repo).binding.spec.policy;
+    assert_eq!(repo.policy_generation().unwrap(), 1);
+    let source = principal_policy("qoder");
+    repo.put_policy(&source).unwrap();
+    repo.put_policy(&source).unwrap();
+    let snapshot = repo.policy_snapshot(PolicySnapshotKind::Automatic).unwrap();
+    assert_eq!(snapshot.generation, 2);
+    assert_eq!(snapshot.policies.as_slice(), std::slice::from_ref(&source));
+    let snapshot = repo
+        .policy_snapshot(PolicySnapshotKind::AllCurrent)
+        .unwrap();
+    assert_eq!(snapshot.generation, 2);
+    assert_eq!(snapshot.policies.len(), 2);
+    assert!(snapshot.policies.contains(&legacy));
+    assert!(snapshot.policies.contains(&source));
+
+    let mut next = source.clone();
+    next.revision = source.revision.checked_next().unwrap();
+    repo.put_policy(&next).unwrap();
+    assert_eq!(repo.put_policy(&source), Err(PapError::Conflict));
+    assert!(
+        repo.delete_policy_revision(&source.policy_id, source.revision)
+            .is_err()
+    );
+    let snapshot = repo.policy_snapshot(PolicySnapshotKind::Automatic).unwrap();
+    assert_eq!(snapshot.generation, 3);
+    assert_eq!(snapshot.policies.as_slice(), std::slice::from_ref(&next));
+    repo.delete_policy_revision(&next.policy_id, next.revision)
+        .unwrap();
+    drop(repo);
+
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    assert_eq!(repo.policy_generation().unwrap(), 4);
+    let snapshot = repo.policy_snapshot(PolicySnapshotKind::Automatic).unwrap();
+    assert_eq!(snapshot.generation, 4);
+    assert!(snapshot.policies.is_empty());
+}
+
+#[test]
+fn generation_write_failure_rolls_back_policy_update_and_deletion() {
+    let dir = private_dir();
+    let path = dir.path().join("policy-state.db");
+    let repo = SqlitePolicyRepository::open(&path).unwrap();
+    let source = repo.put_policy(&principal_policy("qoder")).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("UPDATE policy_generation SET generation=?1", [i64::MAX])
+        .unwrap();
+    let mut next = source.clone();
+    next.revision = source.revision.checked_next().unwrap();
+    assert!(repo.put_policy(&next).is_err());
+    assert!(
+        repo.delete_policy_revision(&source.policy_id, source.revision)
+            .is_err()
+    );
+    let snapshot = repo
+        .policy_snapshot(PolicySnapshotKind::AllCurrent)
+        .unwrap();
+    assert_eq!(snapshot.generation, u64::try_from(i64::MAX).unwrap());
+    assert_eq!(snapshot.policies, [source]);
 }
 
 // Seed policy state that was valid before aggregate write admission. A single SQL statement

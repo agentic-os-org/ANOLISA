@@ -8,14 +8,14 @@
 
 - **背景**　目前，用户在 Cedar 策略中定义允许或禁止的行为，还要手工维护 Scope，指定策略适用于哪些进程。Cedar 尚未统一表达这两部分信息，系统也就无法仅凭策略完成自动下发。
 - **目标**　以 Cedar 作为统一的策略格式。用户只需写一份策略，系统就能将它自动下发到匹配的进程，也能在收到授权请求时直接使用它。
-- **方法**　用户通过 Cedar 的 `principal` 条件指定策略适用于谁。对于下发类策略，系统在内部自动维护 Scope，匹配进程，再由 ActPlane 或 Gateway 执行相应规则。对于交互类策略，Sandbox 在收到授权请求时，由 PDP 按完整的 Cedar 原文求值。
+- **方法**　用户通过 Cedar 的 `principal` 条件指定策略适用于谁。对于下发类策略，系统在内部自动维护 Scope，匹配进程，再由 ActPlane 或 Gateway 执行相应规则。三个 PEP 各自选取能消费的 Cedar 片段并按版本复用；Sandbox 收到请求后，由 PDP 对这些片段求值。
 - **兼容原则**　保留现有的手工 Scope 配置方式。已有策略可以继续按原流程分配和使用。
 
 ## 1. 一份 Qoder 策略如何生效
 
 假设你希望 Qoder 不能读取 `/work/data/secret.txt`，并允许以 UID 1000 运行的 Qoder 在向 `api.github.com` 发送 HTTPS GET 请求时使用 GitHub 凭据。把两条规则写在同一份 v3 Policy 里，提交时 Qoder 可以还没启动。
 
-- **Sandbox 在收到请求时判断。** 共享 PDP 从 PAP 装入整份 Qoder 策略。Host 或 Hook 声明本次请求来自 Qoder 时，`file.read` 禁止优先于通用读取许可，Sandbox 会挡住对 `secret.txt` 的读取。HTTP 凭据规则只匹配 `network.send`，不会给 Sandbox 增加文件或网络权限。
+- **Sandbox 在收到请求时判断。** 共享 PDP 装入 Qoder 策略中适用于 Sandbox 的文件片段。Host 或 Hook 声明本次请求来自 Qoder 时，`file.read` 禁止优先于通用读取许可，Sandbox 会挡住对 `secret.txt` 的读取。HTTP 凭据规则只匹配 `network.send`，不会给 Sandbox 增加文件或网络权限。
 - **ActPlane 在文件保护安装成功后生效。** daemon 按集成提供的匹配条件找到 Qoder 根进程。首次挂接时，AgentSight 保护根进程，并尝试将已有后代纳入保护。随后从受保护父进程派生的子进程继承禁读规则。无法确认完整覆盖时，AgentSight 将 Binding 标为 `Degraded`，并在 enforcer 日志中记录原因。这个例子的文件规则没有 UID 限制。每个 enforcer 同时只支持一个活动 Binding，第二个根进程即使命中也可能报告冲突。[首次挂接的覆盖范围][actplane-tree] · [enforcer 并发限制][actplane-limit]
 - **Gateway 在核验进程并挂接路由后提供凭据。** daemon 核实 Qoder 根进程属于 UID 1000，Gateway 核验挂接。该根及通过 UID、cgroup 成员检查的后代发起符合规则的请求时，Gateway 才注入凭据。同 UID 的独立进程若没有命中配置的选择条件，就不会加入分配。凭据工作负载若需要和其他用户进程隔离，请使用独立的非 root UID。[Gateway 成员核验][gateway-members]
 
@@ -71,19 +71,22 @@ agent-sec-cli policy update --policy-id "$policy_id" --name qoder --schema-revis
 
 上例生成两个自动 Scope。文件 Scope 匹配 Qoder，凭据 Scope 匹配以 UID 1000 运行的 Qoder。每个 Binding 对应一个具体进程实例。
 
+**统一 `select` 的扩展基线为 `d41cede90`。** 三个 PEP 共用按“策略集更新编号 + PEP 类型”复用的进程内缓存。对于 Qoder 在 `/work/reports` 下的普通写、删除和重命名禁令，Sandbox 取普通写，ActPlane 取普通写和删除，Gateway 取空。来源、分支范围和已知收紧或放松作为接口返回值保留，管理端查询和页面留待后续。[PEP 选择接口与验收](CEDAR_PEP_SELECTION_zh.md)
+
 图中绿色为新增，黄色为修改，灰色为复用。
 
 ```mermaid
 flowchart TB
     U["用户 · policy create / update"] --> V["修改 · asc-policy-cedar<br/>支持 v3，校验 HTTP 凭据注解"]
     V --> P["复用 · PAP 的权限检查、凭据登记和策略存储"]
-    P -->|"当前 Cedar 原文、Policy ID 和修订"| D["修改 · Sandbox PDP<br/>读取整份策略，按可执行规则生成 OS 权限"]
+    P -->|"策略集更新编号、固定修订的原文"| K["新增 · 共用 select 缓存<br/>每个 PEP 独立选取片段"]
+    K -->|"Sandbox 片段"| D["修改 · Sandbox PDP<br/>装载一次，按请求求值"]
     S["Sandbox 等请求型 PEP"] --> T["修改 · Host / Hook 与 asc-daemon-protocol<br/>传递可选的 context.agent.agentType"]
     T -->|"映射为 principal.agentType"| D
     D -->|"决策和可执行权限"| S
-    P -->|"已提交的 Policy 修订"| L["新增 · 按后端注册选择器<br/>PAP 汇总自动 Scope 分配"]
+    K -->|"ActPlane 或 Gateway 片段"| L["修改 · 自动部署规划器<br/>按主体条件组装 Scope"]
     M["新增 · 集成提供 agentType 到进程匹配条件的映射"] --> L
-    L -->|"匹配条件、可选 UID、后端和来源语句"| A["修改 · 现有 Scope 存储<br/>自动创建、更新和清理分配"]
+    L -->|"匹配条件、可选 UID、后端和选中片段"| A["修改 · 现有 Scope 存储<br/>自动创建、更新和清理分配"]
     H["复用 · 手工 scope create"] --> A
     A -->|"读取期望分配，变更时唤醒"| F["修改 · 现有 Scope worker<br/>匹配进程，按需读取实例 UID"]
     F -->|"Scope 版本、选中的实例及本轮观测到的 UID"| B["修改 · sync_scope_instances<br/>新建时核对 ownerUid，在同一事务中同步 Binding"]
@@ -94,8 +97,8 @@ flowchart TB
     classDef added fill:#d9f5df,stroke:#287b43,color:#142b1c
     classDef changed fill:#fff0c2,stroke:#9b7012,color:#352800
     classDef reused fill:#edf0f3,stroke:#687582,color:#202932
-    class L,M added
-    class V,D,T,A,F,B,C,G changed
+    class K,M added
+    class V,D,T,L,A,F,B,C,G changed
     class U,P,S,H,X reused
 ```
 
@@ -121,23 +124,23 @@ unless { principal has agentType && principal.agentType == "qoder" };
 
 这条排除式规则可由请求 PDP 求值。首版自动分配只支持第 4 节列出的正向选择条件，因此查询结果应显示该规则在 ActPlane 上的范围限制。请求方自报的类别适合分类。凭据发放和权限提升需要独立的授权依据。
 
-### 装载原文并按请求求值
+### 装载选中片段并按请求求值
 
-- **策略从哪里来。** v3 的写入、读取和 PDP 装载入口都接纳第 1 节的混合策略。PAP 通过现有 `AuthorizationPolicySet` 返回完整 Cedar 原文、Policy ID 和修订。PDP 将全部语句交给 Cedar 求值。[准入判断][admission] · [PAP 读取][read]
-- **Sandbox 执行哪些规则。** PDP 装载时从可能匹配文件访问的语句中收集路径。只匹配 `SecCore::HttpEndpoint` 的语句即使动作不限，也跳过文件路径检查。生成启动权限时，Sandbox 查询普通写入，操作为 `write`。只禁 `delete` 的条件可通过路径检查，在这次求值中不命中。若条件为“删除或路径等于 `/work/A`”，路径检查须保留 `/work/A`，Cedar 据此禁止普通写 A，普通写 B 仍由其他规则决定。匹配的禁止优先，没有匹配许可时默认拒绝。实际删除由 ActPlane 在操作发生时控制。[PDP 装载与求值][pdp-load] · [现有 Sandbox 文件条件检查][sandbox-file-conditions] · [ActPlane 的删除保护][actplane-delete]
+- **策略从哪里来。** PAP 保存原文、ID、修订和 schema。v1/v2 先按整份 Policy 的 principal 头部沿用原有准入。对 v3，共用缓存将 Sandbox 选中的完整语句或片段交给 PDP，一并保留可能影响请求的许可与禁止。PDP 命中当前版本时直接求值。回执的 `policy_version` 标识实际授权策略集。[准入判断][admission] · [PAP 读取][read]
+- **Sandbox 执行哪些规则。** PDP 装载时从可能匹配文件访问的语句中收集路径。只匹配 `SecCore::HttpEndpoint` 的语句即使动作不限，也跳过文件路径检查。生成启动权限时，Sandbox 查询普通写入，操作为 `write`。只禁 `delete` 的分支可在选择时排除。若条件为“删除或路径等于 `/work/A`”，路径检查须保留 `/work/A`，Cedar 据此禁止普通写 A，普通写 B 仍由其他规则决定。匹配的禁止优先，没有匹配许可时默认拒绝。实际删除由 ActPlane 在操作发生时控制。[PDP 装载与求值][pdp-load] · [现有 Sandbox 文件条件检查][sandbox-file-conditions] · [ActPlane 的删除保护][actplane-delete]
 - **主体从哪里来。** 请求 schema 识别可选的 `agentType` 和 `ownerUid`。Host 或 Hook 提供 `context.agent.agentType` 时，将其映射到 `principal.agentType`。Sandbox 省略 `ownerUid`，因此 `principal has ownerUid` 为假，含有 `&&` 或 `||` 的条件照原文交给 Cedar 求值。沿用现有请求、决策和 OS 权限格式。[请求 schema 构造][request-schema] · [请求协议][wire-agent] · [主体构造][pdp-subject] · [OS 授权接口][auth]
 
 ## 4. 部署路径：选择后端、发现进程、生成计划
 
-1. **选择要下发的语句。** daemon 启动时注册 ActPlane 和 Gateway 的选择器。Cedar 编译器提取每条语句的动作、资源类型和主体条件，PAP 将同一结果交给各选择器，再按返回的进程范围生成 Scope。ActPlane 检查可能匹配文件访问的语句，缺少精确 agentType 时报告未分配。Gateway 跳过仅匹配进程启动的语句，收集可能影响 HTTP 凭据使用的限制。每条凭据授权都须在本条语句中给出可推导的 `agentType` 和非 root 的 `ownerUid`。条件缺失时仅报告该语句未分配，其他授权仍可独立下发。首版支持常量相等和 `has` 守卫的正向合取。新增下发后端时，实现并注册对应选择器即可。[现有 Cedar 文件和网络投影][projection] · [后端计划入口][plan]
+1. **选择要下发的语句。** 三个 PEP 注册相同的 `select` 接口，输入为带来源、schema 和注解的完整语句。部署规划器从缓存读取该后端的选中片段，再按主体范围生成 Scope。ActPlane 选择可能匹配文件访问的语句，缺少精确的 `agentType` 时报告未分配。Gateway 跳过仅匹配进程启动的语句，收集可能影响 HTTP 凭据使用的限制。每条凭据授权都须在本条语句中给出可推导的 `agentType` 和非 root 的 `ownerUid`。条件缺失时仅报告该语句未分配，其他授权仍可独立下发。首版支持常量相等和 `has` 守卫的正向合取。新增下发后端时，实现并注册对应选择器即可。[现有 Cedar 文件和网络投影][projection] · [后端计划入口][plan]
 2. **解析进程匹配条件。** daemon 启动时读取集成提供的 `agentType` 映射，按当前策略重算分配。每个类别使用一个现有 matcher，可选 `processName`、规范化的绝对 `executable` 或完整路径参数 `cmdlineArg`。脚本型 Agent 可配置安装入口，避免仅凭 `node` 或 `python` 进程名选中无关程序。Scope worker 匹配进程。对指定 `ownerUid` 的自动 Scope，worker 将本轮扫描实际读到的 `ProcessFingerprint.uid` 按完整 `ProcessIdentity` 随实例列表传给 `sync_scope_instances`。新建 Binding 时直接与目标 `ownerUid` 比较，缺少该实例的本轮观测或 UID 未知时等下一轮。观测值仅供本轮同步使用，无需核验标记、数据库字段或额外读取 `/proc`。查询区分“类别未配置”和“已配置，等待进程”。[进程匹配条件][matcher] · [UID 筛选][uid] · [扫描中的实例和 UID][observed-uid] · [现有同步接口][scope-sync-input]
 
    - **Gateway 凭据。** 每轮扫描只接纳本轮已核实 UID 等于 `ownerUid` 的实例。若已绑定实例的 UID 无法确认或已确认不匹配，将其移出凭据匹配集合，由 Binding 同步清理该实例的凭据挂接。
    - **ActPlane 文件保护。** 对带 `ownerUid` 的文件规则，若本轮读不到 UID，此前已核验的文件 Binding 继续跟随同一 Policy 的最新修订，前提是进程实例和策略范围都相同。另一份限定 `ownerUid` 的 Policy 即使命中同一进程，也要等本轮观测值与目标 UID 相符才能新建 Binding。确认 UID 不匹配、实例退出或 PID 被复用时，清理原实例的 Binding。[现有发现器的实例保留逻辑][uid-reconcile]
 
-3. **复用 Scope 和 Binding。** 按规范化后的匹配条件、可选 UID 和后端分组。每组都是现有 Scope 类型的一个实例，沿用其中的 Policy 快照，用 Policy ID、修订和语句 ID 或位置记录本组的规则。这样 Qoder 的凭据挂接撤下时，文件 Scope 仍可继续保护该进程。自动 Scope 的校验、UID 处理和凭据成员登记或恢复均以本组语句为准，手工 Scope 继续使用完整快照。两者共用进程发现和 Binding 同步。实例的 boot ID、PID namespace、PID 和启动时间由 daemon 保存在 SQLite。[Scope 快照及选择条件][scope-record] · [Binding 与实例标识][binding]
-4. **按 Binding 调度，再翻译选中的语句。** daemon 在调用 `target_plans` 前决定是否需要 Gateway 锁。对自动 Binding，只有本次选中了 Gateway 规则，或还有历史 Gateway 挂接待清理时，才取这把锁。这样，即使同一份 Policy 含凭据规则，纯文件 Binding 也可在 Gateway 忙时安装或撤销保护。`target_plans` 按 Scope 的引用从固定修订中取出语句。对已绑定实例，只消去 Scope 已完整核实的主体条件，保留其他谓词和来源，再交给现有文件翻译器。请求 PDP 仍保留原始条件。[基线调度判断][schedule] · [文件翻译器][translator] · [计划编译][plan]
-5. **更新凭据 Scope。** 手工 `scope create` 每次创建新 ID，校验失败就返回错误，候选不会写入 Scope 存储。若已保存，随后准备或启动发现失败，PAP 会尝试清理本次新建的 Scope。自动更新复用原 Scope ID 和已发布的快照。每次从 PAP 当前策略重算候选，收齐可能适用的网络规则，包括其他 Policy 中无注入注解的 `forbid`，复用手工路径的整 Scope 编译、owner UID 和凭据校验。手工创建仍执行原有的快照一致性检查。校验被拒时，只记录本次修订、相关语句和原因。当前 Scope 继续按原状工作。首次校验被拒则没有该 Scope 的凭据路由。重试时重新读取 PAP。[手工创建][scope-create] · [手工准入][manual-admission] · [创建后清理][manual-start-cleanup] · [整 Scope 编译][scope-compile]
+3. **复用 Scope 和 Binding。** 按规范化后的匹配条件、可选 UID 和后端分组。每组都是现有 Scope 类型的一个实例，沿用其中的 Policy 快照，整句可引用固定修订中的原句，部分选中的规则须保存可编译的完整片段及其来源。这样 Qoder 的凭据挂接撤下时，文件 Scope 仍可继续保护该进程。自动 Scope 的校验、UID 处理和凭据成员登记或恢复均以本组语句为准，手工 Scope 继续使用完整快照。两者共用进程发现和 Binding 同步。实例的 boot ID、PID namespace、PID 和启动时间由 daemon 保存在 SQLite。[Scope 快照及选择条件][scope-record] · [Binding 与实例标识][binding]
+4. **按 Binding 调度，再翻译选中的语句。** daemon 在调用 `target_plans` 前决定是否需要 Gateway 锁。对自动 Binding，只有本次选中了 Gateway 规则，或还有历史 Gateway 挂接待清理时，才取这把锁。这样，即使同一份 Policy 含凭据规则，纯文件 Binding 也可在 Gateway 忙时安装或撤销保护。`target_plans` 从该快照装载所选片段，保留已经裁剪的范围。对已绑定实例，只消去 Scope 已完整核实的主体条件，保留其他谓词和来源，再交给现有文件翻译器。请求 PDP 仍保留原始条件。[基线调度判断][schedule] · [文件翻译器][translator] · [计划编译][plan]
+5. **更新凭据 Scope。** 手工 `scope create` 每次创建新 ID，校验失败就返回错误，候选不会写入 Scope 存储。若已保存，随后准备或启动发现失败，PAP 会尝试清理本次新建的 Scope。自动更新复用原 Scope ID 和已发布的快照。每次从 PAP 当前策略重算候选，收齐可能适用的网络规则，包括其他 Policy 中无注入注解的 `forbid`，复用手工路径的整 Scope 编译、owner UID 和凭据校验。手工创建仍执行原有的快照一致性检查。校验被拒时，只记录本次修订、相关语句和原因。当前 Scope 继续按原状工作。首次校验被拒则没有该 Scope 的凭据路由。自动 `scope retry` 核对 PAP 当前版本并重新准入候选。已发布 Binding 的安装重试读取自身固定快照，并核验任务修订。[手工创建][scope-create] · [手工准入][manual-admission] · [创建后清理][manual-start-cleanup] · [整 Scope 编译][scope-compile]
 
    **发布。** 自动更新将同一 Scope ID、预期替换的旧快照和候选新快照显式传给现有发布器。发布器与进程挂接串行切换，核对旧快照仍在生效、PAP 仍要求该候选。本 Scope 用传入的新快照编译，其他 Scope 使用各自的生效快照。发布成功后才切换供挂接的快照。Gateway 关闭时，准备完成只表示等待启用。若应用主机路由等发布操作失败，沿用手工路径的处理，尝试停止代理并撤下流量，查询反映实际可用性。[快照核验][snapshot-check] · [现有计划读取][active-plans] · [Gateway 发布][host-publish] · [发布失败处理][gateway-publish-error] · [停代理与撤路由][gateway-withdraw]
 
@@ -150,9 +153,9 @@ unless { principal has agentType && principal.agentType == "qoder" };
 ## 5. 生命周期、兼容与查询
 
 - **写入与恢复。** daemon 在启动、重试和现有周期任务中核对 PAP 当前的 v3 Policy 与已保存的自动 Scope，任一列表为空也要核对。Policy 提交后发出的通知会提前触发同一次核对。后续轮次补建遗漏分配、清理失去来源的分配，并重试临时失败的操作。使用自动来源、规范化 matcher、UID 和分配类型（文件或凭据）定位同一分配。来源修订或所选语句变化时，在同一事务中核对当前源修订、更新期望分配并递增 Scope 版本，提交后唤醒原有 worker。回执与清理均核对版本，重复通知不会重建同一分配。 当前 v3 原文快照合计最多 4096 份、序列化后最多 16 MiB。新增或更新在同一写事务中检查容量。旧库已超限时暂缓自动规划，仍可启动、清理手工 Scope，以及删除或缩小 v3 Policy，回到限额后恢复规划。
-- **自动更新存活实例。** worker 通过 `sync_scope_instances` 在同一事务中按 Policy 和完整进程实例查找 Binding。新建时使用第 4 节的 UID 核验。已成功部署且目标修订和语句相同时跳过。文件 Binding 的目标修订或语句变化时，保留 ID、递增修订，由现有协调器重新部署。若另一个 Binding 占用 enforcer 导致安装失败，占用解除后的下一轮扫描确认进程与当前策略仍匹配，就用原 Binding 重试。凭据 Binding 按 Gateway 实际在服务的 Scope 版本挂接或更新。部署结果以后端回执为准。[现有 Binding 同步][binding-sync]
+- **自动更新存活实例。** worker 通过 `sync_scope_instances` 在同一事务中按 Policy 和完整进程实例查找 Binding。新建时使用第 4 节的 UID 核验。已成功部署且固定修订和选中片段均相同时跳过。文件 Binding 的目标修订或执行片段变化时，保留 ID、递增修订，由现有协调器重新部署。若另一个 Binding 占用 enforcer 导致安装失败，占用解除后的下一轮扫描确认进程与当前策略仍匹配，就用原 Binding 重试。凭据 Binding 按 Gateway 实际在服务的 Scope 版本挂接或更新。部署结果以后端回执为准。[现有 Binding 同步][binding-sync]
 - **并发更新与撤销。** 同一 Scope 的扫描串行执行。提交时在同一事务中核对 Scope 版本、进程实例和 Binding 状态，版本过期就重新扫描。保留的文件 Binding 只在原实例和原范围内更新。确认实例失配（包括 UID 改变、退出或 PID 复用）或 Policy 移出时，只撤销对应 Binding。协调器按 Binding 串行下发和清理，按 ID、修订和目标实例核对回执，防止旧扫描或迟到回执重新激活已撤销的 Binding。ActPlane 沿用手工下发的安装和删除协议。[协调器回执检查][binding-receipt] · [ActPlane 安装与撤销][actplane-lifecycle]
-- **自动 Scope 的创建和清理。** 首个来源出现时创建 Scope，只要仍有策略引用，即使没有匹配进程也保留。用户对有来源的自动 Scope 执行 `scope delete` 时，提示通过来源 Policy 修改或撤销分配，保留现有挂接。移出最后一个来源后，daemon 停止接纳新实例，调用现有删除流程清理 Binding、路由和 Scope。共享 Scope 中，显式删除一份 Policy 只撤回它的授权，即使上一次候选更新被拒也照常撤回。如果无法单独撤下该路由，就先停用受影响 Scope 的路由，待有效计划发布后恢复。重试时从 PAP 当前策略重算。手工 Scope 仍由用户管理。[Scope 删除流程][scope-cleanup]
+- **自动 Scope 的创建和清理。** 首个来源出现时创建 Scope，只要仍有策略引用，即使没有匹配进程也保留。用户对有来源的自动 Scope 执行 `scope delete` 时，提示通过来源 Policy 修改或撤销分配，保留现有挂接。移出最后一个来源后，daemon 停止接纳新实例，调用现有删除流程清理 Binding、路由和 Scope。共享 Scope 中，显式删除一份 Policy 只撤回它的授权，即使上一次候选更新被拒也照常撤回。如果无法单独撤下该路由，就先停用受影响 Scope 的路由，待有效计划发布后恢复。自动 Scope 发布重试使用 PAP 当前候选。手工 Scope 仍由用户管理。[Scope 删除流程][scope-cleanup]
 - **Gateway 变更目标 UID。** 同一个旧 Scope 的两份凭据分别从 UID 1000 移到 UID 1001 和 1002 时，一起校验所有相关目标。准入失败，原范围继续服务；准入成功，一次提交相关 Scope 和完整成员关系，按最终成员列表决定凭据退役。新 UID 在路由发布且实例通过核验后使用凭据。无关 Scope 独立发布。[凭据成员更新][creds]
 - **Gateway 重启恢复。** 先停用受影响的自动路由，包括上次运行遗留的数据面路由。daemon 用 PAP 当前的策略和集成当前的进程匹配配置重新推导 Scope。只有来源 Policy 修订、所选语句和进程范围（匹配条件及目标 UID）都一致时，才恢复原计划。来源已删除或不再匹配的旧分配按现有流程清理，其余变更按重新推导的 Scope 发布，并核验进程后挂接。在等待或核对失败期间，该路由持续停用。例如，Scope 版本 2 被拒、版本 1 仍在服务时重启，若 PAP 中的策略仍对应版本 2，就重建并重新校验版本 2。校验仍失败，路由保持停用，直到发布有效计划。映射文件缺失时使用内置映射；文件损坏或不可读时，报告配置错误，暂停依赖映射的自动分配，自动凭据路由保持停用。修复映射后重启。管理接口、手工 Scope 与 Sandbox 请求路径仍可用。同一 Scope 中单独退役的凭据保持停用，其余有效凭据在重新核验后恢复。手工 Scope 仍按固定快照恢复。[基线恢复与发布顺序][gateway-recovery] 手工和自动撤回都对新连接撤销路由。共享监听器继续服务其他 Binding 时，已建立的代理连接仍可能使用该监听器。若撤回后存活进程仍处于失去 Binding 的受管 cgroup，现有 Gateway 检查可能拒绝重新挂接，直至进程退出。
 - **兼容手工 Scope。** schema revision 1/2 保留原有 principal 分流和手工部署语义。首版中 v3 的部署由 daemon 自动分配。如果 `scope create` 的引用列表中含 v3 Policy 修订，PAP 拒绝整次创建，指出该修订并提示使用自动部署。Cedar 策略使用 `principal.agentType`，Sandbox/Hook 请求使用 `context.agent.agentType`。两处旧拼写 `agent_type` 均不兼容，手工 Scope 仍使用 `processName`。既有 Scope 固定选定的 Policy 快照，源 Policy 更新或删除后仍由用户管理。存量记录按手工来源解释。原有 PID、进程名、可执行文件和脚本参数入口继续可用，PID 分配只绑定首次确认的实例。自动 Scope 与手工 Scope 的生命周期独立。若 Gateway 遇到无法共存的跨 Scope 挂接，保留已有部署并显示冲突。[手工 selector][matcher] · [Gateway 重叠检查][overlap] Cedar 校验拒绝旧属性，包括存在性检查。启动时检查当前 Policy、Scope 和 Binding 的固定快照；存量记录继续使用旧属性时，报告待迁移的 Policy ID 和修订。升级步骤见[策略 CLI 指南](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md#cedar-policy-源码)。
@@ -162,19 +165,22 @@ unless { principal has agentType && principal.agentType == "qoder" };
 
 以下四项任务共用第 1 节的 Qoder 策略。**主示例**只给凭据规则指定 UID。**文件也限定 UID 的变体**用于验证进程 UID 核验。在主示例的文件规则中，将第一条 `when` 替换为 `when { principal has agentType && principal.agentType == "qoder" && principal has ownerUid && principal.ownerUid == 1000 }`。这样文件和凭据两条规则都明确要求 UID 1000。
 
-1. **v3 写入与 Sandbox 请求。** 扩展共用的 v3 准入判断、HTTP 凭据校验、请求 schema 和 Host/Hook 主体映射。在 PAP 读取接口及 Sandbox PDP 中落实第 3 节的原文装载、路径收集和请求求值。
+1. **v3 写入与 Sandbox 请求。** 扩展共用的 v3 准入判断、HTTP 凭据校验、请求 schema 和 Host/Hook 主体映射。实现共用 `select` 契约、事务内更新编号和缓存，在 Sandbox PDP 中落实第 3 节的片段装载、路径收集和请求求值。
 
    - **从 CLI 写入。** 用第 1 节的创建和更新命令导入主示例，核对保存的 schema revision 为 3。有权限的调用者可在 Qoder 启动前登记凭据，缺少凭据管理权限的调用者不能创建或覆盖该规则。另用旧版文件验证省略版本参数仍按 v1 导入。
    - **从真实 Hook 到 PDP。** 触发一次真实 Cosh Sandbox Hook，用适用于 `"cosh"` 的文件禁读规则和通用读取许可验收。核对实际发出的请求包含 `context.agent.agentType = "cosh"`，PDP 中的 `principal.agentType` 命中该禁止，返回的文件权限应禁止读取目标文件。另发送省略类别的请求，按第 3 节默认逻辑求值。仅发送旧拼写 `agent_type` 的请求由协议层报告未知字段。[Hook 发送端][hook-request] · [请求协议][wire-agent] · [主体构造][pdp-subject]
-   - **验证整份混合 Policy。** 通过创建和更新提交 Qoder 示例，核对 PAP 返回本次提交的原文、ID 和修订，PDP 装入其中的两条语句。保留旧版通用读取许可，对比“混合策略”和“仅有文件禁止”两种情况下的 Sandbox 决策和文件权限，两者应相同。在没有 `network.use` 许可时，HTTP 规则不能授予 OS 网络权限。Gateway 仍可从同一修订取得凭据语句。在同一份策略里加一条无凭据注解的普通禁止规则，动作不限，资源限定为 `SecCore::HttpEndpoint`，条件是 `resource.host == "api.github.com"`。核对 PAP 保存原文、PDP 装入全部三条语句。请求读取测试目录时，Sandbox 应挡住目标文件，并允许读取对照文件。Gateway 单独报告该候选计划的结果。将凭据注解改挂到未限定动作的语句上，写入应失败。
-   - **只禁止删除。** 通过 CLI 保存并更新一份含 Qoder 删除禁止的 v3 策略，在同份策略中另加一条针对其他文件的禁读规则。用允许启动并读写测试目录的策略作对照。分别发送 Qoder、Cosh 请求，有无删除禁止时，每种请求的 Sandbox 决策和 OS 权限都应一致，Qoder 的禁读仍生效。再以无其他文件保护、原本可删除的测试文件验证实际执行。仅用 Sandbox 时这条规则不拦删除。同一修订由 ActPlane 成功挂接到 Qoder 后，删除被挡住，普通写入仍可成功。查询分别显示两个后端对该语句的结果。再把禁止条件改为“删除或路径等于 `/work/A`”，在有通用写许可时，单独通过 Sandbox 验证普通写 A 被阻止，对照文件 B 仍可写。
+   - **验证混合 Policy 的选择。** 创建和更新 Qoder 主示例，核对 PAP 保存原文、ID 和修订，Sandbox PDP 只装入其中的文件禁令。保留通用读取许可，核对目标文件被拒读、对照文件可读。增加一条不限动作但只针对 `SecCore::HttpEndpoint` 且要求 `resource.host == "api.github.com"` 的普通禁止；Sandbox 仍只装入文件禁令，Gateway 从同一修订取凭据语句及该限制并单独报告准入结果。没有 `network.use` 许可时不授予 OS 网络权限。凭据注解改挂到不限动作的语句时仍拒绝写入。
+   - **并发装载与撤销。** 暂停唯一读取许可所在的 v7 装载，提交删除许可的 v8 后发起并发请求，再放行旧装载。提交后发起的请求都应被拒绝并对应 v8 授权集合，旧结果不得覆盖新版。一次仅涉及手工部署策略的变更不改变 Sandbox 的回执版本。
+   - **只禁止删除。** 通过 CLI 保存并更新一份含 Qoder 删除禁止的 v3 策略，在同份策略中另加一条针对其他文件的禁读规则。用允许启动并读写测试目录的策略作对照。分别发送 Qoder、Cosh 请求，有无删除禁止时，每种请求的 Sandbox 决策和 OS 权限都应一致，Qoder 的禁读仍生效。再以无其他文件保护、原本可删除的测试文件验证实际执行。仅用 Sandbox 时这条规则不拦删除。同一修订由 ActPlane 成功挂接到 Qoder 后，删除被挡住，普通写入仍可成功。通过 PDP 输入与决策、ActPlane 计划与回执分别核对结果。再把禁止条件改为“删除或路径等于 `/work/A`”，在有通用写许可时，单独通过 Sandbox 验证普通写 A 被阻止，对照文件 B 仍可写。
 
    用 `authorized_sandbox` 向 daemon 发起 `process.spawn`，声明 `agentType = "qoder"`，省略 `ownerUid`。允许测试程序启动、读取运行所需文件和工作目录，并申请测试目录的读取权限。选取两个原本都可读、且未受 ActPlane 文件保护的文件，仅对目标文件设置下列一条 `forbid`，另一文件作对照。每次核对 PDP 装载的语句和 `effective_permissions`，并让已启动的同一测试程序实际读取两个文件。[Sandbox 授权入口][sandbox-pep]
 
    - `(principal has agentType && principal.agentType == "qoder") && (principal has ownerUid && principal.ownerUid == 1000)` 中的 UID 条件为假，禁止未命中，目标文件和对照文件均可读取。
    - `(principal has agentType && principal.agentType == "qoder") || (principal has ownerUid && principal.ownerUid == 1000)` 中的 Qoder 条件为真，禁止命中，优先于通用许可，目标文件读不到，对照文件仍可读取。自动 Scope 无法下发这个含 `||` 的条件时，PDP 仍应得到相同结果。
 
-2. **自动 Scope 与进程发现。** 在 daemon 中推导分配，将来源语句随 Scope 快照保存，并接入第 5 节的恢复流程。通过现有 worker 核对两个 Scope 及其 Binding，凭据 Scope 的生效快照由测试数据提供。 分别达到数量和字节限额后写入，确认被拒的写入保留旧修订。打开已有超限数据库，完成手工 Scope 删除，缩小 v3 数据后观察自动规划恢复。
+2. **自动 Scope 与进程发现。** 从该 PEP 的缓存结果推导分配，将选中片段及来源固定在 Scope 快照中，并接入第 5 节的恢复流程。通过现有 worker 核对两个 Scope 及其 Binding，凭据 Scope 的生效快照由测试数据提供。 分别达到数量和字节限额后写入，确认被拒的写入保留旧修订。打开已有超限数据库，完成手工 Scope 删除，缩小 v3 数据后观察自动规划恢复。
+
+   - **三个 PEP 共用缓存。** 同版发送 1,000 次 Sandbox 请求、多次 HTTP 请求，并让多个 Qoder 匹配多个 Scope。按 PEP 分别统计，每类只筛一轮。进程的匹配、UID 核验及实际挂接分别执行。
 
    - **从配置到进程。** 用主示例先保存策略而不配置 Qoder 匹配条件，查询应显示“类别未配置”。补齐集成配置并重启 daemon，原策略应显示“等待进程”。启动匹配的 Qoder 后，为符合条件的实例建立 Binding。再覆盖两个同类实例、不同 UID、PID 复用和重复通知。 再使用损坏的映射重启，核对配置错误、手工和 Sandbox 操作仍可用，以及自动凭据路由保持停用。
    - **自动恢复漏建和漏删。** 保持 daemon 与匹配的 Qoder 运行，全程依靠周期任务恢复，不重启或手工重试。先确认 Qoder 能读取目标文件。
@@ -191,18 +197,20 @@ unless { principal has agentType && principal.agentType == "qoder" };
 
    - **替换文件规则。** 保持根进程 PID 和启动时间不变，把禁读 A 改为禁读 B。验证 Binding ID 不变、修订递增，A 恢复可读、B 受保护。用文件也限定 UID 的变体另起一轮，让已核实的同一实例在 A 切换到 B 时暂时读不到 UID。验证已有 Binding 切换到 B，另一个从未核验 UID 的实例仍等待核验。另测 A 的保护已撤下、B 在安装生效前明确失败。重试前实际读取两个文件，在通用读取许可下两者都应可读，查询应显示 A 已撤下、B 安装失败。
    - **混合策略的文件禁读。** 使用任务 1 的三条语句，让普通 HTTP 禁止也匹配 Qoder，保留未限定的动作和 `SecCore::HttpEndpoint` 资源。让已知能读取两个文件的 Qoder 根进程在 Sandbox 外运行，只用 ActPlane 提供文件保护。提交策略并等待该根的文件 Binding 安装成功，再让它分别打开目标文件和对照文件。目标文件应被禁止读取，对照文件应可读。核对文件计划只包含原文件禁令，Gateway 单独报告网络计划的结果。
+   - **Binding 安装重试。** 固定修订的两分支片段安装失败时重试，核对编译输入与原快照一致；若 Binding 已替换或撤销，旧任务不得重新应用。
    - **更新中撤销 Binding。** 分别让 UID 失配、PID 复用或 Policy 删除发生在更新前后，再送达旧扫描、迟到回执和清理重试。核对实际文件访问和 Binding 状态，确认旧结果不能恢复已撤销的绑定，旧清理也不会撤下新修订。另保留一项手工与自动路径的对照回归。延迟旧安装请求，等删除返回“目标不存在”后再送达，记录两条路径的实际结果。若两者均出现旧保护重新生效，单独评估后端协议。
 
 4. **Gateway 与混合 Policy 闭环。** 扩展网络计划编译、Scope 发布与查询状态。对目标 UID 的变更，在发布流程中将新旧 Scope 的凭据成员一次移交。对共享 Scope 中已删除的授权，撤销其实际路由。在 Linux 上用实际后端验证以下行为。
 
    - **分别下发。** 用主示例验证 UID 1000 的 Qoder 读不到受保护文件，并确认该根进程及通过成员核验的同 UID 异类子进程可在规定的 host、scheme、method 上使用凭据。同 UID 的独立异类进程和不同 UID 的后代不能继承路由。让首次文件保护失败，验证独立的凭据仍可用，查询分别显示文件保护失败、凭据规则已应用。再让 Gateway 持续忙，验证来自同一混合 Policy 的纯文件 Binding 在此期间仍能安装和撤销文件保护。另用文件也限定 UID 的变体部署。待该实例的两条规则都生效后，让发现器一轮读不到 UID。在凭据挂接清理完成后、下一轮扫描前，确认该实例已不能使用凭据，受保护文件仍读不到。
    - **候选校验被拒。** 先让 UID 1000 的 Qoder 按版本 1 使用凭据。新增一条面向 UID 1001 但编译失败的分配，确认 UID 1001 的新进程无法通过这次分配取得凭据，原 Qoder 仍可使用。再在另一份 Policy 中为 UID 1000 加入无注入注解且当前编译器不支持的网络禁止，使版本 2 在整 Scope 编译时被拒。核对失败原因。原 Qoder 和新启动、符合版本 1 且通过挂接核验的 Qoder，均可按版本 1 使用凭据。保持同一 Scope ID 和同一个已挂接的 Qoder。让版本 1 只允许 GET，修正后的版本 3 允许 GET 和 POST。实测切换前 POST 无法使用凭据，发布成功后同一 POST 可以使用。再送达版本 2 的迟到失败回执，确认仍按版本 3 服务。 再将缺少 UID 的第二条凭据授权与一条合法授权同时提交，确认仅合法授权下发，独立的进程启动语句不进入 HTTP 计划。
+   - **自动 Scope 发布重试。** v1 提供 GET，v2 增加 POST 并在准入时失败。修复故障后执行 `scope retry`，重新准入 PAP 当前候选；若其间 v3 已提交则尝试 v3。检查发布前后真实 POST 结果，另测首次失败无已发布快照、来源已删，以及 UID 1001 的限制不会进入 UID 1000 的 Scope。
    - **从 UID 1000 移到 UID 1001。** 从只给 UID 1000 的一份凭据授权开始。更新目标 UID，让新范围校验失败。两端发起同一请求，确认 UID 1000 仍可使用凭据，UID 1001 不能使用。修正并成功发布后，结果应相反。核对移交前后使用同一凭据对 ID，移交期间始终保有成员。只改 UID 也会改变 Cedar 源码，首次提交该新源码时，登记器仍须能读取原始凭据文件。另将同一旧 Scope 的两份凭据分别移到两个 UID，核对两份归属和旧 UID 的实际请求。再在旧路由停用后、移交完成前重启，验证恢复完成移交，期间旧 UID 无法重新取得凭据。
    - **候选被拒后删除已生效的授权。** 让两份 Policy 各向同一 Scope 提供一条可区分的凭据路由 A、B，再引入使新计划无法编译的规则。先验证候选在发布前被拒时 A、B 仍可用，然后删除提供 A 的 Policy，保留导致编译失败的规则。撤销完成后，分别用已挂接进程和新匹配进程发起只命中 A 的请求，两者都不能获得凭据。若能独立撤下 A，B 可继续服务。若无法安全拆开，查询显示该 Scope 的路由停用，真实请求应与状态一致。
    - **进程挂接失败。** 在手工和自动分配下分别保留一个正常挂接的 Qoder，让第二个独立 Qoder 在挂接过程中失败。路由重算成功时，实际请求应显示前者仍能使用凭据，后者不能通过本次绑定取得凭据。另用跨 Scope 的进程模拟重叠，确认在挂接时报告冲突。
    - **发布故障与重启。** 在手工和自动下发时触发相同的主机路由发布故障，比较错误、实际流量和查询状态。路由已撤下时，原 Qoder 和新 Qoder 均不能通过该路由使用凭据。保持 Cedar 修订和 UID 1000 不变，让路径 A、B 的两个独立进程持续运行。将 Qoder 的可执行文件匹配从 A 改为 B，重启 daemon，用同一条允许的请求核对两者：A 在恢复期间及恢复后都不能通过这份分配使用凭据，B 在通过核验并挂接后可以使用。另测版本 2 被拒后重启，重新校验仍失败时路由保持停用。授权删除已提交但 Scope 尚未清理时重启，核对期间和恢复后均不能使用已撤销的凭据。另在有两份凭据的同一 Scope 中退役其中一份并重启，核对只有剩余凭据恢复。
 
-v3 主体字段确定后，任务 1 和 2 即可并行。任务 2 为部署记录来源语句。任务 3 和 4 使用生成的 Scope 和 Binding 验证实际文件访问、凭据请求及两者同时生效时的表现。
+任务 1 和 2 共用同一选择契约。任务 1 提供缓存及 Sandbox 装载，任务 2 在自动 Scope 中固定部署片段；任务 3、4 用这些快照分别验证文件和凭据执行。
 
 [admission]: https://github.com/agentic-os-org/ANOLISA/blob/ce4aa771b64db15cc8740893f0b19873dd1e0275/src/agent-sec-core/v2/crates/asc-policy-cedar/src/lib.rs#L33-L72
 [cli-schema]: https://github.com/agentic-os-org/ANOLISA/blob/ce4aa771b64db15cc8740893f0b19873dd1e0275/src/agent-sec-core/v2/apps/asc-cli/src/commands/policy.rs#L142-L173

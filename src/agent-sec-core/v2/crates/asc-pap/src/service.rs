@@ -27,6 +27,7 @@ enum WriteTarget<'a> {
 
 /// Policy Administration Point for templates, assignments and owned Binding intent.
 pub struct PapService<R> {
+    selection_cache: Arc<crate::selection::SelectionCache>,
     scope_mutations: Arc<Mutex<()>>,
     automatic: Option<Arc<AutomaticScopes>>,
     credential_scope_mutations: Arc<Mutex<()>>,
@@ -49,6 +50,7 @@ struct AutomaticScopes {
 impl<R> Clone for PapService<R> {
     fn clone(&self) -> Self {
         Self {
+            selection_cache: self.selection_cache.clone(),
             scope_mutations: self.scope_mutations.clone(),
             automatic: self.automatic.clone(),
             credential_scope_mutations: self.credential_scope_mutations.clone(),
@@ -68,6 +70,7 @@ where
     /// Creates PAP with a repository; templates are validated before admission.
     pub fn new(repository: Arc<R>) -> Self {
         Self {
+            selection_cache: Arc::default(),
             scope_mutations: Arc::new(Mutex::new(())),
             automatic: None,
             credential_scope_mutations: Arc::new(Mutex::new(())),
@@ -114,12 +117,12 @@ where
             Some(automatic)
                 if crate::is_automatic_source(&policy) && automatic.matchers.is_err() =>
             {
-                crate::automatic::derive(
-                    std::slice::from_ref(&policy),
-                    automatic.matchers.as_ref(),
+                // The management read still works when the full v3 set exceeds the planning limit.
+                let (policies, views) = crate::selection::SelectionCache::isolated_deployment(
+                    vec![policy.clone()],
                     automatic.selectors,
-                )?
-                .diagnostics
+                )?;
+                crate::automatic::derive(policies, automatic.matchers.as_ref(), views)?.diagnostics
             }
             Some(automatic) if crate::is_automatic_source(&policy) => automatic
                 .diagnostics
@@ -425,6 +428,18 @@ where
         self.repository.current_policies(ids)
     }
 
+    /// Select Sandbox statements using the selector registered by the daemon at startup.
+    ///
+    /// # Errors
+    /// Returns a repository, schema or selection error for the current generation.
+    pub fn sandbox_selections(
+        &self,
+        select: asc_policy_cedar::selection::Select,
+    ) -> Result<Arc<crate::ConsumerPolicySet>, PapError> {
+        self.selection_cache
+            .sandbox(self.repository.as_ref(), select)
+    }
+
     /// Derives request policies independently of Scope and Binding assignments.
     ///
     /// # Errors
@@ -434,7 +449,6 @@ where
         &self,
     ) -> Result<asc_policy_types::cedar::AuthorizationPolicySet, PapError> {
         use asc_policy_types::cedar::{AuthorizationPolicy, AuthorizationPolicySet};
-        use sha2::{Digest, Sha256};
 
         let mut policies = Vec::new();
         for policy in self.repository.all_current_policies()? {
@@ -457,9 +471,8 @@ where
                 }
             }
         }
-        let bytes = serde_json::to_vec(&policies).map_err(|_| PapError::Persistence)?;
         Ok(AuthorizationPolicySet {
-            version: format!("{:x}", Sha256::digest(bytes)),
+            version: crate::selection::authorization_digest(&policies)?,
             policies,
         })
     }
@@ -718,12 +731,7 @@ where
                 if self.automatic.is_some() && id.as_str().starts_with("auto-") =>
             {
                 let automatic = self.automatic.as_ref().ok_or(PapError::NotFound)?;
-                crate::automatic::derive(
-                    &self.repository.automatic_policies()?,
-                    automatic.matchers.as_ref(),
-                    automatic.selectors,
-                )?
-                .prepare(id)
+                self.automatic_plan(automatic)?.prepare(id)
             }
             other => other,
         }
@@ -930,15 +938,23 @@ where
         Ok(Some(scope))
     }
 
+    fn automatic_plan(
+        &self,
+        automatic: &AutomaticScopes,
+    ) -> Result<crate::automatic::Derived, PapError> {
+        let (policies, views) = self
+            .selection_cache
+            .deployment(self.repository.as_ref(), automatic.selectors)?;
+        crate::automatic::derive(policies, automatic.matchers.as_ref(), views)
+    }
+
     fn reconcile_automatic_scopes(
         &self,
         automatic: &AutomaticScopes,
         requested: Option<&PreparedScope>,
     ) -> Result<(), PapError> {
         let retry = requested.map(|scope| &scope.scope_id);
-        let policies = self.repository.automatic_policies()?;
-        let desired =
-            crate::automatic::derive(&policies, automatic.matchers.as_ref(), automatic.selectors)?;
+        let desired = self.automatic_plan(automatic)?;
         let mut current = self.current_automatic_scopes()?;
         if let Some(expected) = requested {
             let id = &expected.scope_id;
