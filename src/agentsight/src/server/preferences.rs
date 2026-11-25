@@ -199,7 +199,12 @@ pub async fn get_preferences(
         "source": resolved.as_str(),
         "preferences": prefs,
     });
-    cache_put(cache_key, body.clone());
+    // Only cache `llm=true` responses when the LLM layer actually succeeded;
+    // otherwise a transient LLM error or pre-setup probe pins `llm_enabled: false`
+    // for the full 10-minute TTL.
+    if !llm_requested || llm_enabled {
+        cache_put(cache_key, body.clone());
+    }
     HttpResponse::Ok().json(body)
 }
 
@@ -279,4 +284,85 @@ pub async fn get_preference_turns(
         "turns_count": turns.len(),
         "turns": turns,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{App, test as awtest};
+    use std::sync::{Arc, RwLock};
+    use std::time::Instant;
+
+    fn test_state(base_dir: &std::path::Path) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            base_dir,
+        ));
+        let genai_store = Arc::new(
+            crate::storage::sqlite::GenAISqliteStore::new_with_path(
+                &base_dir.join("genai_events.db"),
+                crate::config::PeriodicStoragePolicy::default(),
+            )
+            .unwrap(),
+        );
+        web::Data::new(AppState {
+            config_path: None,
+            storage_budget: Arc::new(crate::storage_budget::StorageBudget::new(
+                None,
+                &crate::config::StorageConfig::default(),
+            )),
+            storage_path: base_dir.join("agentsight.db"),
+            genai_store: Some(genai_store),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(crate::health::HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                crate::grader::EvaluationStore::new_with_path(&base_dir.join("evaluation.db"))
+                    .unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: crate::server::SecurityObservabilityConfig::default(),
+            auth,
+            optimize: Some(crate::server::optimize::OptimizeState::init(base_dir, None)),
+            reuse_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+        })
+    }
+
+    #[actix_web::test]
+    async fn failed_llm_preferences_request_is_not_negative_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app =
+            awtest::init_service(App::new().app_data(state.clone()).service(get_preferences)).await;
+
+        let req1 = awtest::TestRequest::get()
+            .uri("/preferences?window_days=19&llm=true&source=genai")
+            .to_request();
+        let resp1: serde_json::Value = awtest::call_and_read_body_json(&app, req1).await;
+        assert_eq!(resp1["llm_enabled"], false);
+        assert!(
+            cache_get((19, true, PreferenceSourceParam::Genai)).is_none(),
+            "degraded llm_enabled=false response must not be cached under llm=true"
+        );
+
+        let req_rule = awtest::TestRequest::get()
+            .uri("/preferences?window_days=19&llm=false&source=genai")
+            .to_request();
+        let resp_rule: serde_json::Value = awtest::call_and_read_body_json(&app, req_rule).await;
+        assert_eq!(resp_rule["llm_enabled"], false);
+        assert!(
+            cache_get((19, false, PreferenceSourceParam::Genai)).is_some(),
+            "rule-only response when llm=false should remain cached"
+        );
+    }
 }
