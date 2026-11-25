@@ -35,7 +35,7 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
 }
 
 fn transfer(
-    stream: &mut UnixStream,
+    mut stream: &UnixStream,
     buffer: &mut [u8],
     deadline: Instant,
     writing: bool,
@@ -141,7 +141,7 @@ pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
 /// the protocol's maximum remaining call deadline. Decoding is bounded by the
 /// frame size limit, not by when the bytes happened to arrive.
 pub(crate) fn read_initial<T: DeserializeOwned>(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     stall: Duration,
     limit: Instant,
 ) -> io::Result<T> {
@@ -163,7 +163,7 @@ pub(crate) fn read_initial<T: DeserializeOwned>(
 /// making progress is shed after one stall window, while one that keeps
 /// sending may take until the absolute limit.
 fn transfer_stalled(
-    stream: &mut UnixStream,
+    mut stream: &UnixStream,
     buffer: &mut [u8],
     stall: Duration,
     limit: Instant,
@@ -220,17 +220,17 @@ pub(crate) fn write<T: Serialize>(
 }
 
 pub(crate) fn write_releasing<T: Serialize>(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     value: &T,
     deadline: Instant,
-    mut send: impl FnMut(&UnixStream, &[u8]) -> io::Result<usize>,
+    mut send: impl FnMut(&[u8]) -> io::Result<usize>,
 ) -> io::Result<()> {
     let frame = write_frame_header(stream, value, deadline)?;
     let mut pending = frame.0.as_slice();
     while !pending.is_empty() {
         remaining(deadline)?;
         // Linux Unix streams may still accept data with POLLOUT cleared.
-        match send(stream, pending) {
+        match send(pending) {
             Ok(sent) => pending = &pending[sent..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -260,7 +260,7 @@ pub(crate) fn try_send(stream: &UnixStream, bytes: &[u8]) -> io::Result<usize> {
 }
 
 fn write_frame_header<T: Serialize>(
-    stream: &mut UnixStream,
+    stream: &UnixStream,
     value: &T,
     deadline: Instant,
 ) -> io::Result<BoundedBuffer> {

@@ -30,7 +30,7 @@ mod hooks;
 mod input;
 mod invocations;
 mod lifecycle;
-mod limits;
+pub(crate) mod limits;
 mod maintenance;
 mod policy;
 pub(crate) mod process;

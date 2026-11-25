@@ -50,6 +50,8 @@ fn callback(f: &Fixture, id: &str) -> Operation {
     }
 }
 
+mod connections;
+
 #[test]
 fn sdk_negotiates_without_relaxing_the_old_registration_shape() {
     let f = Fixture::new();

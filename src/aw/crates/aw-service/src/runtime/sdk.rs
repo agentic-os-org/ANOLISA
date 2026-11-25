@@ -56,6 +56,7 @@ impl Runtime {
         native: Value,
         close: bool,
         deadline: Instant,
+        connection: Option<&super::limits::Connection>,
     ) -> Result<Value> {
         let (adapter_id, context, environment, on_error, replaces_result) = {
             let instances = self
@@ -120,7 +121,18 @@ impl Runtime {
                 .ok_or_else(|| rejected("sdk_input_invalid"))?;
             let call = super::hooks::callback_id(&normalized)?;
             self.close_hook(id, event, session, &call, deadline)?;
+            // Event teardown can finish before its RPC worker can return its slot.
+            self.resources.connections.wait_for_callback_replies(
+                id,
+                super::hooks::correlation(event, session, &call)?,
+                deadline,
+            )?;
             return Ok(json!({"code":0,"stdout":[],"stderr":[]}));
+        }
+        if let Some(connection) = connection {
+            // Only addressable events have a close waiter. The handler below
+            // owns validation of malformed input and observation diagnostics.
+            connection.start_callback(id, super::hooks::event_correlation(&normalized).ok())?;
         }
         let mut diagnostics = Vec::new();
         let mut directive = None;

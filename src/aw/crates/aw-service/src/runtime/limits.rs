@@ -8,9 +8,12 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
+
+mod connections;
+pub(crate) use connections::{Admission, Connection, Connections};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -57,8 +60,7 @@ impl Limits {
 
 #[derive(Default)]
 pub(crate) struct Resources {
-    pub(crate) connections: AtomicUsize,
-    pub(crate) connection_admission: Mutex<()>,
+    pub(crate) connections: Arc<Connections>,
     pub(crate) rejected: AtomicU64,
     pub(crate) peak_invocations: AtomicUsize,
     reasons: Mutex<BTreeMap<&'static str, u64>>,
@@ -103,7 +105,7 @@ impl Runtime {
             "bindings":instances.len(), "invocations":invocations, "correlations":correlations,
             "event_slots":events.len() + expired.len(), "expired_events":expired.len(),
             "calls":self.calls.load(Ordering::Relaxed),
-            "connections":self.resources.connections.load(Ordering::Relaxed)},
+            "connections":self.resources.connections.count()?},
             "peak_invocations_per_binding":self.resources.peak_invocations.load(Ordering::Relaxed),
             "admission_rejections":self.resources.rejected.load(Ordering::Relaxed),
             "rejection_reasons":*self.resources.reasons.lock().map_err(|_| rejected("state_poisoned"))?,

@@ -1,6 +1,6 @@
 //! Dispatch the versioned service control operations.
 
-use super::Runtime;
+use super::{limits::Connection, Runtime};
 use crate::{rejected, Operation, Result};
 use aw_host::ProcessContext;
 use serde_json::{json, Value};
@@ -18,6 +18,16 @@ impl Runtime {
         operation: Operation,
         deadline: Instant,
         cancelled: &AtomicBool,
+    ) -> Result<Value> {
+        self.handle_connected(operation, deadline, cancelled, None)
+    }
+
+    pub(crate) fn handle_connected(
+        self: &Arc<Self>,
+        operation: Operation,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+        connection: Option<&Connection>,
     ) -> Result<Value> {
         if Instant::now() >= deadline {
             return Err(rejected("deadline_exceeded"));
@@ -42,6 +52,7 @@ impl Runtime {
                 native_input,
                 close,
                 deadline,
+                connection,
             ),
             Operation::RecentExecutions => self.audit.recent(),
             Operation::Status => {
