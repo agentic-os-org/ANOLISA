@@ -217,9 +217,7 @@ pub fn convert_codex_events(
                     }
                 }
                 "token_count" => {
-                    if let Some(info) = payload.get("info") {
-                        let total = usage_triple(info.get("total_token_usage"));
-                        let last = usage_triple(info.get("last_token_usage"));
+                    if let Some((total, last)) = token_count_usage(payload) {
                         let incremental = incremental_usage(total, previous_total_usage, last);
                         // Missing totals use last-call accounting, so a later total
                         // must not include that already-counted gap in its delta.
@@ -474,13 +472,8 @@ pub fn extract_private_metadata(
             // Token deltas are content of the turn they are charged to, the
             // condition `convert_codex_events` opens its turn with.
             "event_msg" if payload_type(e) == "token_count" => {
-                if let Some(info) = payload.get("info") {
-                    let total = usage_triple(info.get("total_token_usage"));
-                    let incremental = incremental_usage(
-                        total,
-                        previous_total_usage,
-                        usage_triple(info.get("last_token_usage")),
-                    );
+                if let Some((total, last)) = token_count_usage(payload) {
+                    let incremental = incremental_usage(total, previous_total_usage, last);
                     previous_total_usage = total;
                     if incremental.is_some() {
                         count_turn(&mut assistant_count, &mut in_assistant_turn);
@@ -663,6 +656,17 @@ fn usage_triple(usage: Option<&serde_json::Value>) -> Option<(u64, u64, u64)> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     Some((pt.unwrap_or(0), ct.unwrap_or(0), cache))
+}
+
+type UsageTriple = (u64, u64, u64);
+
+fn token_count_usage(
+    payload: &serde_json::Value,
+) -> Option<(Option<UsageTriple>, Option<UsageTriple>)> {
+    let info = payload.get("info").filter(|v| !v.is_null())?;
+    let total = usage_triple(info.get("total_token_usage"));
+    let last = usage_triple(info.get("last_token_usage"));
+    (total.is_some() || last.is_some()).then_some((total, last))
 }
 
 // Rate-limit updates can repeat the current usage snapshot. Only cumulative
