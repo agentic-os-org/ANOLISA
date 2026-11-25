@@ -919,9 +919,17 @@ for the full reference.
 Trae has no plugin CLI, so the adapter merges the tokenless hook groups
 directly into each edition's global `hooks.json` (`~/.trae-cn/hooks.json` for
 the CN edition, `~/.trae/hooks.json` for the international edition).
-User-configured hooks are preserved; tokenless entries carry the
-`TOKENLESS_AGENT_ID=trae` command marker so uninstall removes exactly what
-install wrote.
+User-configured hooks are preserved: an existing `hooks.json` keeps its access
+mode and, when it is a dotfiles-managed symlink, its link target; an entry
+counts as ours only when its whole command matches the shape install writes, so
+a user hook that merely mentions `TOKENLESS_AGENT_ID=trae` survives both the
+merge and the removal.
+
+Hooks require Trae **3.3.66** or newer in the CN edition and **3.5.66** or newer
+in the international edition — the releases that introduced the hook
+configuration surface. `manifest.json` carries a single range per target, so it
+declares the earlier of the two floors (`>=3.3.66`); check the edition you
+actually run against the pair above.
 
 | Strategy | Event | Action | Status |
 |---|---|---|---|

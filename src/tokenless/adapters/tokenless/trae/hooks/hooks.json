@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENLESS_AGENT_ID=trae bash \"@TOKENLESS_ADAPTER_DIR@/hooks/run-hook.sh\" rewrite_hook.py",
+            "command": "TOKENLESS_AGENT_ID=trae bash @TOKENLESS_DISPATCHER@ rewrite_hook.py",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENLESS_AGENT_ID=trae bash \"@TOKENLESS_ADAPTER_DIR@/hooks/run-hook.sh\" tool_ready_hook.sh",
+            "command": "TOKENLESS_AGENT_ID=trae bash @TOKENLESS_DISPATCHER@ tool_ready_hook.sh",
             "timeout": 15
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENLESS_AGENT_ID=trae bash \"@TOKENLESS_ADAPTER_DIR@/hooks/run-hook.sh\" compress_response_hook.py",
+            "command": "TOKENLESS_AGENT_ID=trae bash @TOKENLESS_DISPATCHER@ compress_response_hook.py",
             "timeout": 15
           }
         ]

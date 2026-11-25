@@ -636,7 +636,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/install.sh
 bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/uninstall.sh
 ```
 
-用户已有的 Hook 配置会被保留；卸载脚本只移除 Tokenless 自己的条目。Trae 将终端工具名标准化为 `RunCommand`，因此命令重写 Hook 匹配该名称。由于 Trae 的 PostToolUse 不支持替换工具输出，响应 Hook 保留原始输出：只在识别出环境失败时追加 `additionalContext`，不会追加压缩副本（那会让模型可见内容变大）。安装或移除后请重启 Trae。
+用户已有的 Hook 配置会被保留；卸载脚本只移除 Tokenless 自己的条目。已有的 `hooks.json` 会保持原有访问权限，由 dotfiles 管理的符号链接也会保持链接目标不变，因为两个脚本都就地写入解析后的真实文件。只有整条命令与安装脚本写入的形式完全一致才算 Tokenless 条目，因此仅在命令中提到 `TOKENLESS_AGENT_ID=trae` 的用户 Hook 在合并与卸载两条路径上都不会被误删。Hook 功能要求国内版 Trae 3.3.66 及以上、国际版 3.5.66 及以上，即各自引入 Hook 配置能力的版本；适配器 manifest 每个目标只承载一个版本范围，因此声明两者中较早的下限。Trae 将终端工具名标准化为 `RunCommand`，因此命令重写 Hook 匹配该名称。由于 Trae 的 PostToolUse 不支持替换工具输出，响应 Hook 保留原始输出：只在识别出环境失败时追加 `additionalContext`，不会追加压缩副本（那会让模型可见内容变大）。安装或移除后请重启 Trae。
 
 ## AgentScope 框架集成
 

@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # detect.sh — Inspect Trae presence and the tokenless hook state.
-# Read-only. Tri-state exit aligns with claude-code/qwencode detect.sh:
+# Read-only. Tri-state exit aligns with claude-code/qwencode/openclaw/hermes
+# detect.sh — the contract every adapter in this component implements:
 #   0 = installed and ready
 #   1 = not installed but installable (prereqs OK)
 #   2 = missing prerequisites
+#
+# This is deliberately not the hooks' fail-open contract. Fail-open lives in the
+# runtime dispatcher (common/hooks/run-hook.sh): a hook that cannot run emits
+# `{}` and exits 0 so the host is never blocked. detect.sh is a read-only
+# installer probe whose exit status *is* its answer — `make trae-install` and
+# the sibling adapters gate on it — so collapsing it to a constant 0 would make
+# the readiness report meaningless without making anything safer.
 set -euo pipefail
 
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
@@ -99,12 +107,31 @@ else
     note_prereq_missing "tokenless binary"
 fi
 
-rtk_bin="$(command -v rtk 2>/dev/null || true)"
-if [ -n "$rtk_bin" ]; then
-    field "rtk binary"          "present (${rtk_bin})"
+# RTK is embedded in the tokenless CLI and runs as `tokenless rtk`; packaging
+# ships no standalone `rtk` binary (see tokenless-cli rtk_args: "the standalone
+# `rtk` target ... is not shipped"). Probe the runtime the hooks actually
+# invoke, so the supported install layout — adapter tree staged plus
+# `tokenless` on PATH — reports ready instead of a missing prerequisite.
+if [ -n "$runtime_bin" ]; then
+    # No pipe: under `pipefail` a `head -n 1` that closes early would turn a
+    # successful probe into SIGPIPE (141) and report a healthy runtime missing.
+    if rtk_probe="$("$runtime_bin" rtk --version 2>&1)"; then
+        rtk_version="${rtk_probe%%$'\n'*}"
+        field "rtk runtime"         "present (bundled: tokenless rtk${rtk_version:+ ${rtk_version}})"
+    else
+        field "rtk runtime"         "missing (tokenless rtk --version failed)"
+        note_prereq_missing "rtk runtime (tokenless rtk)"
+    fi
 else
-    field "rtk binary"          "missing"
-    note_prereq_missing "rtk binary"
+    # Already reported as a missing prerequisite above; do not double-count it.
+    field "rtk runtime"         "missing (no tokenless binary)"
+fi
+
+# A separately installed upstream rtk is not required and not used by the hooks;
+# report it for information only.
+standalone_rtk="$(command -v rtk 2>/dev/null || true)"
+if [ -n "$standalone_rtk" ]; then
+    field "standalone rtk"      "present (${standalone_rtk}, unused)"
 fi
 
 # Shared hook scripts live under FHS; warn when missing so user knows to run

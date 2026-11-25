@@ -172,7 +172,7 @@
       }
     },
     "trae": {
-      "compatibleVersions": "*",
+      "compatibleVersions": ">=3.3.66",
       "capabilities": {
         "hooks": [
           "tool-ready",

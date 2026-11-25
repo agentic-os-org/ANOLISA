@@ -445,8 +445,14 @@ Trae 没有插件 CLI：适配器会把 tokenless Hook 组合并入每个已安�
 PreToolUse 阶段通过 `hookSpecificOutput.updatedInput` 改写 `RunCommand` 输入；
 由于 Trae 的 PostToolUse 不支持替换工具输出，Tokenless 不会追加压缩副本
 （那会让模型可见内容变大），只在识别出环境失败时通过 `additionalContext`
-追加可操作的诊断上下文。用户自行配置的 Hook 会被保留，tokenless 条目以命令中的
-`TOKENLESS_AGENT_ID=trae` 标记识别，卸载只移除安装写入的内容。
+追加可操作的诊断上下文。用户自行配置的 Hook 会被保留：已有的 `hooks.json`
+保持原有访问权限，若它是由 dotfiles 管理的符号链接则保持链接目标不变；只有整条命令
+与安装写入的形式完全一致才算 tokenless 条目，因此仅在命令中提到
+`TOKENLESS_AGENT_ID=trae` 的用户 Hook 在合并与卸载两条路径上都不会被误删。
+
+Hook 功能要求国内版 Trae **3.3.66** 及以上、国际版 **3.5.66** 及以上——即各自引入
+Hook 配置能力的版本。`manifest.json` 每个目标只承载一个版本范围，因此声明两者中较早
+的下限（`>=3.3.66`）；请以实际使用的版本对照上述两个版本号确认。
 
 ```bash
 make trae-install

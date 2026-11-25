@@ -4,8 +4,9 @@
 # Trae has no plugin system for hooks: install.sh merges the tokenless hook
 # groups into the edition's global hooks.json (~/.trae-cn CN edition,
 # ~/.trae international edition). The merge must be idempotent, must never
-# clobber user-configured hooks, and uninstall.sh must remove exactly the
-# tokenless-owned entries.
+# clobber user-configured hooks, must preserve the host config file's access
+# mode and managed path, must emit a dispatcher path the host shell cannot
+# re-expand, and uninstall.sh must remove exactly the tokenless-owned entries.
 set -uo pipefail
 
 PASS=0
@@ -24,6 +25,7 @@ mkdir -p "$ADAPTER_DIR"
 cp -R "$SOURCE_ADAPTER_DIR"/. "$ADAPTER_DIR"/
 
 MARKER="TOKENLESS_AGENT_ID=trae"
+PLACEHOLDER="@TOKENLESS_DISPATCHER@"
 
 count_tokenless_entries() {
     # Count hook command entries owned by tokenless inside a hooks.json.
@@ -47,13 +49,35 @@ print(count)
 PYEOF
 }
 
+file_mode() {
+    # Octal access mode, e.g. 600. Portable across stat flavours.
+    python3 -c 'import os,stat,sys
+print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$1"
+}
+
+file_sha() {
+    python3 -c 'import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"
+}
+
 json_valid() { python3 -m json.tool "$1" >/dev/null 2>&1; }
+
+run_install() {
+    local adapter_dir="${1:-$ADAPTER_DIR}"
+    ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$adapter_dir" \
+        bash "$adapter_dir/trae/scripts/install.sh"
+}
+
+run_uninstall() {
+    ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        bash "$ADAPTER_DIR/trae/scripts/uninstall.sh"
+}
 
 # --- Test 1: source template is valid JSON and carries the marker ---------
 if json_valid "$ADAPTER_DIR/trae/hooks/hooks.json" \
     && grep -qF "$MARKER" "$ADAPTER_DIR/trae/hooks/hooks.json" \
-    && grep -qF "@TOKENLESS_ADAPTER_DIR@" "$ADAPTER_DIR/trae/hooks/hooks.json"; then
-    pass "hooks template is valid JSON with marker and adapter-dir placeholder"
+    && grep -qF "$PLACEHOLDER" "$ADAPTER_DIR/trae/hooks/hooks.json"; then
+    pass "hooks template is valid JSON with marker and dispatcher placeholder"
 else
     fail "hooks template malformed"
 fi
@@ -98,8 +122,7 @@ cat > "$HOME/.trae-cn/hooks.json" <<'USERJSON'
 }
 USERJSON
 
-if ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
-    bash "$ADAPTER_DIR/trae/scripts/install.sh" >"$SANDBOX/out3" 2>&1; then
+if run_install >"$SANDBOX/out3" 2>&1; then
     pass "install into CN edition exits 0"
 else
     fail "install into CN edition failed: $(cat "$SANDBOX/out3")"
@@ -108,6 +131,7 @@ fi
 HOOKS_JSON="$HOME/.trae-cn/hooks.json"
 python3 - "$HOOKS_JSON" "$ADAPTER_DIR" <<'PYEOF' && pass "merge preserves user hooks and stamps adapter dir" || fail "merge content wrong"
 import json
+import shlex
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -127,9 +151,17 @@ for groups in hooks.values():
             commands.append(hook.get("command", ""))
 tokenless_cmds = [c for c in commands if "TOKENLESS_AGENT_ID=trae" in c]
 assert len(tokenless_cmds) == 3, f"expected 3 tokenless hooks, got {len(tokenless_cmds)}"
-assert all("@TOKENLESS_ADAPTER_DIR@" not in c for c in tokenless_cmds), "placeholder left unstamped"
-assert all(f"{adapter_dir}/trae/hooks/run-hook.sh" in c for c in tokenless_cmds), "adapter dir not stamped"
-assert any("rewrite_hook.py" in c and '"matcher"' not in c for c in tokenless_cmds)
+assert all("@TOKENLESS_DISPATCHER@" not in c for c in tokenless_cmds), "placeholder left unstamped"
+dispatcher = f"{adapter_dir}/trae/hooks/run-hook.sh"
+for command in tokenless_cmds:
+    # The dispatcher must survive shell parsing as one literal word: the host
+    # runs this string through a shell, and the adapter root above contains a
+    # space.
+    words = shlex.split(command)
+    assert len(words) == 4, f"expected 4 shell words, got {words}"
+    assert words[0] == "TOKENLESS_AGENT_ID=trae", words
+    assert words[1] == "bash", words
+    assert words[2] == dispatcher, f"dispatcher word {words[2]!r} != {dispatcher!r}"
 assert any(c.endswith("rewrite_hook.py") for c in tokenless_cmds)
 assert any(c.endswith("tool_ready_hook.sh") for c in tokenless_cmds)
 assert any(c.endswith("compress_response_hook.py") for c in tokenless_cmds)
@@ -139,8 +171,7 @@ assert "RunCommand" in matchers, "rewrite hook must match RunCommand"
 PYEOF
 
 # --- Test 4: install is idempotent -----------------------------------------
-if ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
-    bash "$ADAPTER_DIR/trae/scripts/install.sh" >/dev/null 2>&1; then
+if run_install >/dev/null 2>&1; then
     entries="$(count_tokenless_entries "$HOOKS_JSON")"
     if [ "$entries" = "3" ]; then
         pass "install is idempotent (3 tokenless entries after reinstall)"
@@ -154,8 +185,7 @@ fi
 # --- Test 5: both editions get hooks when both homes exist ------------------
 export HOME="$SANDBOX/home-both"
 mkdir -p "$HOME/.trae-cn" "$HOME/.trae"
-if ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
-    bash "$ADAPTER_DIR/trae/scripts/install.sh" >/dev/null 2>&1 \
+if run_install >/dev/null 2>&1 \
     && [ "$(count_tokenless_entries "$HOME/.trae-cn/hooks.json")" = "3" ] \
     && [ "$(count_tokenless_entries "$HOME/.trae/hooks.json")" = "3" ]; then
     pass "install covers both CN and international editions"
@@ -165,7 +195,7 @@ fi
 
 # --- Test 6: uninstall removes only tokenless entries -----------------------
 export HOME="$SANDBOX/home-cn"
-if ANOLISA_TARGET=trae bash "$ADAPTER_DIR/trae/scripts/uninstall.sh" >"$SANDBOX/out6" 2>&1; then
+if run_uninstall >"$SANDBOX/out6" 2>&1; then
     entries="$(count_tokenless_entries "$HOOKS_JSON")"
     if [ "$entries" = "0" ] && json_valid "$HOOKS_JSON" \
         && grep -qF "lint.py" "$HOOKS_JSON" && grep -qF "user-stop-hook" "$HOOKS_JSON"; then
@@ -178,7 +208,7 @@ else
 fi
 
 # --- Test 7: uninstall is idempotent ----------------------------------------
-if ANOLISA_TARGET=trae bash "$ADAPTER_DIR/trae/scripts/uninstall.sh" >/dev/null 2>&1; then
+if run_uninstall >/dev/null 2>&1; then
     pass "uninstall idempotent"
 else
     fail "second uninstall exited non-zero"
@@ -188,8 +218,7 @@ fi
 export HOME="$SANDBOX/home-bad"
 mkdir -p "$HOME/.trae-cn"
 echo '{ not json' > "$HOME/.trae-cn/hooks.json"
-if ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
-    bash "$ADAPTER_DIR/trae/scripts/install.sh" >/dev/null 2>&1; then
+if run_install >/dev/null 2>&1; then
     fail "install accepted an invalid hooks.json"
 else
     if grep -qF '{ not json' "$HOME/.trae-cn/hooks.json"; then
@@ -210,6 +239,278 @@ if [ "$detect_rc" -eq 2 ]; then
 else
     fail "detect.sh unexpected exit code: $detect_rc"
 fi
+
+# --- Test 10: install preserves the access mode of an existing config --------
+export HOME="$SANDBOX/home-mode"
+mkdir -p "$HOME/.trae-cn"
+echo '{"version":1,"hooks":{}}' > "$HOME/.trae-cn/hooks.json"
+chmod 0600 "$HOME/.trae-cn/hooks.json"
+( umask 022; run_install >/dev/null 2>&1 )
+mode="$(file_mode "$HOME/.trae-cn/hooks.json")"
+if [ "$mode" = "600" ]; then
+    pass "install preserves a 0600 hooks.json mode under umask 022"
+else
+    fail "install changed hooks.json mode to $mode (expected 600)"
+fi
+
+# --- Test 11: uninstall preserves the access mode too ------------------------
+chmod 0600 "$HOME/.trae-cn/hooks.json"
+( umask 022; run_uninstall >/dev/null 2>&1 )
+mode="$(file_mode "$HOME/.trae-cn/hooks.json")"
+if [ "$mode" = "600" ]; then
+    pass "uninstall preserves a 0600 hooks.json mode under umask 022"
+else
+    fail "uninstall changed hooks.json mode to $mode (expected 600)"
+fi
+
+# --- Test 12: a brand-new config still gets the umask-derived mode -----------
+export HOME="$SANDBOX/home-new"
+mkdir -p "$HOME/.trae-cn"
+( umask 022; run_install >/dev/null 2>&1 )
+mode="$(file_mode "$HOME/.trae-cn/hooks.json")"
+if [ "$mode" = "644" ]; then
+    pass "install creates a new hooks.json with the umask-derived mode (644)"
+else
+    fail "new hooks.json mode is $mode (expected 644 under umask 022)"
+fi
+
+# --- Test 13: a dotfiles-managed symlink survives install --------------------
+export HOME="$SANDBOX/home-link"
+mkdir -p "$HOME/.trae-cn" "$SANDBOX/dotfiles"
+LINK_TARGET="$SANDBOX/dotfiles/trae-hooks.json"
+cat > "$LINK_TARGET" <<'USERJSON'
+{
+  "version": 1,
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "echo user-stop-hook" } ] }
+    ]
+  }
+}
+USERJSON
+chmod 0600 "$LINK_TARGET"
+ln -s "$LINK_TARGET" "$HOME/.trae-cn/hooks.json"
+
+if run_install >"$SANDBOX/out13" 2>&1; then
+    if [ -L "$HOME/.trae-cn/hooks.json" ] \
+        && [ "$(readlink "$HOME/.trae-cn/hooks.json")" = "$LINK_TARGET" ] \
+        && [ "$(count_tokenless_entries "$LINK_TARGET")" = "3" ] \
+        && [ "$(file_mode "$LINK_TARGET")" = "600" ] \
+        && grep -qF "user-stop-hook" "$LINK_TARGET"; then
+        pass "install writes through a dotfiles symlink, keeping link, target and mode"
+    else
+        fail "install broke the managed symlink or its target/mode"
+    fi
+else
+    fail "install into a symlinked hooks.json failed: $(cat "$SANDBOX/out13")"
+fi
+
+# --- Test 14: the same symlink survives uninstall ----------------------------
+if run_uninstall >"$SANDBOX/out14" 2>&1; then
+    if [ -L "$HOME/.trae-cn/hooks.json" ] \
+        && [ "$(readlink "$HOME/.trae-cn/hooks.json")" = "$LINK_TARGET" ] \
+        && [ "$(count_tokenless_entries "$LINK_TARGET")" = "0" ] \
+        && [ "$(file_mode "$LINK_TARGET")" = "600" ] \
+        && grep -qF "user-stop-hook" "$LINK_TARGET"; then
+        pass "uninstall writes through a dotfiles symlink, keeping link, target and mode"
+    else
+        fail "uninstall broke the managed symlink or its target/mode"
+    fi
+else
+    fail "uninstall of a symlinked hooks.json failed: $(cat "$SANDBOX/out14")"
+fi
+
+# --- Test 15: user hooks that mention the marker survive install -------------
+export HOME="$SANDBOX/home-marker"
+mkdir -p "$HOME/.trae-cn"
+cat > "$HOME/.trae-cn/hooks.json" <<'USERJSON'
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "echo TOKENLESS_AGENT_ID=trae user-pre-hook", "timeout": 5 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "echo TOKENLESS_AGENT_ID=trae user-stop-hook" }
+        ]
+      }
+    ]
+  }
+}
+USERJSON
+MARKER_JSON="$HOME/.trae-cn/hooks.json"
+
+if run_install >"$SANDBOX/out15" 2>&1 \
+    && grep -qF "user-pre-hook" "$MARKER_JSON" \
+    && grep -qF "user-stop-hook" "$MARKER_JSON" \
+    && [ "$(count_tokenless_entries "$MARKER_JSON")" = "5" ]; then
+    pass "install keeps user hooks that merely mention the marker (3 adapter + 2 user)"
+else
+    fail "install dropped a user hook that mentions the marker: $(cat "$SANDBOX/out15" 2>/dev/null)"
+fi
+
+# --- Test 16: the same user hooks survive uninstall --------------------------
+if run_uninstall >"$SANDBOX/out16" 2>&1; then
+    python3 - "$MARKER_JSON" <<'PYEOF' && pass "uninstall removes only adapter-owned commands, keeps marker-mentioning user groups" || fail "uninstall touched a user group that mentions the marker"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    hooks = json.load(handle)["hooks"]
+
+stop_commands = [h.get("command") for g in hooks.get("Stop", []) for h in g.get("hooks", [])]
+assert stop_commands == ["echo TOKENLESS_AGENT_ID=trae user-stop-hook"], stop_commands
+
+pre_commands = [h.get("command") for g in hooks.get("PreToolUse", []) for h in g.get("hooks", [])]
+assert pre_commands == ["echo TOKENLESS_AGENT_ID=trae user-pre-hook"], pre_commands
+PYEOF
+else
+    fail "uninstall exited non-zero: $(cat "$SANDBOX/out16")"
+fi
+
+# --- Test 17: uninstall leaves an unowned config byte-for-byte alone ---------
+export HOME="$SANDBOX/home-untouched"
+mkdir -p "$HOME/.trae-cn"
+printf '{ "version": 1, "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "echo TOKENLESS_AGENT_ID=trae" } ] } ] } }' \
+    > "$HOME/.trae-cn/hooks.json"
+before="$(file_sha "$HOME/.trae-cn/hooks.json")"
+if run_uninstall >/dev/null 2>&1 && [ "$(file_sha "$HOME/.trae-cn/hooks.json")" = "$before" ]; then
+    pass "uninstall does not rewrite a config with no adapter-owned entries"
+else
+    fail "uninstall rewrote a config it owns nothing in"
+fi
+
+# --- Test 18: the generated command executes from a shell-hostile root -------
+# The dispatcher path lands inside a command string the host hands to a shell.
+# An adapter root with a literal `$budget` segment must not be expanded.
+NASTY_ADAPTER_DIR="$SANDBOX/build \$budget 'n' root"
+mkdir -p "$NASTY_ADAPTER_DIR"
+cp -R "$SOURCE_ADAPTER_DIR/trae" "$NASTY_ADAPTER_DIR/"
+rm -f "$NASTY_ADAPTER_DIR/trae/hooks/run-hook.sh"
+cat > "$NASTY_ADAPTER_DIR/trae/hooks/run-hook.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "DISPATCHER-REACHED script=${1:-none}"
+STUB
+chmod 0755 "$NASTY_ADAPTER_DIR/trae/hooks/run-hook.sh"
+
+export HOME="$SANDBOX/home-exec"
+mkdir -p "$HOME/.trae"
+if run_install "$NASTY_ADAPTER_DIR" >"$SANDBOX/out18" 2>&1; then
+    rewrite_cmd="$(python3 -c '
+import json, shlex, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    config = json.load(handle)
+for group in config["hooks"]["PreToolUse"]:
+    for hook in group.get("hooks", []):
+        command = hook.get("command", "")
+        if shlex.split(command)[-1:] == ["rewrite_hook.py"]:
+            print(command)
+            raise SystemExit(0)
+raise SystemExit(1)
+' "$HOME/.trae/hooks.json")"
+    exec_out="$(printf '%s' '{"session_id":"s1","tool_name":"RunCommand","tool_input":{"command":"ls"}}' \
+        | bash -c "$rewrite_cmd" 2>"$SANDBOX/err18")"
+    exec_rc=$?
+    if [ "$exec_rc" -eq 0 ] && [ "$exec_out" = "DISPATCHER-REACHED script=rewrite_hook.py" ]; then
+        pass "generated command executes literally from an adapter root containing \$budget"
+    else
+        fail "generated command did not execute (rc=$exec_rc out='$exec_out' err='$(cat "$SANDBOX/err18")')"
+    fi
+else
+    fail "install from a shell-hostile adapter root failed: $(cat "$SANDBOX/out18")"
+fi
+
+# --- Test 19: detect.sh accepts the bundled rtk runtime ----------------------
+# Packaging ships no standalone `rtk`; RTK runs as `tokenless rtk`. The
+# supported layout (adapter tree staged + tokenless on PATH) must report ready.
+export HOME="$SANDBOX/home-detect-ready"
+mkdir -p "$HOME/.trae-cn" "$HOME/.local/bin" \
+    "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"
+cat > "$HOME/.local/bin/tokenless" <<'FAKE'
+#!/usr/bin/env bash
+if [ "${1:-}" = "rtk" ] && [ "${2:-}" = "--version" ]; then
+    echo "0.49.0"
+    exit 0
+fi
+exit 1
+FAKE
+chmod 0755 "$HOME/.local/bin/tokenless"
+run_install >/dev/null 2>&1
+
+ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    bash "$ADAPTER_DIR/trae/scripts/detect.sh" >"$SANDBOX/out19" 2>&1
+detect_rc=$?
+if [ "$detect_rc" -eq 0 ] && grep -qF "bundled: tokenless rtk 0.49.0" "$SANDBOX/out19"; then
+    pass "detect.sh exits 0 with the bundled rtk runtime and no standalone rtk"
+else
+    fail "detect.sh with bundled rtk exited $detect_rc: $(cat "$SANDBOX/out19")"
+fi
+
+# --- Test 20: detect.sh still reports a broken rtk runtime -------------------
+cat > "$HOME/.local/bin/tokenless" <<'FAKE'
+#!/usr/bin/env bash
+exit 1
+FAKE
+chmod 0755 "$HOME/.local/bin/tokenless"
+ANOLISA_TARGET=trae ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    bash "$ADAPTER_DIR/trae/scripts/detect.sh" >"$SANDBOX/out20" 2>&1
+detect_rc=$?
+if [ "$detect_rc" -eq 2 ] && grep -qF "rtk runtime (tokenless rtk)" "$SANDBOX/out20"; then
+    pass "detect.sh exits 2 and names the rtk runtime when tokenless rtk fails"
+else
+    fail "detect.sh with a broken rtk runtime exited $detect_rc: $(cat "$SANDBOX/out20")"
+fi
+
+# --- Test 21: template and scripts agree on what the adapter owns ------------
+python3 - "$ADAPTER_DIR/trae/hooks/hooks.json" \
+    "$ADAPTER_DIR/trae/scripts/install.sh" \
+    "$ADAPTER_DIR/trae/scripts/uninstall.sh" <<'PYEOF' && pass "template events and scripts stay inside what install/uninstall claim to own" || fail "template drifted from the install/uninstall ownership sets"
+import ast
+import json
+import re
+import shlex
+import sys
+
+template_path, install_path, uninstall_path = sys.argv[1:4]
+with open(template_path, encoding="utf-8") as handle:
+    events = set(json.load(handle).get("hooks", {}))
+
+scripts = set()
+with open(template_path, encoding="utf-8") as handle:
+    template = json.load(handle)
+for groups in template["hooks"].values():
+    for group in groups:
+        for hook in group.get("hooks", []):
+            scripts.add(shlex.split(hook["command"])[-1])
+
+
+def owned_scripts(source_path):
+    with open(source_path, encoding="utf-8") as handle:
+        source = handle.read()
+    match = re.search(r"OWNED_SCRIPTS = frozenset\(\s*(\{[^}]*\})\s*\)", source)
+    assert match, f"OWNED_SCRIPTS not found in {source_path}"
+    return set(ast.literal_eval(match.group(1)))
+
+
+def managed_events(source_path):
+    with open(source_path, encoding="utf-8") as handle:
+        source = handle.read()
+    match = re.search(r"MANAGED_EVENTS = \(([^)]*)\)", source)
+    assert match, f"MANAGED_EVENTS not found in {source_path}"
+    return set(ast.literal_eval("(" + match.group(1) + ")"))
+
+
+assert scripts == owned_scripts(install_path), (scripts, owned_scripts(install_path))
+assert scripts == owned_scripts(uninstall_path), (scripts, owned_scripts(uninstall_path))
+assert events <= managed_events(uninstall_path), (events, managed_events(uninstall_path))
+PYEOF
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
