@@ -83,6 +83,23 @@ impl Http2Parser {
             .contains(&ReassemblyKey::from_ssl_event(event))
     }
 
+    /// Whether `event` belongs to a connection+direction currently holding
+    /// buffered bytes from an incomplete HTTP/2 frame.
+    pub fn has_pending_bytes(&self, event: &SslEvent) -> bool {
+        self.pending
+            .borrow()
+            .peek(&ReassemblyKey::from_ssl_event(event))
+            .is_some_and(|buf| !buf.is_empty())
+    }
+
+    /// Drop any HTTP/2 reassembly/boundary tracking state for this
+    /// connection+direction (e.g. when a reused `ssl_ptr` switches to HTTP/1.x).
+    pub fn clear_tracking(&self, event: &SslEvent) {
+        self.pending
+            .borrow_mut()
+            .pop(&ReassemblyKey::from_ssl_event(event));
+    }
+
     /// Parse all HTTP/2 frames from an SslEvent buffer, completing a frame
     /// split across reads from the retained prefix.
     pub fn parse(&self, event: Rc<SslEvent>) -> Vec<ParsedHttp2Frame> {
