@@ -360,6 +360,17 @@ configuration policy, not a universal btrfs safety guarantee. Initial creation
 is still subject to the percentage cap and available host space. Image-size
 changes take effect at the next daemon restart, not on reload.
 
+On restart, if loop-image size reconciliation fails while the existing image
+remains verified as mounted (for example, before unmounting during a shrink or
+during an in-place resize), the daemon logs a warning and continues startup
+with the current image size. If a shrink fails after unmounting the image, or
+if the mount is missing or its mount state cannot be verified after a
+reconciliation failure, bootstrap aborts instead of continuing on an unmounted
+directory or an exposed underlying mount. Retain the existing image file,
+inspect the logs and fix the reported cause (see
+[Service startup failures](#service-startup-failures)), and then restart the
+service.
+
 An invalid file stops daemon startup; unrelated settings are not replaced with
 defaults. CLI updates validate the complete updated configuration before
 saving, so an invalid update leaves the file unchanged. To repair a legacy
