@@ -2,8 +2,8 @@
 //!
 //! Preserve diagnostics and unknown content while compacting recognized layout and retrievable progress.
 
+mod build_steps;
 mod classify;
-mod cmake_build;
 mod ctest;
 mod gradle;
 mod maven;
@@ -346,27 +346,12 @@ fn render_marker(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BuildStepPasses {
-    cmake_build: bool,
-}
-
-impl BuildStepPasses {
-    fn any(self) -> bool {
-        self.cmake_build
-    }
-
-    fn has_compacted_header(self, lines: &[&str]) -> bool {
-        self.cmake_build && cmake_build::is_compacted(lines)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
 enum Stage1Selection {
     Pnpm,
     Maven,
     Gradle,
     Ctest,
-    BuildSteps(BuildStepPasses),
+    BuildSteps,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -400,72 +385,20 @@ struct Stage1Plan {
     residual: ResidualPolicy,
 }
 
-struct ComposedLayouts {
-    layouts: Vec<LayoutEdit>,
-    // Retain every raw candidate span from Stage 1 (even edits later dropped due to
-    // `diagnostic_mask`) so Stage 2 fallback omission never stashes trace-adjacent build rows.
-    protected_ranges: Vec<Range<usize>>,
-}
-
 fn has_scoped_compacted_header(lines: &[&str]) -> bool {
-    scope::is_any_compacted(lines, &[gradle::HEADER, ctest::HEADER, cmake_build::HEADER])
+    scope::is_any_compacted(
+        lines,
+        &[
+            gradle::HEADER,
+            ctest::HEADER,
+            build_steps::CMAKE_HEADER,
+            build_steps::COMPILE_HEADER,
+        ],
+    )
 }
 
 fn overlaps_diagnostic(diagnostic_mask: &[bool], range: Range<usize>) -> bool {
     diagnostic_mask[range].iter().any(|&is_diag| is_diag)
-}
-
-fn compose_non_overlapping_passes<F>(
-    lines: &[&str],
-    diagnostic_mask: &[bool],
-    passes: impl IntoIterator<Item = F>,
-) -> ComposedLayouts
-where
-    F: FnOnce(&[&str], &[Range<usize>]) -> Vec<LayoutEdit>,
-{
-    let mut all_edits: Vec<LayoutEdit> = Vec::new();
-    let mut protected_ranges: Vec<Range<usize>> = Vec::new();
-    let mut claimed: Vec<Range<usize>> = Vec::new();
-    for pass in passes {
-        if all_edits.len() >= scope::MAX_EDITS {
-            break;
-        }
-        let edits = pass(lines, &claimed);
-        let mut added = false;
-        for edit in edits {
-            if edit.start >= edit.end {
-                continue;
-            }
-            let range = edit.start..edit.end;
-            protected_ranges.push(range.clone());
-            if !overlaps_diagnostic(diagnostic_mask, range) && all_edits.len() < scope::MAX_EDITS {
-                all_edits.push(edit);
-                added = true;
-            }
-        }
-        if added {
-            all_edits.sort_by_key(|edit| edit.start);
-            debug_assert!(all_edits.windows(2).all(|w| w[0].end <= w[1].start));
-            claimed = all_edits.iter().map(|edit| edit.start..edit.end).collect();
-        }
-    }
-    ComposedLayouts {
-        layouts: all_edits,
-        protected_ranges,
-    }
-}
-
-fn plan_build_steps(
-    lines: &[&str],
-    diagnostic_mask: &[bool],
-    passes: BuildStepPasses,
-) -> ComposedLayouts {
-    type StepPlanner = fn(&[&str], &[Range<usize>]) -> Vec<LayoutEdit>;
-    let mut planners: Vec<StepPlanner> = Vec::new();
-    if passes.cmake_build {
-        planners.push(cmake_build::plan);
-    }
-    compose_non_overlapping_passes(lines, diagnostic_mask, planners)
 }
 
 fn plan_stage1(route: DetectedRoute, lines: &[&str], diagnostic_mask: &[bool]) -> Stage1Plan {
@@ -516,20 +449,25 @@ fn plan_stage1(route: DetectedRoute, lines: &[&str], diagnostic_mask: &[bool]) -
             layouts.retain(|edit| !overlaps_diagnostic(diagnostic_mask, edit.start..edit.end));
             Stage1Plan { layouts, residual }
         }
-        DetectedRoute::Stage1(Stage1Selection::BuildSteps(passes)) => {
-            let composed = plan_build_steps(lines, diagnostic_mask, passes);
-            let residual = if composed.layouts.is_empty() && passes.has_compacted_header(lines) {
+        DetectedRoute::Stage1(Stage1Selection::BuildSteps) => {
+            let raw_layouts = build_steps::plan(lines);
+            let protected_ranges = raw_layouts
+                .iter()
+                .map(|edit| edit.start..edit.end)
+                .collect::<Vec<_>>();
+            let layouts = raw_layouts
+                .into_iter()
+                .filter(|edit| !overlaps_diagnostic(diagnostic_mask, edit.start..edit.end))
+                .collect::<Vec<_>>();
+            let residual = if layouts.is_empty() && build_steps::is_compacted(lines) {
                 ResidualPolicy::KeepResidual
             } else {
                 ResidualPolicy::ScopedMixed {
-                    is_protected_step: cmake_build::is_custom_counter_step,
-                    protected_ranges: composed.protected_ranges,
+                    is_protected_step: build_steps::is_protected_step,
+                    protected_ranges,
                 }
             };
-            Stage1Plan {
-                layouts: composed.layouts,
-                residual,
-            }
+            Stage1Plan { layouts, residual }
         }
         DetectedRoute::Scored(format) => Stage1Plan {
             layouts: Vec::new(),
@@ -662,10 +600,8 @@ fn detect_log(input: &str) -> DetectedLog {
     let maven = maven::detect(&sample);
     let gradle = gradle::detect(&sample);
     let ctest = ctest::detect(&sample);
-    let build_steps = BuildStepPasses {
-        cmake_build: cmake_build::detect(&sample),
-    };
-    // Keep CR visible to Maven, Gradle, CTest, and CMakeBuild, whose layout grammars only handle LF records.
+    let build_steps = build_steps::detect(&sample);
+    // Keep CR visible to Maven, Gradle, CTest, and BuildSteps, whose layout grammars only handle LF records.
     // Existing detectors retain the CRLF normalization previously done by lines().
     for line in &mut sample {
         if line.ends_with('\r') {
@@ -680,10 +616,8 @@ fn detect_log(input: &str) -> DetectedLog {
         Some(DetectedRoute::Stage1(Stage1Selection::Gradle))
     } else if ctest {
         Some(DetectedRoute::Stage1(Stage1Selection::Ctest))
-    } else if build_steps.any() {
-        Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps(
-            build_steps,
-        )))
+    } else if build_steps {
+        Some(DetectedRoute::Stage1(Stage1Selection::BuildSteps))
     } else {
         detect_scored_format(&sample)
             .or_else(|| detect_generic(&sample))
@@ -805,6 +739,10 @@ fn sample_lines(input: &str) -> Vec<String> {
     sampled.extend(tail);
     sampled
 }
+
+#[cfg(test)]
+#[path = "../tests/common/literal_oracle.rs"]
+mod oracle;
 
 #[cfg(test)]
 mod tests;

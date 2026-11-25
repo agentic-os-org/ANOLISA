@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture pinned CTest workloads without modifying their CMake definitions."""
+"""Capture pinned C/C++ CTest, build, and verbose compiler workloads offline."""
 
 from __future__ import annotations
 
@@ -44,6 +44,24 @@ PROJECTS: dict[str, tuple[str, str, str, list[str], bool]] = {
         [],
         False,
     ),
+}
+
+NATIVE_MAKE_PROJECTS: dict[str, tuple[str, str, str]] = {
+    "zstd": (
+        "facebook/zstd",
+        "v1.5.7",
+        "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+    ),
+}
+
+ALL_PROJECT_NAMES: tuple[str, ...] = (*PROJECTS.keys(), *NATIVE_MAKE_PROJECTS.keys())
+
+FAILURE_DIAGNOSTIC_MARKERS: dict[str, tuple[str, ...]] = {
+    "clang_ninja_verbose_failure": (
+        "FAILED:",
+        "identifier '_kBrotliContextLookupTable' is reserved",
+    ),
+    "failure_unknown_target": ("unknown target 'tokenless_nonexistent_target'",),
 }
 
 
@@ -205,12 +223,12 @@ def capture(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--project", choices=PROJECTS, required=True)
+    parser.add_argument("--project", choices=ALL_PROJECT_NAMES, required=True)
     parser.add_argument(
         "--suite",
-        choices=("ctest", "build", "all"),
+        choices=("ctest", "build", "verbose", "all"),
         default="ctest",
-        help="Capture suite: 'ctest' (default, ctest_serial + ctest_parallel), 'build' (ninja/make build runs), or 'all'",
+        help="Capture suite: 'ctest' (default), 'build' (ninja/make cold+incremental), 'verbose' (VERBOSE=1/ninja -v/GNU Make V=1), or 'all'",
     )
     parser.add_argument(
         "--sources-dir",
@@ -221,8 +239,153 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def verbose_runs_for_project(project: str) -> list[tuple[str, list[list[str]], list[str], bool]]:
+    if project in NATIVE_MAKE_PROJECTS:
+        return [
+            (
+                "make_lib_v1_gcc",
+                [],
+                ["make", "-C", "/work/source/lib", "-j", "2", "V=1", "libzstd.a"],
+                True,
+            ),
+            (
+                "make_lib_v1_clang",
+                [["make", "-C", "/work/source/lib", "clean"]],
+                ["make", "-C", "/work/source/lib", "-j", "2", "CC=clang", "V=1", "libzstd.a"],
+                True,
+            ),
+            (
+                "make_all_v1_gcc",
+                [["make", "-C", "/work/source", "clean"]],
+                ["make", "-C", "/work/source", "-j", "2", "V=1", "lib-release", "zstd-release"],
+                True,
+            ),
+        ]
+
+    cmake_opts = PROJECTS[project][3]
+    runs: list[tuple[str, list[list[str]], list[str], bool]] = [
+        (
+            "ninja_verbose",
+            [
+                ["cmake", "-E", "rm", "-rf", "/work/build-ninja"],
+                [
+                    "cmake",
+                    "-S",
+                    "/work/source",
+                    "-B",
+                    "/work/build-ninja",
+                    "-G",
+                    "Ninja",
+                    *cmake_opts,
+                ],
+            ],
+            ["cmake", "--build", "/work/build-ninja", "-v"],
+            True,
+        ),
+        (
+            "make_verbose",
+            [
+                ["cmake", "-E", "rm", "-rf", "/work/build-make"],
+                [
+                    "cmake",
+                    "-S",
+                    "/work/source",
+                    "-B",
+                    "/work/build-make",
+                    "-G",
+                    "Unix Makefiles",
+                    *cmake_opts,
+                ],
+            ],
+            ["cmake", "--build", "/work/build-make", "--clean-first", "-j", "2", "--", "VERBOSE=1"],
+            True,
+        ),
+        (
+            "clang_make_verbose",
+            [
+                [
+                    "cmake",
+                    "-S",
+                    "/work/source",
+                    "-B",
+                    "/work/build-make-clang",
+                    "-G",
+                    "Unix Makefiles",
+                    "-DCMAKE_C_COMPILER=clang",
+                    "-DCMAKE_CXX_COMPILER=clang++",
+                    *cmake_opts,
+                ]
+            ],
+            ["cmake", "--build", "/work/build-make-clang", "-j", "2", "--", "VERBOSE=1"],
+            True,
+        ),
+        (
+            "clang_ninja_verbose",
+            [
+                [
+                    "cmake",
+                    "-S",
+                    "/work/source",
+                    "-B",
+                    "/work/build-ninja-clang",
+                    "-G",
+                    "Ninja",
+                    "-DCMAKE_C_COMPILER=clang",
+                    "-DCMAKE_CXX_COMPILER=clang++",
+                    *cmake_opts,
+                ]
+            ],
+            ["cmake", "--build", "/work/build-ninja-clang", "-v"],
+            True,
+        ),
+    ]
+    if project == "brotli":
+        runs.append(
+            (
+                "clang_ninja_verbose_failure",
+                [
+                    [
+                        "cmake",
+                        "-S",
+                        "/work/source",
+                        "-B",
+                        "/work/build-ninja-fail",
+                        "-G",
+                        "Ninja",
+                        "-DCMAKE_C_COMPILER=clang",
+                        "-DCMAKE_C_FLAGS=-Weverything -Werror",
+                        *cmake_opts,
+                    ]
+                ],
+                ["cmake", "--build", "/work/build-ninja-fail", "-v"],
+                False,
+            )
+        )
+    return runs
+
+
+def build_run_provenance(
+    per_run_prep: list[list[str]],
+    cmd_args: list[str],
+    record: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "setup": per_run_prep,
+        "options": cmd_args,
+        "exit_code": int(record["exit_code"]),  # type: ignore[arg-type]
+        "duration_seconds": record["duration_seconds"],
+        "observed_sha256": record["sha256"]["observed"],  # type: ignore[index]
+    }
+
+
 def main() -> None:
     args = build_parser().parse_args()
+
+    is_native_make = args.project in NATIVE_MAKE_PROJECTS
+    if is_native_make and args.suite in ("ctest", "build"):
+        raise SystemExit(
+            f"{args.project} uses native GNU Make and supports only --suite verbose or --suite all"
+        )
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -232,15 +395,22 @@ def main() -> None:
     work.mkdir()
     home.mkdir()
 
-    repo, tag, expected_commit, cmake_opts, ctest_expect_zero = PROJECTS[args.project]
+    if is_native_make:
+        repo, tag, expected_commit = NATIVE_MAKE_PROJECTS[args.project]
+        cmake_opts: list[str] = []
+        ctest_expect_zero = True
+    else:
+        repo, tag, expected_commit, cmake_opts, ctest_expect_zero = PROJECTS[args.project]
     image_id = checked(["docker", "image", "inspect", IMAGE_NAME, "--format", "{{.Id}}"]).strip()
     commit, clone_method = resolve_source(
         args.project, repo, tag, expected_commit, source, args.sources_dir
     )
 
-    tools = ("cmake", "ctest", "ninja", "gcc", "g++")
-    if args.suite in ("build", "all"):
+    tools: tuple[str, ...] = ("cmake", "ctest", "ninja", "gcc", "g++")
+    if args.suite == "build":
         tools = ("cmake", "ctest", "ninja", "make", "gcc", "g++")
+    elif args.suite in ("verbose", "all"):
+        tools = ("cmake", "ctest", "ninja", "make", "gcc", "g++", "clang", "clang++")
     tool_versions = {}
     for tool in tools:
         tool_versions[tool] = checked(
@@ -305,58 +475,68 @@ def main() -> None:
         image_id,
     ]
 
-    prep_steps: list[list[str]] = [
-        ["cmake", "-S", "/work/source", "-B", "/work/build-ninja", "-G", "Ninja", *cmake_opts],
-    ]
-    if args.suite == "ctest":
-        prep_steps.append(["cmake", "--build", "/work/build-ninja"])
-    else:
+    prep_steps: list[list[str]] = []
+    if not is_native_make and args.suite != "verbose":
         prep_steps.append(
-            [
-                "cmake",
-                "-S",
-                "/work/source",
-                "-B",
-                "/work/build-make",
-                "-G",
-                "Unix Makefiles",
-                *cmake_opts,
-            ]
+            ["cmake", "-S", "/work/source", "-B", "/work/build-ninja", "-G", "Ninja", *cmake_opts]
         )
+        if args.suite == "ctest":
+            prep_steps.append(["cmake", "--build", "/work/build-ninja"])
+        elif args.suite in ("build", "all"):
+            prep_steps.append(
+                [
+                    "cmake",
+                    "-S",
+                    "/work/source",
+                    "-B",
+                    "/work/build-make",
+                    "-G",
+                    "Unix Makefiles",
+                    *cmake_opts,
+                ]
+            )
     for step in prep_steps:
         checked(["docker", "run", *common_flags, *real_mount, *step])
 
-    build_runs: list[tuple[str, list[str], bool]] = [
-        ("ninja_cold", ["cmake", "--build", "/work/build-ninja"], True),
-        ("ninja_incremental", ["cmake", "--build", "/work/build-ninja"], True),
-        ("make_cold", ["cmake", "--build", "/work/build-make", "-j", "2"], True),
-        ("make_incremental", ["cmake", "--build", "/work/build-make", "-j", "2"], True),
+    build_runs: list[tuple[str, list[list[str]], list[str], bool]] = [
+        ("ninja_cold", [], ["cmake", "--build", "/work/build-ninja"], True),
+        ("ninja_incremental", [], ["cmake", "--build", "/work/build-ninja"], True),
+        ("make_cold", [], ["cmake", "--build", "/work/build-make", "-j", "2"], True),
+        ("make_incremental", [], ["cmake", "--build", "/work/build-make", "-j", "2"], True),
         (
             "failure_unknown_target",
+            [],
             ["cmake", "--build", "/work/build-ninja", "--target", "tokenless_nonexistent_target"],
             False,
         ),
     ]
-    ctest_runs: list[tuple[str, list[str], bool]] = [
+    ctest_runs: list[tuple[str, list[list[str]], list[str], bool]] = [
         (
             "ctest_serial",
+            [],
             ["ctest", "--test-dir", "/work/build-ninja", "--output-on-failure"],
             ctest_expect_zero,
         ),
         (
             "ctest_parallel",
+            [],
             ["ctest", "--test-dir", "/work/build-ninja", "-j", "2", "--output-on-failure"],
             ctest_expect_zero,
         ),
     ]
+    verbose_runs = verbose_runs_for_project(args.project)
     if args.suite == "ctest":
         runs = ctest_runs
     elif args.suite == "build":
         runs = build_runs
+    elif args.suite == "verbose":
+        runs = verbose_runs
+    elif is_native_make:
+        runs = verbose_runs
     else:
-        runs_by_name = {entry[0]: entry for entry in [*build_runs, *ctest_runs]}
+        runs_by_name = {entry[0]: entry for entry in [*build_runs, *ctest_runs, *verbose_runs]}
         # CTest reads /work/build-ninja produced by ninja_cold, and incremental runs follow cold runs.
-        all_suite_order = (
+        all_suite_order = [
             "ninja_cold",
             "ninja_incremental",
             "ctest_serial",
@@ -364,11 +544,14 @@ def main() -> None:
             "make_cold",
             "make_incremental",
             "failure_unknown_target",
-        )
+            *(entry[0] for entry in verbose_runs),
+        ]
         runs = [runs_by_name[name] for name in all_suite_order]
 
     provenance_runs: dict[str, dict[str, object]] = {}
-    for name, cmd_args, run_expect_zero in runs:
+    for name, per_run_prep, cmd_args, run_expect_zero in runs:
+        for step in per_run_prep:
+            checked(["docker", "run", *common_flags, *real_mount, *step])
         container_name = f"tokenless-ctest-{args.project}-{name}-{os.getpid()}"
         command = ["docker", "run", *common_flags, "--name", container_name, *real_mount, *cmd_args]
         recorded_command = [*sanitized_prefix, *cmd_args]
@@ -378,12 +561,16 @@ def main() -> None:
             raise SystemExit(f"{args.project}/{name}: expected exit 0, got {exit_code}")
         if not run_expect_zero and exit_code == 0:
             raise SystemExit(f"{args.project}/{name}: expected non-zero exit, got 0")
-        provenance_runs[name] = {
-            "options": cmd_args,
-            "exit_code": exit_code,
-            "duration_seconds": record["duration_seconds"],
-            "observed_sha256": record["sha256"]["observed"],  # type: ignore[index]
-        }
+        if not run_expect_zero:
+            observed_text = (output / name / "observed.txt").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            for marker in FAILURE_DIAGNOSTIC_MARKERS.get(name, ()):
+                if marker not in observed_text:
+                    raise SystemExit(
+                        f"{args.project}/{name}: non-zero exit ({exit_code}) missing expected diagnostic {marker!r}"
+                    )
+        provenance_runs[name] = build_run_provenance(per_run_prep, cmd_args, record)
 
     (output / "provenance.json").write_text(
         json.dumps(
@@ -401,7 +588,7 @@ def main() -> None:
         )
         + "\n"
     )
-    print(f"{args.project}: captured {len(runs)} CTest runs into {output}", flush=True)
+    print(f"{args.project}: captured {len(runs)} runs into {output}", flush=True)
 
 
 if __name__ == "__main__":

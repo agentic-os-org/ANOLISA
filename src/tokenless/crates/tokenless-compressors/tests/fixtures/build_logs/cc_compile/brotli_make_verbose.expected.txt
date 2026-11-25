@@ -1,0 +1,128 @@
+/usr/bin/cmake -S/work/source -B/work/build-make --check-build-system CMakeFiles/Makefile.cmake 0
+/usr/bin/cmake -E cmake_progress_start /work/build-make/CMakeFiles /work/build-make//CMakeFiles/progress.marks
+/usr/bin/gmake  -f CMakeFiles/Makefile2 all
+gmake[1]: Entering directory '/work/build-make'
+/usr/bin/gmake  -f CMakeFiles/brotlicommon.dir/build.make CMakeFiles/brotlicommon.dir/depend
+gmake[2]: Entering directory '/work/build-make'
+cd /work/build-make && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make /work/build-make /work/build-make/CMakeFiles/brotlicommon.dir/DependInfo.cmake "--color="
+gmake[2]: Leaving directory '/work/build-make'
+/usr/bin/gmake  -f CMakeFiles/brotlicommon.dir/build.make CMakeFiles/brotlicommon.dir/build
+gmake[2]: Entering directory '/work/build-make'
+C/C++ compile templates (id<TAB>fields; interleave with literals): {"rows":12,"literals":[["[","%] Building C object CMakeFiles/brotlicommon.dir/c/common/",".c.o"],["/usr/bin/cc -DBROTLICOMMON_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlicommon.dir/c/common/",".c.o -MF CMakeFiles/brotlicommon.dir/c/common/",".c.o.d -o CMakeFiles/brotlicommon.dir/c/common/",".c.o -c /work/source/c/common/",".c"]]}
+0	  2	constants
+1	constants	constants	constants	constants
+0	  5	context
+1	context	context	context	context
+0	  7	dictionary
+1	dictionary	dictionary	dictionary	dictionary
+0	 10	platform
+1	platform	platform	platform	platform
+0	 12	shared_dictionary
+1	shared_dictionary	shared_dictionary	shared_dictionary	shared_dictionary
+0	 15	transform
+1	transform	transform	transform	transform
+[ 17%] Linking C shared library libbrotlicommon.so
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotlicommon.dir/link.txt --verbose=1
+/usr/bin/cc -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libbrotlicommon.so.1 -o libbrotlicommon.so.1.2.1 CMakeFiles/brotlicommon.dir/c/common/constants.c.o CMakeFiles/brotlicommon.dir/c/common/context.c.o CMakeFiles/brotlicommon.dir/c/common/dictionary.c.o CMakeFiles/brotlicommon.dir/c/common/platform.c.o CMakeFiles/brotlicommon.dir/c/common/shared_dictionary.c.o CMakeFiles/brotlicommon.dir/c/common/transform.c.o  -lm 
+/usr/bin/cmake -E cmake_symlink_library libbrotlicommon.so.1.2.1 libbrotlicommon.so.1 libbrotlicommon.so
+gmake[2]: Leaving directory '/work/build-make'
+[ 17%] Built target brotlicommon
+/usr/bin/gmake  -f CMakeFiles/brotlidec.dir/build.make CMakeFiles/brotlidec.dir/depend
+/usr/bin/gmake  -f CMakeFiles/brotlienc.dir/build.make CMakeFiles/brotlienc.dir/depend
+gmake[2]: Entering directory '/work/build-make'
+cd /work/build-make && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make /work/build-make /work/build-make/CMakeFiles/brotlidec.dir/DependInfo.cmake "--color="
+gmake[2]: Entering directory '/work/build-make'
+cd /work/build-make && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make /work/build-make /work/build-make/CMakeFiles/brotlienc.dir/DependInfo.cmake "--color="
+gmake[2]: Leaving directory '/work/build-make'
+/usr/bin/gmake  -f CMakeFiles/brotlidec.dir/build.make CMakeFiles/brotlidec.dir/build
+gmake[2]: Entering directory '/work/build-make'
+gmake[2]: Leaving directory '/work/build-make'
+/usr/bin/gmake  -f CMakeFiles/brotlienc.dir/build.make CMakeFiles/brotlienc.dir/build
+gmake[2]: Entering directory '/work/build-make'
+C/C++ compile templates (id<TAB>fields; interleave with literals): {"rows":14,"literals":[["[","%] Building C object CMakeFiles/brotlidec.dir/c/dec/",".c.o"],["/usr/bin/cc -DBROTLIDEC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlidec.dir/c/dec/",".c.o -MF CMakeFiles/brotlidec.dir/c/dec/",".c.o.d -o CMakeFiles/brotlidec.dir/c/dec/",".c.o -c /work/source/c/dec/",".c"],["[","%] Building C object ",".c.o"],["/usr/bin/cc -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT ",".c.o -MF ",".c.o.d -o ",".c.o -c ",".c"]]}
+0	 20	bit_reader
+1	bit_reader	bit_reader	bit_reader	bit_reader
+2	 22	CMakeFiles/brotlienc.dir/c/enc/backward_references
+3	CMakeFiles/brotlienc.dir/c/enc/backward_references	CMakeFiles/brotlienc.dir/c/enc/backward_references	CMakeFiles/brotlienc.dir/c/enc/backward_references	/work/source/c/enc/backward_references
+0	 25	decode
+1	decode	decode	decode	decode
+0	 27	huffman
+1	huffman	huffman	huffman	huffman
+0	 30	prefix
+1	prefix	prefix	prefix	prefix
+0	 32	state
+1	state	state	state	state
+0	 35	static_init
+1	static_init	static_init	static_init	static_init
+[ 37%] Linking C shared library libbrotlidec.so
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotlidec.dir/link.txt --verbose=1
+/usr/bin/cc -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libbrotlidec.so.1 -o libbrotlidec.so.1.2.1 CMakeFiles/brotlidec.dir/c/dec/bit_reader.c.o CMakeFiles/brotlidec.dir/c/dec/decode.c.o CMakeFiles/brotlidec.dir/c/dec/huffman.c.o CMakeFiles/brotlidec.dir/c/dec/prefix.c.o CMakeFiles/brotlidec.dir/c/dec/state.c.o CMakeFiles/brotlidec.dir/c/dec/static_init.c.o  -Wl,-rpath,/work/build-make: -lm libbrotlicommon.so.1.2.1 -lm 
+/usr/bin/cmake -E cmake_symlink_library libbrotlidec.so.1.2.1 libbrotlidec.so.1 libbrotlidec.so
+gmake[2]: Leaving directory '/work/build-make'
+[ 37%] Built target brotlidec
+C/C++ compile templates (id<TAB>fields; interleave with literals): {"rows":44,"literals":[["[","%] Building C object CMakeFiles/brotlienc.dir/c/enc/",".c.o"],["/usr/bin/cc -DBROTLIENC_SHARED_COMPILATION -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -fPIC -MD -MT CMakeFiles/brotlienc.dir/c/enc/",".c.o -MF CMakeFiles/brotlienc.dir/c/enc/",".c.o.d -o CMakeFiles/brotlienc.dir/c/enc/",".c.o -c /work/source/c/enc/",".c"]]}
+0	 40	backward_references_hq
+1	backward_references_hq	backward_references_hq	backward_references_hq	backward_references_hq
+0	 42	bit_cost
+1	bit_cost	bit_cost	bit_cost	bit_cost
+0	 45	block_splitter
+1	block_splitter	block_splitter	block_splitter	block_splitter
+0	 47	brotli_bit_stream
+1	brotli_bit_stream	brotli_bit_stream	brotli_bit_stream	brotli_bit_stream
+0	 50	cluster
+1	cluster	cluster	cluster	cluster
+0	 52	command
+1	command	command	command	command
+0	 55	compound_dictionary
+1	compound_dictionary	compound_dictionary	compound_dictionary	compound_dictionary
+0	 57	compress_fragment
+1	compress_fragment	compress_fragment	compress_fragment	compress_fragment
+0	 60	compress_fragment_two_pass
+1	compress_fragment_two_pass	compress_fragment_two_pass	compress_fragment_two_pass	compress_fragment_two_pass
+0	 62	dictionary_hash
+1	dictionary_hash	dictionary_hash	dictionary_hash	dictionary_hash
+0	 65	encode
+1	encode	encode	encode	encode
+0	 67	encoder_dict
+1	encoder_dict	encoder_dict	encoder_dict	encoder_dict
+0	 70	entropy_encode
+1	entropy_encode	entropy_encode	entropy_encode	entropy_encode
+0	 72	fast_log
+1	fast_log	fast_log	fast_log	fast_log
+0	 75	histogram
+1	histogram	histogram	histogram	histogram
+0	 77	literal_cost
+1	literal_cost	literal_cost	literal_cost	literal_cost
+0	 80	memory
+1	memory	memory	memory	memory
+0	 82	metablock
+1	metablock	metablock	metablock	metablock
+0	 85	static_dict
+1	static_dict	static_dict	static_dict	static_dict
+0	 87	static_dict_lut
+1	static_dict_lut	static_dict_lut	static_dict_lut	static_dict_lut
+0	 90	static_init
+1	static_init	static_init	static_init	static_init
+0	 92	utf8_util
+1	utf8_util	utf8_util	utf8_util	utf8_util
+[ 95%] Linking C shared library libbrotlienc.so
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotlienc.dir/link.txt --verbose=1
+/usr/bin/cc -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libbrotlienc.so.1 -o libbrotlienc.so.1.2.1 CMakeFiles/brotlienc.dir/c/enc/backward_references.c.o CMakeFiles/brotlienc.dir/c/enc/backward_references_hq.c.o CMakeFiles/brotlienc.dir/c/enc/bit_cost.c.o CMakeFiles/brotlienc.dir/c/enc/block_splitter.c.o CMakeFiles/brotlienc.dir/c/enc/brotli_bit_stream.c.o CMakeFiles/brotlienc.dir/c/enc/cluster.c.o CMakeFiles/brotlienc.dir/c/enc/command.c.o CMakeFiles/brotlienc.dir/c/enc/compound_dictionary.c.o CMakeFiles/brotlienc.dir/c/enc/compress_fragment.c.o CMakeFiles/brotlienc.dir/c/enc/compress_fragment_two_pass.c.o CMakeFiles/brotlienc.dir/c/enc/dictionary_hash.c.o CMakeFiles/brotlienc.dir/c/enc/encode.c.o CMakeFiles/brotlienc.dir/c/enc/encoder_dict.c.o CMakeFiles/brotlienc.dir/c/enc/entropy_encode.c.o CMakeFiles/brotlienc.dir/c/enc/fast_log.c.o CMakeFiles/brotlienc.dir/c/enc/histogram.c.o CMakeFiles/brotlienc.dir/c/enc/literal_cost.c.o CMakeFiles/brotlienc.dir/c/enc/memory.c.o CMakeFiles/brotlienc.dir/c/enc/metablock.c.o CMakeFiles/brotlienc.dir/c/enc/static_dict.c.o CMakeFiles/brotlienc.dir/c/enc/static_dict_lut.c.o CMakeFiles/brotlienc.dir/c/enc/static_init.c.o CMakeFiles/brotlienc.dir/c/enc/utf8_util.c.o  -Wl,-rpath,/work/build-make: -lm libbrotlicommon.so.1.2.1 -lm 
+/usr/bin/cmake -E cmake_symlink_library libbrotlienc.so.1.2.1 libbrotlienc.so.1 libbrotlienc.so
+gmake[2]: Leaving directory '/work/build-make'
+[ 95%] Built target brotlienc
+/usr/bin/gmake  -f CMakeFiles/brotli.dir/build.make CMakeFiles/brotli.dir/depend
+gmake[2]: Entering directory '/work/build-make'
+cd /work/build-make && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /work/source /work/source /work/build-make /work/build-make /work/build-make/CMakeFiles/brotli.dir/DependInfo.cmake "--color="
+gmake[2]: Leaving directory '/work/build-make'
+/usr/bin/gmake  -f CMakeFiles/brotli.dir/build.make CMakeFiles/brotli.dir/build
+gmake[2]: Entering directory '/work/build-make'
+[ 97%] Building C object CMakeFiles/brotli.dir/c/tools/brotli.c.o
+/usr/bin/cc -DBROTLI_SHARED_COMPILATION -I/work/source/c/include -O3 -DNDEBUG -MD -MT CMakeFiles/brotli.dir/c/tools/brotli.c.o -MF CMakeFiles/brotli.dir/c/tools/brotli.c.o.d -o CMakeFiles/brotli.dir/c/tools/brotli.c.o -c /work/source/c/tools/brotli.c
+[100%] Linking C executable brotli
+/usr/bin/cmake -E cmake_link_script CMakeFiles/brotli.dir/link.txt --verbose=1
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/brotli.dir/c/tools/brotli.c.o -o brotli  -Wl,-rpath,/work/build-make: libbrotlienc.so.1.2.1 libbrotlidec.so.1.2.1 libbrotlicommon.so.1.2.1 -lm 
+gmake[2]: Leaving directory '/work/build-make'
+[100%] Built target brotli
+gmake[1]: Leaving directory '/work/build-make'
+/usr/bin/cmake -E cmake_progress_start /work/build-make/CMakeFiles 0

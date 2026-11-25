@@ -107,6 +107,96 @@ fn detects_json() {
         detect("{\n  \"items\": [1, 2, 3],\n  \"total\": 3\n}"),
         ContentType::Json
     );
+    for valid in [
+        "{}",
+        "{ \n\t }",
+        "[]",
+        "[   ]",
+        "[0]",
+        "[-0.5e+2, 1]",
+        "[0e0]",
+        "[true]",
+        "[false, null]",
+        "[\"a\"]",
+        "[[1]]",
+        "[ \n  123 , 456 \n ]",
+        "[]\n[{\"id\": 1}, {\"id\": 2}]\n",
+        "{}\n{\"id\": 1}\n",
+        "[0]\n[{\"id\": 1}]\n",
+        "[true]\n[{\"id\": 1}]\n",
+    ] {
+        assert_eq!(detect(valid), ContentType::Json, "{valid:?}");
+    }
+    let padded_object = format!("{{{}\"k\": 1}}", " ".repeat(MAX_SCAN_BYTES));
+    let padded_array = format!("[{}1]", " ".repeat(MAX_SCAN_BYTES));
+    assert_eq!(detect(&padded_object), ContentType::Json);
+    assert_eq!(detect(&padded_array), ContentType::Json);
+
+    for truncated_jsonl in [
+        format!("[1{}]\ntrue\n[]\n", " ".repeat(MAX_SCAN_BYTES - 5)),
+        format!("{{{}}}\ntrue\n{{}}\n", " ".repeat(MAX_SCAN_BYTES - 4)),
+        format!("[1{}]\n1e+5\n[]\n", " ".repeat(MAX_SCAN_BYTES - 7)),
+        format!("[1{}]\n1e5\n[]\n", " ".repeat(MAX_SCAN_BYTES - 6)),
+        format!("[1{}]\n1.5\n[]\n", " ".repeat(MAX_SCAN_BYTES - 6)),
+        format!("[1{}]\n-5\n[]\n", " ".repeat(MAX_SCAN_BYTES - 5)),
+    ] {
+        assert_eq!(
+            detect(&truncated_jsonl),
+            ContentType::Json,
+            "len={}",
+            truncated_jsonl.len()
+        );
+    }
+}
+
+#[test]
+fn bracketed_non_json_and_build_warnings_do_not_hijack_json_detection() {
+    for non_json in [
+        "[] foo [-Wfoo]",
+        "[0] foo [-Wfoo]",
+        "[true] foo [-Wfoo]",
+        "[trueish]",
+        "[01]",
+        "[1.]",
+        "[1e]",
+        "{ int x = 1; }",
+        "{} foo {bar}",
+        "[1]\nt\n[]",
+        "[1]\n1e+\n[]",
+        "[1]\n1e\n[]",
+        "[1]\n1.\n[]",
+    ] {
+        assert_ne!(detect(non_json), ContentType::Json, "{non_json:?}");
+    }
+    let invalid_truncated_jsonl = format!("[1{}]\ntx\n[]\n", " ".repeat(MAX_SCAN_BYTES - 6));
+    assert_ne!(detect(&invalid_truncated_jsonl), ContentType::Json);
+
+    let ninja_verbose_with_warning = concat!(
+        "[1/4] /usr/bin/cc -O3 -Wall -MD -MT obj/a.c.o -MF obj/a.c.o.d -o obj/a.c.o -c /work/src/a.c\n",
+        "[2/4] /usr/bin/cc -O3 -Wall -MD -MT obj/b.c.o -MF obj/b.c.o.d -o obj/b.c.o -c /work/src/b.c\n",
+        "[3/4] /usr/bin/cc -O3 -Wall -MD -MT obj/c.c.o -MF obj/c.c.o.d -o obj/c.c.o -c /work/src/c.c\n",
+        "[4/4] /usr/bin/cc -O3 -Wall -MD -MT obj/d.c.o -MF obj/d.c.o.d -o obj/d.c.o -c /work/src/d.c\n",
+        "/work/src/d.c:12:5: warning: unused variable 'x' [-Wunused-variable]\n",
+    );
+    assert_eq!(detect(ninja_verbose_with_warning), ContentType::BuildLog);
+
+    let ninja_progress_with_warning = concat!(
+        "[1/4] Building C object obj/a.c.o\n",
+        "[2/4] Building C object obj/b.c.o\n",
+        "[3/4] Building C object obj/c.c.o\n",
+        "[4/4] Building C object obj/d.c.o\n",
+        "/work/src/d.c:12:5: warning: unused variable 'x' [-Wunused-variable]\n",
+    );
+    assert_eq!(detect(ninja_progress_with_warning), ContentType::BuildLog);
+
+    let cmake_percent_with_warning = concat!(
+        "[ 25%] Building C object obj/a.c.o\n",
+        "[ 50%] Building C object obj/b.c.o\n",
+        "[ 75%] Building C object obj/c.c.o\n",
+        "[100%] Building C object obj/d.c.o\n",
+        "/work/src/d.c:12:5: warning: unused variable 'x' [-Wunused-variable]\n",
+    );
+    assert_eq!(detect(cmake_percent_with_warning), ContentType::BuildLog);
 }
 
 #[test]
@@ -699,6 +789,67 @@ fn detects_ninja_and_cmake_make_build_logs_and_isolates_quotes() {
         "[1/1] Building CXX object CMakeFiles/app.dir/a.cpp.o\n",
         "[100%] Built target app\n",
         "[1/2] Check configuration\n[2/2] Done\n",
+    ] {
+        assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
+    }
+}
+
+#[test]
+fn detects_cc_compile_logs_and_isolates_quotes() {
+    for content in [
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/brotli_make_verbose.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/brotli_ninja_verbose.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/fmt_ninja_verbose.txt"
+        ),
+        include_str!(
+            "../../../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/zstd_make_lib_v1_gcc.txt"
+        ),
+    ] {
+        assert_eq!(detect(content), ContentType::BuildLog);
+    }
+
+    let valid_log = concat!(
+        "[1/2] /usr/bin/cc -O3 -MD -MT CMakeFiles/app.dir/a.c.o -MF CMakeFiles/app.dir/a.c.o.d -o CMakeFiles/app.dir/a.c.o -c /work/src/a.c\n",
+        "[2/2] /usr/bin/cc -O3 -MD -MT CMakeFiles/app.dir/b.c.o -MF CMakeFiles/app.dir/b.c.o.d -o CMakeFiles/app.dir/b.c.o -c /work/src/b.c\n",
+    );
+    for (before, after, expected) in [
+        (
+            "Verbose compiler output:\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "+ /usr/bin/cat build.log\n".to_owned(),
+            "",
+            ContentType::PlainText,
+        ),
+        (
+            "# Build example\n```text\n".to_owned(),
+            "```\n",
+            ContentType::PlainText,
+        ),
+        ("~~~text\n".to_owned(), "~~~\n", ContentType::PlainText),
+        (
+            format!("name,count\n{}", "sample,42\n".repeat(400)),
+            "",
+            ContentType::Tabular,
+        ),
+        (
+            "use std::io;\nuse std::fmt;\nuse std::fs;\nuse std::env;\nfn main() {}\n".to_owned(),
+            "",
+            ContentType::SourceCode,
+        ),
+    ] {
+        assert_eq!(detect(&format!("{before}{valid_log}{after}")), expected);
+    }
+    for isolated in [
+        "[1/1] /usr/bin/cc -O3 -MD -c /work/src/a.c -o a.o\n",
+        &valid_log.replace('\n', "\r\n"),
     ] {
         assert_eq!(detect(isolated), ContentType::PlainText, "{isolated:?}");
     }

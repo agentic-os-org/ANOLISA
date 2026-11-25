@@ -3,8 +3,6 @@
 //! Each BuildLog splitter provides its own line grammar while delegating control-character limits,
 //! Markdown fence isolation, `\0` sampled detection, and shell/JVM preamble handling here.
 
-use std::ops::Range;
-
 // Lines exceeding MAX_LINE_BYTES close the active scope locally;
 // any single line exceeding MAX_BYTES disables edits for the whole result.
 pub(super) const MAX_LINE_BYTES: usize = 4096;
@@ -195,7 +193,7 @@ pub(super) fn skip_leading_preambles(
     let mut index = 0usize;
     while index < lines.len() {
         let line = lines[index].as_str();
-        if !valid_line(line) {
+        if !valid_line(line) || is_fence_line(line) {
             break;
         }
         if line.trim().is_empty() || is_preamble(line) {
@@ -216,7 +214,7 @@ pub(super) fn leading_preamble_len(
         let Some(line) = complete(raw) else {
             break;
         };
-        if !plain(line) {
+        if !plain(line) || is_fence_line(line) {
             break;
         }
         if line.trim().is_empty() {
@@ -243,6 +241,10 @@ fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {
         let count = trimmed.bytes().take_while(|&b| b == ch).count();
         (count >= 3).then_some((ch, count, &trimmed[count..]))
     })
+}
+
+pub(super) fn is_fence_line(line: &str) -> bool {
+    fence_marker(line).is_some()
 }
 
 pub(super) fn step_fence(open_fence: &mut Option<(u8, usize)>, line: &str) -> bool {
@@ -306,50 +308,4 @@ fn is_env_assignment(token: &str) -> bool {
     !name.is_empty()
         && name.as_bytes()[0].is_ascii_alphabetic()
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-/// Cursor over sorted, non-overlapping half-open line ranges already claimed by earlier passes.
-pub(super) struct ClaimedCursor<'a> {
-    ranges: &'a [Range<usize>],
-    pos: usize,
-}
-
-impl<'a> ClaimedCursor<'a> {
-    /// Creates a cursor over sorted, non-empty, non-overlapping half-open line ranges.
-    pub(super) fn new(ranges: &'a [Range<usize>]) -> Self {
-        // Invariant: callers supply merged sorted non-overlapping spans so one forward pass suffices.
-        debug_assert!(ranges.iter().all(|range| range.start < range.end));
-        debug_assert!(ranges.windows(2).all(|w| w[0].end <= w[1].start));
-        Self { ranges, pos: 0 }
-    }
-
-    /// Advances past ranges ending at or before `index`, returning `Some(new_index)` when `index`
-    /// falls inside one or more contiguous claimed spans.
-    pub(super) fn skip_if_claimed(&mut self, index: usize) -> Option<usize> {
-        while let Some(range) = self.ranges.get(self.pos)
-            && range.end <= index
-        {
-            self.pos += 1;
-        }
-        let mut cur = index;
-        while let Some(range) = self.ranges.get(self.pos)
-            && range.start <= cur
-        {
-            cur = range.end;
-            self.pos += 1;
-        }
-        (cur > index).then_some(cur)
-    }
-
-    /// Returns the exclusive upper bound from `index` before hitting the next claimed range.
-    pub(super) fn unclaimed_end(&mut self, index: usize, limit: usize) -> usize {
-        while let Some(range) = self.ranges.get(self.pos)
-            && range.end <= index
-        {
-            self.pos += 1;
-        }
-        self.ranges
-            .get(self.pos)
-            .map_or(limit, |range| range.start.max(index).min(limit))
-    }
 }

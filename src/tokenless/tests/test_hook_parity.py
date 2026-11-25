@@ -238,6 +238,20 @@ class HookParity(unittest.TestCase):
             "CMake/Ninja templates",
         )
 
+    def test_cc_compile_keeps_shell_metadata_and_uses_existing_replacement_slots(self):
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/cc_compile/brotli_make_verbose.txt",
+            "cmake --build /work/build-make -- VERBOSE=1",
+            "cc-compile-cmake",
+            "C/C++ compile templates",
+        )
+        self._assert_lossless_build_log_envelope(
+            "crates/tokenless-compressors/tests/fixtures/build_logs/cc_compile/zstd_make_lib_v1_gcc.txt",
+            "make -C /work/source/lib V=1 libzstd.a",
+            "cc-compile-make",
+            "C/C++ compile templates",
+        )
+
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")
 class PathListHooks(unittest.TestCase):

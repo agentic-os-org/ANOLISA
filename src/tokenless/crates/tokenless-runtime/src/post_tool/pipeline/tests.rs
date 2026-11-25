@@ -917,6 +917,78 @@ fn cmake_build_obeys_existing_source_status_replacement_and_acceptance_guards() 
     }
 }
 
+const CC_COMPILE_LOG: &str = include_str!(
+    "../../../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/brotli_make_verbose.txt"
+);
+
+const ZSTD_COMPILE_LOG: &str = include_str!(
+    "../../../../tokenless-compressors/tests/fixtures/build_logs/cc_compile/zstd_make_lib_v1_gcc.txt"
+);
+
+#[test]
+fn cc_compile_layout_routes_without_recovery_and_never_writes_stash() {
+    for log in [CC_COMPILE_LOG, ZSTD_COMPILE_LOG] {
+        for mode in 0..4 {
+            let concrete = Arc::new(CountingStore::default());
+            let store: Arc<dyn StashStore> = concrete.clone();
+            let mut req = request(log);
+            let mut config = build_log_config();
+            if mode == 0 {
+                req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None;
+            }
+            if mode == 1 {
+                config.stash_enabled = false;
+            }
+            if mode == 3 {
+                req.content_origin = ContentOrigin::FileRead;
+            }
+            let run =
+                PostToolPipeline::run(&req, &config, if mode == 2 { None } else { Some(&store) });
+            assert_eq!(run.response.disposition, Disposition::Applied);
+            assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+            assert_eq!(run.response.recoverability, Recoverability::Lossless);
+            assert_eq!(
+                run.response.applied_operations,
+                [AppliedOperation::BuildLogReduction]
+            );
+            assert!(run.response.after_tokens < run.response.before_tokens);
+            assert!(run.response.stash_keys.is_empty());
+            assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        }
+    }
+}
+
+#[test]
+fn cc_compile_obeys_existing_source_status_replacement_and_acceptance_guards() {
+    for mode in 0..8 {
+        let concrete = Arc::new(CountingStore::default());
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let mut req = request(CC_COMPILE_LOG);
+        let mut config = build_log_config();
+        match mode {
+            0 => req.status = ToolResultStatus::Error,
+            1 => req.capabilities.replace_output = false,
+            2 => req.content_origin = ContentOrigin::FileContent,
+            3 => req.content_origin = ContentOrigin::ApiResponse,
+            4 => config.min_input_chars = usize::MAX,
+            5 => config.compression_enabled = false,
+            6 => config.timeout = Duration::ZERO,
+            _ => req.command = Some("rg needle build.log".into()),
+        }
+        let run = PostToolPipeline::run(&req, &config, Some(&store));
+        assert_eq!(run.response.output, CC_COMPILE_LOG, "mode {mode}");
+        assert!(run.response.applied_operations.is_empty());
+        assert!(run.response.stash_keys.is_empty());
+        assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+        if mode == 5 {
+            assert_eq!(run.response.disposition, Disposition::DryRun);
+        }
+        if mode == 6 {
+            assert_eq!(run.response.disposition, Disposition::Timeout);
+        }
+    }
+}
+
 #[test]
 fn ctest_layout_routes_without_recovery_and_never_writes_stash() {
     for mode in 0..4 {
@@ -1277,6 +1349,73 @@ fn build_log_from_non_command_origin_passes_through() {
     assert_eq!(run.response.disposition, Disposition::Passthrough);
     assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
     assert!(run.operations.is_empty());
+}
+
+#[test]
+fn ninja_verbose_build_log_ending_in_warning_flag_reaches_build_log_compression() {
+    let mut input = (1..=10)
+        .map(|i| {
+            format!(
+                "[{i}/10] /usr/bin/cc -O3 -Wall -DCOMMON -I/work/include -MD -MT obj/u_{i:02}.c.o -MF obj/u_{i:02}.c.o.d -o obj/u_{i:02}.c.o -c /work/src/u_{i:02}.c\n"
+            )
+        })
+        .collect::<String>();
+    let warning = "/work/src/u_10.c:12:5: warning: unused variable 'x' [-Wunused-variable]\n";
+    input.push_str(warning);
+
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&request(&input), &build_log_config(), Some(&store));
+
+    assert_eq!(run.response.content_type, Some(ContentType::BuildLog));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(run.operations, [AppliedOperation::BuildLogReduction]);
+    assert!(run.response.output.contains(warning));
+    assert!(run.response.after_tokens < run.response.before_tokens);
+    assert!(run.response.stash_keys.is_empty());
+    assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn empty_first_json_lines_passthrough_with_mixed_enabled_and_padded_json_stay_json() {
+    let mut mixed_cfg = build_log_config();
+    mixed_cfg.mixed_content_enabled = true;
+    mixed_cfg.allow_toon = true;
+    mixed_cfg.min_toon_chars = 0;
+
+    let array_jsonl = format!("[]\n{}\n", record_array(40));
+    let object_jsonl = format!("{{}}\n{{\"items\": {}}}\n", record_array(40));
+    let partial_kw_jsonl = format!(
+        "[1{}]\ntrue\n[]\n",
+        " ".repeat(crate::post_tool::content::MAX_SCAN_BYTES - 5)
+    );
+    let partial_exp_jsonl = format!(
+        "[1{}]\n1e+5\n[]\n",
+        " ".repeat(crate::post_tool::content::MAX_SCAN_BYTES - 7)
+    );
+    for input in [
+        &array_jsonl,
+        &object_jsonl,
+        &partial_kw_jsonl,
+        &partial_exp_jsonl,
+    ] {
+        let run = PostToolPipeline::run(&request(input), &mixed_cfg, None);
+        assert_eq!(run.response.content_type, Some(ContentType::Json));
+        assert_eq!(run.response.disposition, Disposition::Passthrough);
+        assert_eq!(&run.response.output, input);
+        assert!(run.response.applied_operations.is_empty());
+        assert!(run.response.stash_keys.is_empty());
+    }
+
+    let padded = format!(
+        "{{{}\"k\": 1}}",
+        " ".repeat(crate::post_tool::content::MAX_SCAN_BYTES)
+    );
+    let padded_cfg = config(Duration::from_secs(1), 2);
+    let run = PostToolPipeline::run(&request(&padded), &padded_cfg, None);
+    assert_eq!(run.response.content_type, Some(ContentType::Json));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(run.response.output, "{\"k\":1}");
 }
 
 #[test]

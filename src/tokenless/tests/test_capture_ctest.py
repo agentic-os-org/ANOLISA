@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -219,15 +220,122 @@ class TestCaptureCtestSourcePinning(unittest.TestCase):
         for repo, *_ in capture_ctest.PROJECTS.values():
             self.assertIn(repo, ctest_repos)
 
-    def test_suite_flag_defaults_to_ctest_and_accepts_build_suites(self) -> None:
+        cc_entries = json.loads(
+            (
+                COMPONENT_ROOT
+                / "crates/tokenless-compressors/tests/fixtures/build_logs/cc_compile/provenance.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(cc_entries), 8)
+        all_specs = {
+            **{name: spec[:4] for name, spec in capture_ctest.PROJECTS.items()},
+            **{
+                name: (repo, tag, commit, [])
+                for name, (repo, tag, commit) in capture_ctest.NATIVE_MAKE_PROJECTS.items()
+            },
+        }
+        cc_repos = set()
+        for entry in cc_entries:
+            env = entry["environment"]
+            cc_repos.add(env["repository"])
+            matching = [spec for spec in all_specs.values() if spec[0] == env["repository"]]
+            self.assertEqual(len(matching), 1)
+            _, expected_tag, expected_commit, base_opts = matching[0]
+            self.assertEqual((env["tag"], env["commit"]), (expected_tag, expected_commit))
+            for opt in base_opts:
+                self.assertIn(opt, env["cmake_options"])
+        self.assertIn("facebook/zstd", cc_repos)
+
+    def test_suite_flag_defaults_to_ctest_and_accepts_build_and_verbose_suites(self) -> None:
         parser = capture_ctest.build_parser()
         default_args = parser.parse_args(["--project", "brotli", "--output", "/tmp/out"])
         self.assertEqual(default_args.suite, "ctest")
-        for suite in ("ctest", "build", "all"):
+        for suite in ("ctest", "build", "verbose", "all"):
             parsed = parser.parse_args(
                 ["--project", "brotli", "--suite", suite, "--output", "/tmp/out"]
             )
             self.assertEqual(parsed.suite, suite)
+        zstd_parsed = parser.parse_args(
+            ["--project", "zstd", "--suite", "verbose", "--output", "/tmp/out"]
+        )
+        self.assertEqual((zstd_parsed.project, zstd_parsed.suite), ("zstd", "verbose"))
+
+    def test_verbose_suite_runs_match_cc_compile_corpus_sweep(self) -> None:
+        cc_compile_test = (
+            COMPONENT_ROOT / "crates/tokenless-compressors/tests/cc_compile.rs"
+        ).read_text(encoding="utf-8")
+        entries_block = re.search(
+            r"let entries:\s*&\[\(&str,\s*&str,\s*bool\)\]\s*=\s*&\[(.*?)\];",
+            cc_compile_test,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(entries_block)
+        assert entries_block is not None
+        sweep_runs = {
+            (project, run, expect_compacted == "true")
+            for project, run, expect_compacted in re.findall(
+                r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*(true|false)\s*,?\s*\)',
+                entries_block.group(1),
+            )
+        }
+        producer_runs = {
+            (project, name, expect_zero)
+            for project in ("brotli", "catch2", "fmt", "zstd")
+            for name, _, _, expect_zero in capture_ctest.verbose_runs_for_project(project)
+        }
+        self.assertEqual(len(sweep_runs), 16)
+        self.assertEqual(sweep_runs, producer_runs)
+
+    def test_failure_diagnostic_markers_cover_failure_runs(self) -> None:
+        self.assertIn("clang_ninja_verbose_failure", capture_ctest.FAILURE_DIAGNOSTIC_MARKERS)
+        self.assertIn("failure_unknown_target", capture_ctest.FAILURE_DIAGNOSTIC_MARKERS)
+        self.assertIn(
+            "FAILED:",
+            capture_ctest.FAILURE_DIAGNOSTIC_MARKERS["clang_ninja_verbose_failure"],
+        )
+
+    def test_build_run_provenance_records_per_run_setup(self) -> None:
+        failure_run = next(
+            entry
+            for entry in capture_ctest.verbose_runs_for_project("brotli")
+            if entry[0] == "clang_ninja_verbose_failure"
+        )
+        _, per_run_prep, cmd_args, _ = failure_run
+        record = {
+            "exit_code": 1,
+            "duration_seconds": 0.5,
+            "sha256": {"observed": "deadbeef"},
+        }
+        prov = capture_ctest.build_run_provenance(per_run_prep, cmd_args, record)
+        self.assertEqual(prov["setup"], per_run_prep)
+        flattened = [arg for step in per_run_prep for arg in step]
+        self.assertIn("-DCMAKE_C_COMPILER=clang", flattened)
+        self.assertIn("-DCMAKE_C_FLAGS=-Weverything -Werror", flattened)
+        self.assertEqual(prov["options"], cmd_args)
+        self.assertEqual(prov["exit_code"], 1)
+
+    def test_verbose_suite_commands_match_committed_provenance(self) -> None:
+        cc_entries = json.loads(
+            (
+                COMPONENT_ROOT
+                / "crates/tokenless-compressors/tests/fixtures/build_logs/cc_compile/provenance.json"
+            ).read_text(encoding="utf-8")
+        )
+        by_project_and_run = {
+            (project, name): cmd_args
+            for project in ("brotli", "catch2", "fmt", "zstd")
+            for name, _, cmd_args, _ in capture_ctest.verbose_runs_for_project(project)
+        }
+        for entry in cc_entries:
+            filename = entry["file"]
+            self.assertTrue(filename.endswith(".txt"), filename)
+            project, run_name = filename[: -len(".txt")].split("_", 1)
+            expected_cmd = by_project_and_run[(project, run_name)]
+            recorded_cmd = entry["capture"]["command"]
+            image_id = entry["environment"]["image_id"]
+            self.assertIn(image_id, recorded_cmd)
+            img_idx = recorded_cmd.index(image_id)
+            self.assertEqual(recorded_cmd[img_idx + 1 :], expected_cmd)
 
 
 if __name__ == "__main__":

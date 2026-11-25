@@ -20,7 +20,7 @@ python3 tests/capture_ctest.py --suite build --project fmt --output /tmp/tokenle
 
 ```bash
 cargo test --locked -p tokenless-compressors --test cmake_build
-cargo test --locked -p tokenless-compressors --lib build_log::cmake_build -- --nocapture
+cargo test --locked -p tokenless-compressors --lib build_log::build_steps -- --nocapture
 CPP_CAPTURE_ROOT=/tmp/tokenless-cpp-captures cargo test --locked -p tokenless-compressors --test cmake_build -- --nocapture
 ```
 
@@ -45,4 +45,4 @@ Committed fixture estimates (`heuristic-v1`):
 | `fmt_make_incremental.txt` | 207 | 207 | 145 | 29.95% |
 | `brotli_unknown_target_failure.txt` | 15 | 15 | 15 | 0.00% |
 
-Failed-command behavior inside the compressor preserves failure diagnostics verbatim; Runtime continues passing `Tool Error` responses through unchanged. Handwritten `Makefile` logs continue using the existing `Make` route, and `Make VERBOSE=1` compiler invocations stay outside the layout pass; custom `[k/N]` / `[PPP%]` counter steps and non-SGR control lines stay verbatim on `CmakeBuild`, while mixed logs retain retrievable omission (scored formats such as `Make` or `Cargo` and command/exit-anchored `Generic` progress) outside compacted CMake/Ninja blocks, custom counter steps, Markdown fences, and non-SGR control lines when Stash and recovery are enabled (and combined configure-and-build logs whose head declines `CmakeBuild` detection likewise remain eligible for anchored `Generic` fallback). Runtime, CLI, and common Hook tests verify routing, metadata preservation, and host guards. No live Agent invocation was performed.
+Failed-command behavior inside the compressor preserves failure diagnostics verbatim; Runtime continues passing `Tool Error` responses through unchanged. Handwritten short `Makefile` logs continue using the existing `Make` route, while `Make VERBOSE=1` and `ninja -v` compiler invocations are compacted alongside CMake/Ninja progress by the unified `build_steps` Stage 1 planner across non-overlapping block spans; custom `[k/N]` / `[PPP%]` counter steps and non-SGR control lines stay verbatim on `build_steps`, while mixed logs retain retrievable omission (scored formats such as `Make` or `Cargo` and command/exit-anchored `Generic` progress) outside compacted template blocks, custom counter steps, Markdown fences, and non-SGR control lines when Stash and recovery are enabled (and combined configure-and-build logs whose head declines `build_steps` detection likewise remain eligible for anchored `Generic` fallback). Runtime, CLI, and common Hook tests verify routing, metadata preservation, and host guards. No live Agent invocation was performed.
