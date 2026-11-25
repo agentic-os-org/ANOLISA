@@ -101,6 +101,11 @@ pub struct CoreConfig {
     pub logging: LoggingConfig,
 }
 
+pub(crate) struct PublicHeadlessConfig {
+    pub config: CoreConfig,
+    pub allow_host_exec: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AiConfig {
     pub active_provider: Option<String>,
@@ -541,6 +546,19 @@ struct PartialCoreConfig {
     logging: Option<PartialLoggingConfig>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublicSystemConfig {
+    #[serde(flatten)]
+    config: PartialCoreConfig,
+    headless: Option<PartialHeadlessConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PartialHeadlessConfig {
+    allow_host_exec: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialAiConfig {
     active_provider: Option<String>,
@@ -958,6 +976,50 @@ impl CoreConfig {
         config
     }
 
+    pub(crate) fn load_public_headless() -> Result<PublicHeadlessConfig, String> {
+        Self::load_public_headless_from_paths(
+            Path::new("/etc/copilot-shell/config.toml"),
+            &config_dir().join("config.toml"),
+            0,
+        )
+    }
+
+    fn load_public_headless_from_paths(
+        system_path: &Path,
+        user_path: &Path,
+        trusted_system_uid: u32,
+    ) -> Result<PublicHeadlessConfig, String> {
+        let system = read_public_system_config(system_path, trusted_system_uid)?;
+        let allow_host_exec = system
+            .as_ref()
+            .and_then(|layer| layer.headless.as_ref())
+            .and_then(|headless| headless.allow_host_exec)
+            .unwrap_or(true);
+        let mut config = Self::default();
+        if let Some(system) = system {
+            apply_user_layer(&mut config, &system.config);
+            let mut system_snapshot = CoreConfig::default();
+            apply_user_layer(&mut system_snapshot, &system.config);
+            config.system_ai = system_snapshot.ai;
+        }
+        if let Some(user) = read_partial_config(user_path) {
+            apply_user_layer(&mut config, &user);
+            let mut user_snapshot = CoreConfig::default();
+            apply_user_layer(&mut user_snapshot, &user);
+            user_snapshot.user_ai = user_snapshot.ai.clone();
+            config.user_ai = user_snapshot.ai.clone();
+        }
+        config.session.compaction.sanitize_ratios();
+        config.apply_env_overrides();
+        config.apply_bare_isolation();
+        config.mcp = McpConfig::default();
+        config.agent.allowed_tools.clear();
+        Ok(PublicHeadlessConfig {
+            config,
+            allow_host_exec,
+        })
+    }
+
     /// Loads provider credentials for Gateway brokered mode without migration.
     ///
     /// The launch profile is already fixed before this method is called. It
@@ -1130,6 +1192,34 @@ impl CoreConfig {
             explicit_cache,
         }
     }
+}
+
+fn read_public_system_config(
+    path: &Path,
+    trusted_uid: u32,
+) -> Result<Option<PublicSystemConfig>, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot inspect system config: {error}")),
+    };
+    if !metadata.is_file() {
+        return Err("system config is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != trusted_uid || metadata.mode() & 0o022 != 0 {
+            return Err("system config ownership or permissions are unsafe".to_string());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = trusted_uid;
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read system config: {error}"))?;
+    toml::from_str::<PublicSystemConfig>(&content)
+        .map(Some)
+        .map_err(|error| format!("invalid system config: {error}"))
 }
 
 #[derive(Debug, Clone)]
@@ -1411,6 +1501,37 @@ mod tests {
         assert!(config.session.auto_persist);
         assert!(config.hooks.enabled);
         assert_eq!(config.hooks.enabled_override, None);
+    }
+
+    #[test]
+    fn legacy_layers_ignore_public_headless_settings() {
+        let temporary = tempfile::tempdir().expect("config fixture");
+        let path = temporary.path().join("config.toml");
+        for headless in [
+            "",
+            "[headless]\nallow_host_exec = false\n",
+            "[headless]\nallow_host_exec = 'invalid'\n",
+            "[headless]\nfuture_option = true\n",
+        ] {
+            std::fs::write(
+                &path,
+                format!("[ai]\noutput_language = 'fixture'\n[hooks]\nenabled = false\n{headless}"),
+            )
+            .expect("config fixture");
+            for paths in [
+                (Some(path.as_path()), None, None),
+                (None, Some(path.as_path()), None),
+                (None, None, Some(path.as_path())),
+            ] {
+                let config = CoreConfig::load_from_paths(paths.0, paths.1, paths.2, true);
+                assert_eq!(
+                    config.ai.output_language.as_deref(),
+                    Some("fixture"),
+                    "{headless}"
+                );
+                assert!(!config.hooks.enabled, "{headless}");
+            }
+        }
     }
 
     #[test]
@@ -2573,5 +2694,45 @@ approval_mode = "balanced"
         assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
         assert!(parsed.ai.providers.contains_key("new-provider"));
         assert_eq!(parsed.ai.providers.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_system_policy_disables_host_exec_without_affecting_legacy_loading() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let system = temp.path().join("system.toml");
+        let user = temp.path().join("user.toml");
+        std::fs::write(&system, "[headless]\nallow_host_exec = false\n").unwrap();
+        std::fs::set_permissions(&system, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let owner = std::fs::metadata(&system).unwrap().uid();
+
+        let loaded = CoreConfig::load_public_headless_from_paths(&system, &user, owner).unwrap();
+        assert!(!loaded.allow_host_exec);
+        assert!(loaded.config.mcp.servers.is_empty());
+        assert!(!loaded.config.session.auto_persist);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_system_policy_rejects_malformed_or_writable_config() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let system = temp.path().join("system.toml");
+        let user = temp.path().join("user.toml");
+        std::fs::write(&system, "not valid TOML").unwrap();
+        let owner = std::fs::metadata(&system).unwrap().uid();
+        assert!(CoreConfig::load_public_headless_from_paths(&system, &user, owner).is_err());
+
+        for headless in ["allow_host_exec = 'invalid'", "future_option = true"] {
+            std::fs::write(&system, format!("[headless]\n{headless}\n")).unwrap();
+            assert!(CoreConfig::load_public_headless_from_paths(&system, &user, owner).is_err());
+        }
+
+        std::fs::write(&system, "[headless]\nallow_host_exec = true\n").unwrap();
+        std::fs::set_permissions(&system, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(CoreConfig::load_public_headless_from_paths(&system, &user, owner).is_err());
     }
 }

@@ -92,22 +92,28 @@ pub fn parse_action_string(raw: &str) -> Result<Action, ParseError> {
     // intentional: it lets the same parse output serve both lookup styles
     // without forcing rule authors to know which token-position the head
     // tool happens to put its subcommand in.
-    let target = tokens.get(1).map(|s| s.to_string());
-    let args: Vec<(String, String)> = tokens
-        .get(1..)
-        .map(|rest| {
-            rest.iter()
-                .map(|t| (t.to_string(), String::new()))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(Action {
+    let args = tokens
+        .iter()
+        .skip(1)
+        .map(|token| token.to_string())
+        .collect::<Vec<_>>();
+    let mut action = shell_action_from_argv(head, &args);
+    action.raw = Some(trimmed.to_string());
+    Ok(action)
+}
+
+/// Preserves executable spelling and exact argv in the existing shell policy shape.
+pub fn shell_action_from_argv(program: &str, args: &[String]) -> Action {
+    Action {
         subsystem: ActionSubsystem::Shell,
-        operation: head.to_string(),
-        target,
-        args,
-        raw: Some(trimmed.to_string()),
-    })
+        operation: program.to_string(),
+        target: args.first().cloned(),
+        args: args
+            .iter()
+            .map(|arg| (arg.clone(), String::new()))
+            .collect(),
+        raw: None,
+    }
 }
 
 /// Split a compound command string on shell metacharacters (`;`, `|`, `&`).

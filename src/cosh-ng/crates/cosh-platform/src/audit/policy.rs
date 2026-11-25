@@ -44,6 +44,88 @@ impl PolicySource {
 }
 
 impl LoadedPolicy {
+    /// Loads every applicable public-headless policy so callers can only narrow access.
+    pub fn load_public_headless() -> Result<Vec<LoadedPolicy>, CoshError> {
+        let explicit = std::env::var_os("COSH_AUDIT_POLICY")
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                let value = value
+                    .into_string()
+                    .map_err(|_| public_policy_error("explicit policy path is not UTF-8"))?;
+                if value.trim().is_empty() {
+                    return Err(public_policy_error("explicit policy path is empty"));
+                }
+                Ok(PathBuf::from(value))
+            })
+            .transpose()?;
+        let mut paths = vec![PathBuf::from("/etc/cosh/audit.toml")];
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(user_policy_path_for_home(Path::new(&home)));
+        }
+        let mut loaded = Vec::new();
+        let mut seen = Vec::new();
+        if let Some(path) = explicit {
+            loaded.push(
+                Self::from_public_file(&path, true)?
+                    .ok_or_else(|| public_policy_error("explicit policy is unavailable"))?,
+            );
+            seen.push(path);
+        }
+        for path in paths {
+            if seen.contains(&path) {
+                continue;
+            }
+            seen.push(path.clone());
+            if let Some(policy) = Self::from_public_file(&path, false)? {
+                loaded.push(policy);
+            }
+        }
+        Ok(loaded)
+    }
+
+    fn from_public_file(path: &Path, required: bool) -> Result<Option<LoadedPolicy>, CoshError> {
+        use std::io::Read;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(nix::libc::O_NONBLOCK);
+        }
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(error)
+                if !required
+                    && error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => {
+                return Err(public_policy_error(format!(
+                    "cannot load policy {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        if !file
+            .metadata()
+            .map_err(|error| public_policy_error(error.to_string()))?
+            .is_file()
+        {
+            return Err(public_policy_error("policy is not a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| public_policy_error(error.to_string()))?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(public_policy_error("policy exceeds the 1 MiB limit"));
+        }
+        Self::from_file_bytes(path, &bytes).map(Some)
+    }
+
     /// Resolve and load the active policy. Returns the loaded policy plus
     /// an optional warning string (e.g. when a configured user file failed
     /// to load and we fell back to the built-in `balanced` preset).
@@ -76,7 +158,11 @@ impl LoadedPolicy {
             )
             .with_hint("check file permissions or remove $COSH_AUDIT_POLICY")
         })?;
-        let policy = parse_and_validate(&bytes).map_err(|msg| {
+        Self::from_file_bytes(path, &bytes)
+    }
+
+    fn from_file_bytes(path: &Path, bytes: &[u8]) -> Result<LoadedPolicy, CoshError> {
+        let policy = parse_and_validate(bytes).map_err(|msg| {
             CoshError::new(
                 ErrorCode::AuditPolicyError,
                 format!("invalid policy at {}: {}", path.display(), msg),
@@ -84,7 +170,7 @@ impl LoadedPolicy {
             )
             .with_hint("see docs/audit-design.md §6 for valid policy syntax")
         })?;
-        let hash = sha256_hex(&bytes);
+        let hash = sha256_hex(bytes);
         let policy_version = format!("user@{}+sha256:{}", policy.version, hash);
         Ok(LoadedPolicy {
             policy,
@@ -115,6 +201,10 @@ impl LoadedPolicy {
             policy_version,
         }
     }
+}
+
+fn public_policy_error(message: impl Into<String>) -> CoshError {
+    CoshError::new(ErrorCode::AuditPolicyError, message, "audit")
 }
 
 /// Public TOML validation entry point — used by `cosh audit policy validate`.

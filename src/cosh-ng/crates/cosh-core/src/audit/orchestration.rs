@@ -61,6 +61,41 @@ impl<'a> CoreAuditScope<'a> {
 }
 
 impl CoreAuditRecorder {
+    pub(crate) fn record_policy_decision(
+        &mut self,
+        scope: CoreAuditScope<'_>,
+        tool: &str,
+        decision: &cosh_types::audit::Decision,
+    ) {
+        let (status, outcome) = match decision.outcome {
+            cosh_types::audit::Outcome::Allow => (AuditOutcomeStatus::Allowed, "allow"),
+            cosh_types::audit::Outcome::Deny => (AuditOutcomeStatus::Denied, "deny"),
+            cosh_types::audit::Outcome::RequireApproval => {
+                (AuditOutcomeStatus::Denied, "approval_required")
+            }
+        };
+        self.ordinary(
+            KnownAuditEventType::PolicyDecision,
+            self.scope_identity(scope),
+            status,
+            "tool",
+            Some(tool),
+            &AuditDecisionData {
+                decision: outcome.to_string(),
+                reason_code: Some(
+                    if decision.matched_rule.is_some() {
+                        "policy_rule"
+                    } else {
+                        "policy_default"
+                    }
+                    .to_string(),
+                ),
+                policy_version: Some(decision.policy_version.clone()),
+                duration_ms: None,
+            },
+        );
+    }
+
     fn scope_identity(&self, scope: CoreAuditScope<'_>) -> cosh_types::audit::AuditIdentity {
         self.identity(
             Some(scope.run_id),

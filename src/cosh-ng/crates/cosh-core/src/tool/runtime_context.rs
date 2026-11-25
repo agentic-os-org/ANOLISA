@@ -86,6 +86,7 @@ mod tests {
                 compacted_through: Some(42),
                 tools: vec!["runtime_context".to_string(), "shell".to_string()],
                 active_extensions: vec!["agent-sec-core".to_string()],
+                cleanup_failure: None,
             },
         );
 

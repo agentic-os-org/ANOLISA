@@ -22,6 +22,7 @@ pub mod write_file;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -98,6 +99,7 @@ pub(crate) struct ToolRuntimeContext {
     pub(crate) compacted_through: Option<usize>,
     pub(crate) tools: Vec<String>,
     pub(crate) active_extensions: Vec<String>,
+    pub(crate) cleanup_failure: Option<Arc<AtomicBool>>,
 }
 
 const WORKSPACE_FILE_TOOLS: &[&str] = &[
@@ -213,6 +215,10 @@ impl SessionWorkspace {
 }
 
 impl ToolContext {
+    pub(crate) fn cleanup_failure(&self) -> Option<Arc<AtomicBool>> {
+        self.runtime.cleanup_failure.clone()
+    }
+
     pub(crate) fn new(cwd: PathBuf, session_id: String, project_root: PathBuf) -> Self {
         let workspace = SessionWorkspace::new(&project_root);
         Self {
@@ -344,6 +350,23 @@ impl ToolRegistry {
             .retain(|name, _| selected.contains(name.as_str()));
         self.ask_user_question_enabled = selected.contains("ask_user_question");
         Ok(())
+    }
+
+    pub(crate) fn public_headless_files(mode: crate::cli::PublicFileTools) -> Self {
+        let mut registry = Self::new();
+        registry.ask_user_question_enabled = false;
+        if mode == crate::cli::PublicFileTools::None {
+            return registry;
+        }
+        registry.register(Box::new(read_file::ReadFileTool::new()));
+        registry.register(Box::new(grep::GrepTool));
+        registry.register(Box::new(glob::GlobTool));
+        registry.register(Box::new(list_directory::ListDirectoryTool));
+        if mode == crate::cli::PublicFileTools::Write {
+            registry.register(Box::new(write_file::WriteFileTool));
+            registry.register(Box::new(edit::EditTool));
+        }
+        registry
     }
 
     pub fn supports_ask_user_question(&self) -> bool {

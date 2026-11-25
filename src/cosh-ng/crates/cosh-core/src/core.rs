@@ -45,7 +45,10 @@ use self::tool_execution::{
 
 mod extensions;
 pub(crate) mod provider_access;
+pub(crate) mod public;
 mod tool_execution;
+
+use self::public::{PublicHeadlessRuntime, PublicTerminalReason};
 #[cfg(test)]
 mod trial_integration_tests;
 
@@ -88,7 +91,7 @@ pub struct CoshCore {
     pub(crate) audit: CoreAuditRecorder,
     pub extension_generation: GenerationController,
     bound_extension_generation: u64,
-    loaded_policy: LoadedPolicy,
+    public: Option<PublicHeadlessRuntime>,
     request_counter: AtomicU32,
     truncator: OutputTruncator,
     loop_detector: LoopDetector,
@@ -138,13 +141,29 @@ impl CoshCore {
         self.approval_timed_out.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn public_failure_code(&self) -> Option<&'static str> {
+        self.public
+            .as_ref()
+            .and_then(PublicHeadlessRuntime::terminal_code)
+    }
+
+    pub(crate) fn public_cleanup_failed(&self) -> bool {
+        self.public
+            .as_ref()
+            .is_some_and(PublicHeadlessRuntime::cleanup_failed)
+    }
+
     fn apply_execution_profile_constraints(&mut self) {
-        if self.execution_profile.is_brokered() {
+        if self.execution_profile.is_brokered() || self.execution_profile.is_public_headless() {
             self.config.hooks = Default::default();
             self.config.mcp = Default::default();
             self.config.skills = Default::default();
             self.config.agent.allowed_tools.clear();
-            self.config.agent.approval_mode = ApprovalMode::Recommend;
+            self.config.agent.approval_mode = if self.execution_profile.is_public_headless() {
+                ApprovalMode::Auto
+            } else {
+                ApprovalMode::Recommend
+            };
             self.hook_system = HookSystem::from_config(&self.config.hooks);
             self.extension_context = None;
         }
@@ -160,6 +179,10 @@ impl CoshCore {
             compacted_through: self.compaction.state().map(|state| state.compacted_through),
             tools: self.tool_names(),
             active_extensions: snapshot.active_extensions.iter().cloned().collect(),
+            cleanup_failure: self
+                .public
+                .as_ref()
+                .map(PublicHeadlessRuntime::cleanup_status),
         }
     }
 
@@ -298,18 +321,31 @@ impl CoshCore {
     /// reserve inside [`crate::compaction::estimate_prefix_tokens`] instead
     /// of being rendered here.
     pub(crate) fn estimate_prefix_tokens(&self) -> u64 {
-        let mut system_prompt = ContextBuilder::build_system_prompt_with_extensions(
-            &self.cwd(),
-            &self.tool_names(),
-            &[],
-            self.config.agent.approval_mode.label(),
-            self.config.ai.output_language.as_deref(),
-            self.extension_context.as_deref(),
-        );
+        let mut system_prompt = self.build_system_prompt(&[]);
         self.workspace
             .append_model_guidance(&mut system_prompt, self.tools.contains("shell"));
         let declarations = serde_json::to_string(&self.tools.declarations()).unwrap_or_default();
         crate::compaction::estimate_prefix_tokens(&system_prompt, &declarations)
+    }
+
+    fn build_system_prompt(&self, skill_summaries: &[(String, String)]) -> String {
+        if self.execution_profile.is_public_headless() {
+            ContextBuilder::build_system_prompt_without_context(
+                &self.cwd(),
+                &self.tool_names(),
+                self.config.agent.approval_mode.label(),
+                self.config.ai.output_language.as_deref(),
+            )
+        } else {
+            ContextBuilder::build_system_prompt_with_extensions(
+                &self.cwd(),
+                &self.tool_names(),
+                skill_summaries,
+                self.config.agent.approval_mode.label(),
+                self.config.ai.output_language.as_deref(),
+                self.extension_context.as_deref(),
+            )
+        }
     }
 
     /// Current effective-context size in tokens under the active projection.
@@ -318,11 +354,42 @@ impl CoshCore {
             .effective_history_tokens(&self.messages, prefix_tokens)
     }
 
+    #[cfg(test)]
     fn classify_tool(&self, tool_name: &str, params: &serde_json::Value) -> Outcome {
+        self.tool_policy_decisions(tool_name, params).0
+    }
+
+    fn tool_policy_decisions(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+    ) -> (Outcome, Vec<cosh_types::audit::Decision>) {
+        let granted = self.classify_tool_grant(tool_name, params);
+        if self.execution_profile.is_public_headless() && granted == Outcome::Allow {
+            let Some(public) = &self.public else {
+                return (Outcome::Deny, Vec::new());
+            };
+            let decisions = public.decisions(tool_name, params);
+            let outcome = PublicHeadlessRuntime::outcome(&decisions);
+            (outcome, decisions)
+        } else {
+            (granted, Vec::new())
+        }
+    }
+
+    fn classify_tool_grant(&self, tool_name: &str, params: &serde_json::Value) -> Outcome {
         let tool = match self.tools.get(tool_name) {
             Some(t) => t,
             None => return Outcome::Deny,
         };
+
+        if self.execution_profile.is_public_headless() {
+            return match tool.kind() {
+                ToolKind::ReadOnly | ToolKind::FileEdit => Outcome::Allow,
+                ToolKind::ShellExec if tool_name == "run_command" => Outcome::Allow,
+                _ => Outcome::RequireApproval,
+            };
+        }
 
         if self.execution_profile.is_brokered() {
             let workspace_write = self.execution_profile.writes_workspace()
@@ -585,14 +652,7 @@ impl CoshCore {
             extra_params: self.extra_params.clone(),
         };
 
-        let mut system_prompt = ContextBuilder::build_system_prompt_with_extensions(
-            &self.cwd(),
-            &self.tool_names(),
-            &skill_summaries,
-            self.config.agent.approval_mode.label(),
-            self.config.ai.output_language.as_deref(),
-            self.extension_context.as_deref(),
-        );
+        let mut system_prompt = self.build_system_prompt(&skill_summaries);
         self.workspace
             .append_model_guidance(&mut system_prompt, self.tools.contains("shell"));
         // Runtime prefix estimate (P): system prompt + serialized tool
@@ -1057,6 +1117,23 @@ impl CoshCore {
             }
 
             if tool_calls.is_empty() {
+                if self.execution_profile.is_public_headless() {
+                    match parse_in_band_question(&text_buf) {
+                        InBandQuestion::Valid(_) => {
+                            if let Some(public) = &mut self.public {
+                                public.terminal = Some(PublicTerminalReason::UserInputRequired);
+                            }
+                            return Err(
+                                "the task needs additional user input before it can continue"
+                                    .to_string(),
+                            );
+                        }
+                        InBandQuestion::Invalid(error) => {
+                            return Err(tool_execution::in_band_question_error(error));
+                        }
+                        InBandQuestion::Absent => {}
+                    }
+                }
                 if in_band_questions_enabled {
                     match parse_in_band_question(&text_buf) {
                         InBandQuestion::Valid(synthetic) => {
@@ -1221,6 +1298,34 @@ impl CoshCore {
                     continue;
                 }
 
+                if let Some(public) = &mut self.public {
+                    if public.tool_calls >= 30 {
+                        fatal_turn = Some(FatalTurn::new(
+                            "agent exceeded the 30-call task tool budget".to_string(),
+                            "max_tool_calls",
+                        ));
+                        self.skip_unexecuted_tool_call(
+                            CoreAuditScope::tool(&run_id, &turn_id, &tc.id),
+                            writer,
+                            tc,
+                        );
+                        continue;
+                    }
+                    public.tool_calls += 1;
+                    if tc.name == ask_user_question::TOOL_NAME {
+                        fatal_turn = Some(FatalTurn::new(
+                            "the task needs additional user input".to_string(),
+                            "user_input_required",
+                        ));
+                        self.skip_unexecuted_tool_call(
+                            CoreAuditScope::tool(&run_id, &turn_id, &tc.id),
+                            writer,
+                            tc,
+                        );
+                        continue;
+                    }
+                }
+
                 let tool_kind = self
                     .tools
                     .get(&tc.name)
@@ -1360,7 +1465,11 @@ impl CoshCore {
                     continue;
                 }
 
-                let outcome = self.classify_tool(&tc.name, &params);
+                let (outcome, decisions) = self.tool_policy_decisions(&tc.name, &params);
+                for decision in decisions {
+                    self.audit
+                        .record_policy_decision(tool_scope, &tc.name, &decision);
+                }
 
                 // 当工具是 skill 且 action=invoke 时，预查 skill_context 透传给
                 // hook（供 agent-sec-core skill-ledger 等扩展使用）。
@@ -1460,6 +1569,16 @@ impl CoshCore {
                 let mut tool_result_already_emitted = false;
                 let tool_start = Instant::now();
                 let result = match outcome {
+                    Outcome::RequireApproval if self.execution_profile.is_public_headless() => {
+                        fatal_turn = Some(FatalTurn::new(
+                            format!(
+                                "tool '{}' requires approval in a non-interactive task",
+                                tc.name
+                            ),
+                            "approval_required",
+                        ));
+                        ToolResult::error("approval required; the tool was not executed")
+                    }
                     Outcome::Allow => {
                         self.audit
                             .record_tool_execution_started(tool_scope, &tc.name, &tool_data)?;
@@ -1632,6 +1751,15 @@ impl CoshCore {
                         ToolResult::error(format!("Tool '{}' denied by security policy", tc.name))
                     }
                 };
+                if self.execution_profile.is_public_headless()
+                    && self.public_failure_code() == Some("cleanup_failed")
+                    && fatal_turn.is_none()
+                {
+                    fatal_turn = Some(FatalTurn::new(
+                        "a supervised command group could not be cleaned up".to_string(),
+                        "cleanup_failed",
+                    ));
+                }
                 // ─── SLS: tool call total/duration/success/fail ───
                 self.metrics.tool_calls_total += 1;
                 self.metrics.tool_calls_duration_ms += tool_start.elapsed().as_millis() as u64;
@@ -1892,6 +2020,10 @@ impl CoshCore {
             // A turn terminal is emitted only after every declared call has a
             // terminal event and a paired history result.
             if let Some(fatal) = fatal_turn {
+                if let Some(public) = &mut self.public {
+                    public.terminal =
+                        Some(PublicTerminalReason::from_shared_code(fatal.reason_code));
+                }
                 self.audit.record_turn_terminal(
                     turn_scope,
                     if fatal.reason_code == "trial_cancelled" {
@@ -1944,7 +2076,7 @@ impl CoshCore {
     }
 
     async fn execute_tool(
-        &self,
+        &mut self,
         name: &str,
         params: serde_json::Value,
         ctx: &ToolContext,
@@ -1960,7 +2092,14 @@ impl CoshCore {
         let result = match self.tools.get(name) {
             Some(tool) => match tool.invoke(params, ctx).await {
                 Ok(r) => r,
-                Err(e) => return ToolResult::error(e),
+                Err(error) => {
+                    if let Some(public) = &mut self.public {
+                        if public.cleanup_failed() {
+                            public.terminal = Some(PublicTerminalReason::CleanupFailed);
+                        }
+                    }
+                    return ToolResult::error(error);
+                }
             },
             None => return ToolResult::error(format!("Unknown tool: {name}")),
         };

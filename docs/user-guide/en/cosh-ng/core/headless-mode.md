@@ -2,10 +2,80 @@
 
 [中文版](../../../zh/cosh-ng/core/headless-mode.md)
 
-Headless mode is a line-delimited JSON protocol on stdin/stdout. Use the
-one-shot form for scripts and the long-running form for a frontend adapter.
+The installed `cosh` entry runs one bounded, non-interactive Core task. The
+separate `cosh-core --headless` interface retains its JSONL protocol for
+existing clients and frontend adapters.
 
-## One-shot prompt
+## Public one-shot task
+
+```bash
+cosh --headless 'Explain Linux load average'
+cosh --headless --output json - < prompt.txt
+cosh --headless --workspace "$PWD" --file-tools=read 'Find the startup entry'
+cosh --headless --workspace "$PWD" --file-tools=write --exec=host \
+  'Reproduce the failing test, fix it, and rerun it'
+```
+
+The full option list is available offline with `cosh --headless --help`.
+The prompt is one non-empty UTF-8 argument, or `-` to read non-terminal stdin
+through EOF. Input is limited to 1 MiB. A prompt argument does not consume
+stdin.
+
+File tools default to `none`; `read` enables read, grep, glob, and directory
+listing, while `write` also enables edit and write. Either grant requires an
+existing `--workspace`. Core file operations are confined to that pinned
+workspace, including protection against path and symlink escapes. Public mode
+does not implicitly load global or project `.copilot-shell/CONTEXT.md` files.
+
+`--exec=host` independently enables the `run_command` tool, which accepts a
+program and an argv array. It requires `--workspace`, uses that directory as
+the initial cwd, and runs as the calling UID. **This is not a Cosh sandbox.**
+Commands retain the account's ability to modify files, access paths outside
+the workspace, and use the network. Commands start in a new session without a
+controlling terminal, receive closed stdin, and have bounded output and
+supervised process-group cleanup.
+
+A nonzero command status is returned to the model as a tool result so it can
+repair and retry. The `cosh` status describes the overall Agent run, not proof
+that a caller's own acceptance check passed. Run that check separately in CI.
+
+Text is the default stdout format. `--output json` emits one object with
+`schema_version`, `status`, `error_code`, and `answer`. Exit `0` means
+`completed`; exit `1` covers provider, authorization, policy, budget, timeout,
+and cleanup failures; exit `2` is invalid input. Missing credentials return
+`auth_required`, required user input returns `user_input_required`, and a tool
+requiring human approval returns `approval_required` without sending a control
+request or starting later calls in that batch.
+Failure to install the task's cancellation handlers returns `runtime_unavailable`,
+not a policy-loading error, and exits with code `1` before Provider contact.
+
+The default timeout is 2 minutes for text/read tasks and 5 minutes when write
+or host execution is enabled. `--timeout` accepts seconds or minutes up to
+30m, including result output. A blocked or broken output pipe exits nonzero;
+the caller must treat a missing or partial result as unknown. SIGINT and SIGTERM
+cancel the task and clean up the supervised command group; JSON reports
+`cancelled` when the output transport permits it. SIGKILL and processes that
+deliberately leave the supervised group are not covered. `--max-turns` accepts
+1–50 and defaults to 12. A task also has a fixed 30-call cumulative tool budget.
+
+Public mode does not discover or start project runtime configuration, Skills,
+Hooks, MCP, or Extensions, and does not write a resumable transcript. It uses
+the trusted user/system Provider configuration without interactive login.
+An administrator can set `[headless] allow_host_exec = false` in the protected
+`/etc/copilot-shell/config.toml`. Setting `AGENT_SEC_COSH_SANDBOX_ALL_SHELL=1`
+or `true` also rejects `--exec=host` before Provider contact. Unreadable,
+malformed, or untrusted mandatory system policy fails as `policy_unavailable`.
+Applicable system, user, and explicitly selected audit policies are enforced
+together; an additional policy can only narrow the grants above. A nonempty
+`COSH_AUDIT_POLICY` must name a readable regular policy file; missing or dangling
+paths fail as `policy_unavailable`. Host commands are checked against both
+`cosh/run_command` and existing `shell` rules with exact argv, using the supplied
+program spelling and its basename. These checks do not inspect commands run
+inside an authorized interpreter and do not provide sandboxing. Policy decision
+versions are recorded without logging raw argv. The Shell entry also verifies
+that its sibling Core has the same package version before starting the task.
+
+## Core JSONL one-shot prompt
 
 ```bash
 cosh-core --headless "Check disk usage; do not modify anything"

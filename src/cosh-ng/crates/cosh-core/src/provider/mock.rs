@@ -9,6 +9,7 @@ pub struct MockProvider {
     pub responses: Vec<Vec<GenerateEvent>>,
     call_index: std::sync::atomic::AtomicUsize,
     echo_history: bool,
+    tool_result_echo: bool,
     repeat_text: Option<String>,
 }
 
@@ -18,6 +19,7 @@ impl MockProvider {
             responses,
             call_index: std::sync::atomic::AtomicUsize::new(0),
             echo_history: false,
+            tool_result_echo: false,
             repeat_text: None,
         }
     }
@@ -38,6 +40,7 @@ impl MockProvider {
             responses: Vec::new(),
             call_index: std::sync::atomic::AtomicUsize::new(0),
             echo_history: false,
+            tool_result_echo: false,
             repeat_text: Some(text.to_string()),
         }
     }
@@ -59,11 +62,34 @@ impl MockProvider {
         ]])
     }
 
+    pub fn tool_call_with_result_echo(tool_name: &str, tool_id: &str, arguments: &str) -> Self {
+        Self {
+            responses: vec![vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: tool_id.to_string(),
+                    name: tool_name.to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: arguments.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ]],
+            call_index: std::sync::atomic::AtomicUsize::new(0),
+            echo_history: false,
+            tool_result_echo: true,
+            repeat_text: None,
+        }
+    }
+
     pub fn history_echo() -> Self {
         Self {
             responses: Vec::new(),
             call_index: std::sync::atomic::AtomicUsize::new(0),
             echo_history: true,
+            tool_result_echo: false,
             repeat_text: None,
         }
     }
@@ -84,6 +110,26 @@ impl ContentGenerator for MockProvider {
         _tools: &[ToolDeclaration],
         _config: &GenerateConfig,
     ) -> Result<GenerateStream, String> {
+        if self.tool_result_echo {
+            let index = self
+                .call_index
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if index == 0 {
+                return Ok(Box::pin(stream::iter(
+                    self.responses.first().cloned().unwrap_or_default(),
+                )));
+            }
+            let result = messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "tool")
+                .map(|message| message.content.as_text())
+                .unwrap_or_else(|| "no tool result".to_string());
+            return Ok(Box::pin(stream::iter(vec![
+                GenerateEvent::TextDelta(result),
+                GenerateEvent::MessageEnd,
+            ])));
+        }
         if let Some(text) = &self.repeat_text {
             return Ok(Box::pin(stream::iter(vec![
                 GenerateEvent::TextDelta(text.clone()),

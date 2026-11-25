@@ -20,6 +20,21 @@ pub fn isolate_process_group(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// Starts the child in a new session with no inherited controlling terminal.
+#[allow(unsafe_code)]
+pub fn isolate_process_session(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            if nix::libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
 /// Sends `SIGKILL` to the whole process group led by `pgid`.
 ///
 /// `ESRCH` means the group already exited and is treated as success. The

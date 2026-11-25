@@ -128,7 +128,7 @@ fn main() {
             std::process::exit(1);
         });
 
-    runtime.block_on(run_until_sigint());
+    runtime.block_on(run_selected_profile());
     // Tokio reads stdin on a blocking thread, which cannot be cancelled while a pipe stays open.
     runtime.shutdown_timeout(Duration::from_millis(100));
 }
@@ -136,24 +136,35 @@ fn main() {
 #[cfg(not(unix))]
 #[tokio::main]
 async fn main() {
-    run().await;
+    run_selected_profile().await;
 }
 
-#[cfg(unix)]
-async fn run_until_sigint() {
+async fn run_selected_profile() {
+    let args = cli::CliArgs::parse();
+    if args.execution_profile.is_public_headless() {
+        std::process::exit(headless::public::run(&args).await);
+    }
     // Applies to every run mode (headless, session-control, registry,
     // compact): the SIGINT wait wraps run() as a whole, see the contract
     // on wait_for_sigint below.
+    #[cfg(unix)]
     tokio::select! {
         _ = wait_for_sigint() => {
             tracing::info!("received SIGINT, shutting down cosh-core");
         }
-        _ = run() => {}
+        _ = run_legacy(args) => {}
     }
+    #[cfg(not(unix))]
+    run_legacy(args).await;
 }
 
-async fn run() {
-    let args = cli::CliArgs::parse();
+async fn run_legacy(args: cli::CliArgs) {
+    if args.has_public_headless_options() {
+        eprintln!(
+            "[cosh-core] --output, --file-tools, --exec, --max-turns and --timeout require public cosh --headless"
+        );
+        std::process::exit(2);
+    }
     let agent_headless = is_agent_headless_mode(&args);
     if args.execution_profile.is_brokered()
         && (!agent_headless
@@ -177,6 +188,9 @@ async fn run() {
             ),
             cli::ExecutionProfile::Legacy => unreachable!(
                 "legacy execution cannot enter the brokered launch validation branch"
+            ),
+            cli::ExecutionProfile::PublicHeadlessV1 => unreachable!(
+                "public headless returns before brokered launch validation"
             ),
         }
         std::process::exit(2);

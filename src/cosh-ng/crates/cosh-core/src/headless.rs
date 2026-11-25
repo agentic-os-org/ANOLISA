@@ -32,6 +32,7 @@ use crate::tool::SessionWorkspace;
 pub(crate) mod auth;
 #[cfg(test)]
 mod live_state_tests;
+pub(crate) mod public;
 mod trial;
 
 use auth::request_auth;
@@ -95,6 +96,9 @@ pub async fn run(
             crate::cli::ExecutionProfile::Legacy => {
                 unreachable!("brokered snapshot branch excludes legacy execution")
             }
+            crate::cli::ExecutionProfile::PublicHeadlessV1 => {
+                unreachable!("public headless uses its own closed snapshot")
+            }
         };
         RuntimeSnapshot::bootstrap(
             RuntimeGeneration::healthy(
@@ -112,6 +116,9 @@ pub async fn run(
                     }
                     crate::cli::ExecutionProfile::Legacy => {
                         unreachable!("brokered snapshot branch excludes legacy execution")
+                    }
+                    crate::cli::ExecutionProfile::PublicHeadlessV1 => {
+                        unreachable!("public headless uses its own closed snapshot")
                     }
                 },
             ),
@@ -478,6 +485,9 @@ fn negotiate_profile(
             crate::cli::ExecutionProfile::Legacy => {
                 unreachable!("brokered negotiation excludes legacy execution")
             }
+            crate::cli::ExecutionProfile::PublicHeadlessV1 => {
+                unreachable!("public headless does not use legacy control negotiation")
+            }
         }
         return Ok(());
     }
@@ -507,6 +517,7 @@ fn brokered_protocol_version(profile: crate::cli::ExecutionProfile) -> u32 {
             BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION
         }
         crate::cli::ExecutionProfile::Legacy => CONTROL_PROTOCOL_VERSION,
+        crate::cli::ExecutionProfile::PublicHeadlessV1 => CONTROL_PROTOCOL_VERSION,
     }
 }
 
@@ -525,6 +536,9 @@ fn brokered_capability_profile(
         }
         crate::cli::ExecutionProfile::Legacy => {
             unreachable!("legacy execution has no brokered capability profile")
+        }
+        crate::cli::ExecutionProfile::PublicHeadlessV1 => {
+            unreachable!("public headless has no brokered capability profile")
         }
     }
 }

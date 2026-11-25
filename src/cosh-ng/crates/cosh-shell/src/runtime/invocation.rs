@@ -11,8 +11,10 @@ use std::os::unix::ffi::OsStrExt;
 use super::cli_args::{parse_raw_shell, LaunchOptions, RawShellKind, ResumeLaunch};
 
 mod exec;
+mod public_headless;
 mod raw;
 pub(crate) use exec::{exec_gateway, exec_shell};
+pub(crate) use public_headless::{exec as exec_public_headless, PublicHeadlessPlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Invocation {
@@ -32,6 +34,7 @@ pub(crate) enum Invocation {
     LoginGuideWorker(String),
     LoginLifecycle(Vec<OsString>),
     Health(Vec<OsString>),
+    PublicHeadless(PublicHeadlessPlan),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +135,9 @@ pub(crate) fn classify_invocation(
 ) -> Invocation {
     if is_cosh_entry(argv0) && matches!(args, [flag] if flag == "--help") {
         return Invocation::Help;
+    }
+    if let Some(plan) = public_headless::plan(argv0, args) {
+        return Invocation::PublicHeadless(plan);
     }
     if args.first().and_then(|arg| arg.to_str())
         == Some(crate::diagnostics::health::runtime::PRIVATE_HEALTH_WORKER_FLAG)
@@ -411,6 +417,7 @@ mod tests {
             Invocation::LoginGuideWorker(path) => panic!("unexpected login guide worker: {path}"),
             Invocation::LoginLifecycle(args) => panic!("unexpected lifecycle: {args:?}"),
             Invocation::Health(args) => panic!("unexpected health command: {args:?}"),
+            Invocation::PublicHeadless(plan) => panic!("unexpected public headless: {plan:?}"),
             Invocation::Login(args) => panic!("unexpected login command: {args:?}"),
             Invocation::ShellIntegration(operation) => {
                 panic!("unexpected shell integration: {operation}")
