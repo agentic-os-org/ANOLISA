@@ -421,6 +421,36 @@ else
     skip "the jq-free branch JSON check (no python3)"
 fi
 
+# A form feed in the directory name: escaping only quotes and backslashes still
+# produced invalid JSON here, because U+000C may not appear raw in a string.
+control_dir="$SANDBOX/$(printf 'bin\ffeed')"
+mkdir -p "$control_dir"
+cp "$quoted_dir/tokenless" "$control_dir/tokenless"
+control_out="$(env -i PATH="$control_dir:$SANDBOX/bin:$nojq_bin" HOME="$FAKE_HOME" \
+    XDG_DATA_HOME="$XDG" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    ANOLISA_COMPONENT=tokenless ANOLISA_TARGET=codex bash "$DETECT_SH" 2>/dev/null)"
+control_rc=$?
+if [ "$control_rc" -eq 0 ]; then
+    pass "detect stays fail-open on a control-character path"
+else
+    fail "detect exited $control_rc on a control-character path"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$control_out" | CONTROL_EXPECT="$control_dir/tokenless" python3 -c '
+import json, os, sys
+document = json.load(sys.stdin)
+assert document["path"] == os.environ["CONTROL_EXPECT"], document
+assert document["installed"] is True, document
+assert document["status"] in ("installable", "missing_prereqs"), document
+'; then
+        pass "the jq-free branch escapes a control character into parseable JSON"
+    else
+        fail "the jq-free branch did not escape a control character: $control_out"
+    fi
+else
+    skip "the control-character JSON check (no python3)"
+fi
+
 echo ""
 echo "Codex adapter tests: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]

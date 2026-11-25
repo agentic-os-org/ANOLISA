@@ -35,10 +35,12 @@
 //! exit successfully without registering anything.
 //!
 //! A detector that publishes a status document owes the caller valid JSON. When
-//! its output was meant to be JSON but does not parse, the answer is treated as
-//! absent rather than letting the exit code stand in for it: a codex detector
-//! without `jq` once interpolated an unescaped path, and the exit 0 that
-//! followed then reported a registration nobody had verified.
+//! its output was meant to be JSON but does not parse, the answer is
+//! [`DetectStatus::Unreadable`]: neither the exit code nor the prose may stand
+//! in for it, because an installer whose exit 0 means "I skipped the work"
+//! would then be reported as a successful registration. A codex detector
+//! without `jq` twice interpolated a path it had not escaped, and each time the
+//! exit 0 that followed claimed a registration nobody had verified.
 //!
 //! Every lifecycle script is Bash, so a host without it cannot report any
 //! status. A detector that cannot be launched is an error rather than an
@@ -157,6 +159,9 @@ enum DetectStatus {
     /// contract and only ever reported the host, so its answer cannot be
     /// mapped to an adapter state. Never offered for installation.
     Unverifiable,
+    /// The detector meant to publish a JSON status and produced something that
+    /// does not parse, so it published nothing. Never offered for installation.
+    Unreadable,
 }
 
 impl DetectStatus {
@@ -168,6 +173,7 @@ impl DetectStatus {
             Self::NotChecked => "n/a",
             Self::Unavailable => "unavailable",
             Self::Unverifiable => "unverified",
+            Self::Unreadable => "unreadable",
         }
     }
 
@@ -334,6 +340,13 @@ fn interpret_detect(
     if let Some(status) = explicit {
         return status;
     }
+    // A detector that promised machine-readable output and broke it has said
+    // nothing. Its exit code may not stand in for the missing answer: for the
+    // detectors that publish JSON the code is a constant, and selecting the
+    // target would run an installer allowed to exit 0 after skipping its work.
+    if status_unreadable(stdout) {
+        return DetectStatus::Unreadable;
+    }
     // `installed` describes a prerequisite such as the tokenless binary, never
     // a registered adapter, so `installed: false` cannot read as ready.
     let uninstalled = published
@@ -355,10 +368,6 @@ fn interpret_detect(
 
     match exit_code {
         Some(0) if uninstalled => DetectStatus::Installable,
-        // A status document that did not parse is not evidence of
-        // registration. Falling back to installable keeps an idempotent
-        // installer in play instead of skipping the registration it would do.
-        Some(0) if status_unreadable(stdout) => DetectStatus::Installable,
         Some(0) => DetectStatus::Ready,
         Some(1) => DetectStatus::Installable,
         _ => DetectStatus::MissingPrereqs,
@@ -370,7 +379,9 @@ fn interpret_detect(
 ///
 /// Every shipped text detector starts its output with `[tokenless]`, so a
 /// leading brace is a deliberate JSON document — a partial one is a bug in the
-/// detector, not a prose line that happens to look like JSON.
+/// detector, not a prose line that happens to look like JSON. The whole output
+/// has to fail: a document that parses and merely carries no recognised field
+/// is the detector's answer, not a broken one.
 fn status_unreadable(stdout: &str) -> bool {
     stdout.trim_start().starts_with('{') && json_objects(stdout).is_empty()
 }
@@ -555,8 +566,9 @@ fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path) {
         );
     }
 
-    // A detector that published unparseable JSON gave no answer, so the status
-    // in its row is this command's fallback rather than the detector's own.
+    // A detector that published unparseable JSON gave no answer, so its target
+    // is not offered for installation: its installer could exit successfully
+    // without registering anything and the run would report that as success.
     let unreadable: Vec<&str> = frameworks
         .iter()
         .filter(|fw| fw.status_unreadable)
@@ -565,12 +577,7 @@ fn print_status(frameworks: &[FrameworkInfo], adapter_dir: &Path) {
     if !unreadable.is_empty() {
         println!();
         for name in unreadable {
-            println!(
-                "warning: {name}'s detector printed output that is not parseable JSON, so its \
-                 answer could not be read and the status above is a fallback. Reinstall \
-                 tokenless to refresh the adapter resources at {dir}.",
-                dir = adapter_dir.display()
-            );
+            println!("warning: {}", unreadable_status_error(name, adapter_dir));
         }
     }
 
@@ -609,6 +616,19 @@ fn incompatible_resources_error(names: &str, adapter_dir: &Path) -> String {
     )
 }
 
+/// Explain why a target whose detector published unparseable output is not
+/// offered for installation.
+fn unreadable_status_error(name: &str, adapter_dir: &Path) -> String {
+    format!(
+        "{name}'s detector printed output that is not parseable JSON, so nothing is known about \
+         the adapter and it was not installed. Its installer may exit successfully without \
+         registering anything, so an unreadable answer must not select it. Reinstall tokenless \
+         to refresh the adapter resources at {dir}, or point ANOLISA_ADAPTER_DIR at a current \
+         adapter directory.",
+        dir = adapter_dir.display()
+    )
+}
+
 /// Run one named `--framework` operation and end with its result.
 fn run_named(
     adapter_dir: &Path,
@@ -633,6 +653,7 @@ fn run_named(
             }
         },
         DetectStatus::Unverifiable => Err((incompatible_resources_error(&fw.name, adapter_dir), 1)),
+        DetectStatus::Unreadable => Err((unreadable_status_error(&fw.name, adapter_dir), 1)),
         other => Err((
             format!("{} is not installable (status: {})", fw.name, other.label()),
             1,
@@ -982,31 +1003,57 @@ mod tests {
     const BROKEN_CODEX_STATUS: &str = "{\n  \"installed\": true,\n  \"status\": \"installable\",\n  \"path\": \"/opt/we\"ird/tokenless\"\n}\n";
 
     #[test]
-    fn an_unparseable_status_document_is_not_readiness() {
+    fn an_unparseable_status_document_selects_nothing() {
         assert!(status_unreadable(BROKEN_CODEX_STATUS));
+        // Neither selectable state may stand in for an answer the detector
+        // failed to publish: ready would skip the registration, and installable
+        // would run an installer allowed to exit 0 after skipping its work.
         assert_eq!(
+            declared(Some(0), BROKEN_CODEX_STATUS),
+            DetectStatus::Unreadable
+        );
+        assert_ne!(declared(Some(0), BROKEN_CODEX_STATUS), DetectStatus::Ready);
+        assert_ne!(
             declared(Some(0), BROKEN_CODEX_STATUS),
             DetectStatus::Installable
         );
-        // A declared tree is the case that regressed: exit 0 alone must not
-        // stand in for an answer the detector failed to publish.
-        assert_ne!(declared(Some(0), BROKEN_CODEX_STATUS), DetectStatus::Ready);
     }
 
     #[test]
-    fn an_unparseable_status_document_changes_no_other_contract() {
-        // A host-only detector is refused either way, and the negative answers
-        // still win over the fallback.
+    fn an_unparseable_document_overrides_every_contract_and_exit_code() {
+        // The document is the answer these detectors owe, so a broken one is
+        // unreadable whatever else the run reported.
+        for contract in [
+            DetectorContract::Declared,
+            DetectorContract::LegacyTriState,
+            DetectorContract::LegacyHostOnly,
+        ] {
+            for exit_code in [Some(0), Some(1), Some(2), None] {
+                assert_eq!(
+                    interpret_detect(exit_code, BROKEN_CODEX_STATUS, contract),
+                    DetectStatus::Unreadable,
+                    "{contract:?} exit {exit_code:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_parseable_document_without_a_status_field_is_still_an_answer() {
+        // Only a document that fails to parse is unreadable. One that parses
+        // and simply carries no recognised field falls through to the exit
+        // code, so an unrelated JSON log cannot disable a working detector.
+        assert!(!status_unreadable("{\"installed\": true}"));
         assert_eq!(
-            legacy_host_only(Some(0), BROKEN_CODEX_STATUS),
-            DetectStatus::Unverifiable
+            declared(Some(0), "{\"installed\": true}"),
+            DetectStatus::Ready
         );
         assert_eq!(
-            declared(Some(1), BROKEN_CODEX_STATUS),
+            declared(Some(1), "{\"version\": \"1.2.3\"}"),
             DetectStatus::Installable
         );
         assert_eq!(
-            declared(Some(2), BROKEN_CODEX_STATUS),
+            declared(Some(2), "{\"version\": \"1.2.3\"}"),
             DetectStatus::MissingPrereqs
         );
     }

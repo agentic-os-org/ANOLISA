@@ -76,15 +76,27 @@ fi
 VERSION_CLEAN="$(echo "$VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")"
 
 # Escape a value for a JSON string. jq does this on the branch below; without it
-# a path holding a quote or a backslash produced invalid JSON, and a caller that
-# cannot parse the status learns nothing about the adapter.
+# a path holding a quote, a backslash or a control character produced invalid
+# JSON, and a caller that cannot parse the status learns nothing about the
+# adapter. Pure shell, so this branch still needs no external tool.
 json_escape() {
-    local text="$1"
+    local text="$1" char oct hex code
     text="${text//\\/\\\\}"   # backslash first, or it re-escapes the rest
     text="${text//\"/\\\"}"     # double quote
-    text="${text//$'\t'/\\t}"    # control characters are not valid in a
-    text="${text//$'\n'/\\n}"    # JSON string; a path carrying one is
-    text="${text//$'\r'/\\r}"    # pathological, so escape the likely three
+    text="${text//$'\b'/\\b}"    # the five control characters JSON names
+    text="${text//$'\f'/\\f}"
+    text="${text//$'\n'/\\n}"
+    text="${text//$'\r'/\\r}"
+    text="${text//$'\t'/\\t}"
+    # The rest of U+0001-U+001F may not appear raw in a JSON string and has no
+    # short form, so it becomes \u00XX. A NUL cannot live in a shell variable.
+    # Builtins only: no fork per code point.
+    for ((code = 1; code < 32; code++)); do
+        printf -v oct '%03o' "$code"
+        printf -v char "\\$oct"
+        printf -v hex '%04x' "$code"
+        text="${text//"$char"/\\u$hex}"
+    done
     printf '%s' "$text"
 }
 

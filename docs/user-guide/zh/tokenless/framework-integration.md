@@ -451,6 +451,8 @@ tokenless init
 
 早于本约定的适配器目录确实会出现：npm 安装会保留属于其他安装的共享适配器目录，`ANOLISA_ADAPTER_DIR` 也接受任意目录，因此其 manifest 可能没有 `"detectContract": "status-v1"` 标记。这类目录不会被一律当作语义未知：其中大多数探测器本来就用三态退出码报告适配器状态，这些结果仍然有效，已验证的注册仍报 `ready`，不会被重新安装。但只探测「宿主」的探测器无法确立适配器状态：Codex 探测的是 tokenless 二进制，Qoder 探测的是宿主 CLI 能力，QwenWork 无论插件是否已 sideload 都返回 `0`。这些目标会列为 `unverified` 且不提供安装，因为它们的安装脚本会在什么都没注册的情况下以成功退出。状态表会点名这些目标并说明刷新方式：重新安装 tokenless，或把 `ANOLISA_ADAPTER_DIR` 指向当前的适配器目录。
 
+若探测器发布了本应是 JSON 的状态文档但无法解析，则报 `unreadable`，同样不提供安装。文档损坏等于没有给出答案；否则一个「跳过工作却以成功退出」的安装脚本会被当作已完成注册转达出去。
+
 **本命令需要 Bash。**`tokenless init` 用 Bash 运行每个目标的 `detect.sh` 与 `install.sh`。无法启动 Bash 时，受影响的框架会列为 `unavailable`，命令带原因以退出码 `1` 结束，而不是报出一个它从未确立过的状态。不使用 Git Bash 的 Windows 环境可以改用 QwenWork 适配器的原生 PowerShell lifecycle，做法见上文「千问办公（Windows x64 本地模式）」一节。
 
 **适配器目录的查找顺序。** 以下位置中第一个包含 `manifest.json`（或模板 `manifest.json.in`）的目录生效：

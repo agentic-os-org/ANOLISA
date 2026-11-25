@@ -1177,34 +1177,94 @@ exit 0
 "#;
 
 #[test]
-fn an_unparseable_status_document_is_not_read_as_ready() {
+fn an_unparseable_status_document_selects_nothing() {
     let fixture = Fixture::new(&[Target::new("one", BROKEN_STATUS_DETECT)]);
 
     let list = run(&fixture, &["init", "--list"]);
     list.assert_code(0);
-    assert_eq!(status_of(&list.stdout, "one"), "installable");
+    assert_eq!(status_of(&list.stdout, "one"), "unreadable");
     assert!(
         list.stdout.contains("not parseable JSON"),
         "the unreadable answer was not reported:\n{}",
         list.stdout
     );
 
-    // Falling back to installable keeps the idempotent installer in play rather
-    // than skipping the registration it would have performed.
+    // Neither selectable state may stand in for the missing answer: ready would
+    // skip the registration, and installable would run an installer that is
+    // allowed to exit 0 after skipping its work.
     let named = run(&fixture, &["init", "--framework", "one"]);
-    named.assert_code(0);
-    assert_eq!(fixture.installed(), vec!["one".to_string()]);
+    named.assert_code(1);
+    assert!(
+        named.combined().contains("not parseable JSON"),
+        "the named command did not explain itself:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "an unreadable target was reported installed:\n{}",
+        named.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command reached the installer: {:?}",
+        fixture.installed()
+    );
+
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert!(
+        fixture.installed().is_empty(),
+        "batch mode selected an unreadable target: {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn a_zero_exit_skip_is_never_reported_as_a_successful_install() {
+    // The shape the shipped Codex installer takes when no host CLI resolves: it
+    // announces the skip and exits 0. With an unreadable detector status the
+    // target must not be selected at all, so that exit 0 cannot be relayed as a
+    // successful registration.
+    let fixture = Fixture::new(&[Target {
+        name: "codex",
+        detect: BROKEN_STATUS_DETECT,
+        install: Some(String::from(
+            "#!/usr/bin/env bash\n\
+             echo '[tokenless] codex CLI not found - skipping plugin registration.'\n",
+        )),
+    }]);
+
+    let named = run(&fixture, &["init", "--framework", "codex"]);
+    named.assert_code(1);
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a skipped registration was reported as success:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("skipping plugin registration"),
+        "the installer ran at all:\n{}",
+        named.combined()
+    );
+
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert!(
+        !batch.combined().contains("skipping plugin registration"),
+        "batch mode ran the installer:\n{}",
+        batch.combined()
+    );
 }
 
 #[test]
 fn an_unparseable_status_document_does_not_resurrect_a_pre_contract_target() {
-    // The host-only inventory still wins: a broken answer from a detector that
-    // never described the adapter cannot make it installable.
+    // A broken answer from a detector that never described the adapter cannot
+    // make it installable, whether or not the tree declares the contract.
     let fixture = Fixture::legacy(&[Target::new("codex", BROKEN_STATUS_DETECT)]);
 
     let list = run(&fixture, &["init", "--list"]);
     list.assert_code(0);
-    assert_eq!(status_of(&list.stdout, "codex"), "unverified");
+    assert_eq!(status_of(&list.stdout, "codex"), "unreadable");
 
     let named = run(&fixture, &["init", "--framework", "codex"]);
     named.assert_code(1);
@@ -1268,6 +1328,75 @@ fn shipped_codex_detector_stays_parseable_without_jq() {
         "a fresh install never reached the installer:\n{}",
         named.combined()
     );
+}
+
+/// The shipped detector against a PATH entry whose name holds a control
+/// character, with no `jq` and a host pin that does not resolve.
+#[test]
+#[cfg(unix)]
+fn shipped_codex_detector_escapes_control_characters_without_jq() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    // A form feed in the directory name: the case that kept the jq-free branch
+    // emitting invalid JSON after quotes and backslashes were handled.
+    let control = fixture._root.path().join("bin\u{000c}");
+    fs::create_dir_all(&control).expect("create control-character directory");
+    write_script(
+        &control.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if !link_shell_tools(&tools) {
+        // No way to build a jq-free PATH here; the adapter shell suite covers
+        // the same detector output.
+        return;
+    }
+    let path = format!(
+        "{}:{}:{}",
+        control.display(),
+        fixture.bin.display(),
+        tools.display()
+    );
+    let unusable_pin = fixture._root.path().join("absent-codex");
+
+    let list = finish(
+        fixture
+            .command_with_path(&["init", "--list"], &path)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    // The same answer the jq branch gives for this input.
+    assert_eq!(status_of(&list.stdout, "codex"), "missing prereqs");
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "the shipped detector emitted unparseable JSON:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a host that cannot register was reported as installed:\n{}",
+        named.combined()
+    );
+    assert_eq!(fixture.install_runs(), 0, "the installer ran");
 }
 
 // ---------------------------------------------------------------------------
