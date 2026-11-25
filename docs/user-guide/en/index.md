@@ -38,6 +38,7 @@ under Getting started.
 - [SkillFS](skillfs/index.md): Organize Skills into stable filesystem views for Agents to discover and read on demand.
 - [Workspace Checkpoint](ws-ckpt/index.md): Create Agent workspace snapshots, compare file differences, and roll back changes when needed.
 - [ktuner](ktuner/index.md): Inspect Linux kernel parameters, get tuning recommendations, and apply or roll back changes.
+- [semantic-arbiter](semantic-arbiter/index.md): Incubating deterministic checks and model-backed judgments for preservation and task scope; no live execution.
 
 <!-- navigation:end -->
 
