@@ -19,6 +19,7 @@ from native_acceptance import Commands, verify_bundle, verify_case
 from native_reports import validate_case
 from native_summary import summarize
 import native_acceptance
+import test_codex_native
 
 
 class NativeTests(GateFixture):
@@ -386,6 +387,24 @@ class NativeTests(GateFixture):
             for case in row.get("cases", [])
             if case["report"] == "json"
         ]
+
+    def test_codex_cli_reports_match_both_pinned_contracts(self) -> None:
+        cases = {case["name"]: case for case in self.manifest["agents"]["codex"]["cases"]}
+        for name in ("native-cli", "native-cli-0163"):
+            contract = cases[name]
+            version_index = contract["argv"].index("--expected-version")
+            version = contract["argv"][version_index + 1]
+            output = (self.root / contract["results"][0]["file"]).parent
+            argv = ["test_codex_native.py", "--aw", "aw", "--codex", "codex",
+                    "--expected-version", version, "--output", str(output)]
+            with self.subTest(version=version), patch.object(sys, "argv", argv), patch.object(
+                test_codex_native.subprocess, "check_output", return_value=f"codex-cli {version}"
+            ), patch.object(
+                test_codex_native, "case",
+                side_effect=lambda _args, name: {"case": name, "passed": True, "cleaned": True},
+            ), patch.object(test_codex_native, "print", create=True):
+                test_codex_native.main()
+                verify_case(contract, "", self.root)
 
     def test_every_native_case_requires_a_report_contract(self) -> None:
         for agent, row in self.manifest["agents"].items():
