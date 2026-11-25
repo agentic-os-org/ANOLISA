@@ -90,3 +90,13 @@ fn recorded_reversed_user_time_is_not_replaced_by_request_start() {
     .unwrap();
     assert!(stats.idle_gaps.is_empty());
 }
+
+#[test]
+fn missing_user_and_request_times_does_not_charge_idle_to_model_secs() {
+    let stats = compute_stats(&trajectory(None, None)).unwrap();
+    assert_eq!(stats.model_secs, 1.0);
+    assert!(stats.idle_gaps.is_empty());
+
+    let with_user_ts = compute_stats(&trajectory(Some("2026-10-12T00:01:06Z"), None)).unwrap();
+    assert_eq!(with_user_ts.model_secs, 10.0);
+}
