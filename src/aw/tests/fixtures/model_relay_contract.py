@@ -6,7 +6,9 @@ import os
 import unittest
 from unittest.mock import patch
 
-from identity_contract import Scope
+import sys
+from identity_contract import AW, Scope
+sys.path.insert(0, str(AW / "sdk/python/src/aw_sdk"))
 from types import SimpleNamespace
 from aw_invocations import Invocations
 import aw_model
@@ -288,13 +290,57 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.ports.append(self.relay.server.sockets[0].getsockname()[1])
         print(json.dumps({"pid": os.getpid(), "ports": self.ports}))
 
-    async def test_no_proxy_matching_host_port_reaches_upstream(self):
+    async def test_direct_and_proxied_requests_reach_the_authorized_upstream(self):
         await self.proxy_route(f"127.0.0.1:{self.ports[0]}")
         response = await self.post()
         self.assertIsNone(self.relay.proxy)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.requests), 1)
         self.assertIsNone(self.bridge.failure)
+
+        # The fixture can also receive absolute-form requests as an HTTP proxy.
+        # Observe the actual origin selected by HTTPX for granted hosts and the default loopback origin.
+        self.body = b'{"type":"message","content":[]}'
+        for endpoint, grants in (
+            ("llm-gateway.internal:8080", ["LLM-GATEWAY.internal"]),
+            ("llm-gateway.internal.:8080", ["LLM-GATEWAY.internal."]),
+            ("llm-gateway.internal.", ["LLM-GATEWAY.internal.:80"]),
+            ("llm-gateway.internal.:8080", ["LLM-GATEWAY.internal.:8080"]),
+            ("llm-gateway.internal:8080", ["llm-gateway.internal:08080"]),
+            ("llm-gateway.internal", ["llm-gateway.internal:80"]),
+            ("[fd00::1]:8080", ["[fd00:0:0:0::1]:8080"]),
+            ("[fd00::1]:8080", ["fd00::1"]),
+            ("[::1]:8080", []),
+        ):
+            with self.subTest(endpoint=endpoint, grants=grants):
+                await self.relay.close()
+                self.relay = ModelRelay(self.bridge, {
+                    "ANTHROPIC_BASE_URL": f"http://{endpoint}",
+                    "HTTP_PROXY": f"http://127.0.0.1:{self.ports[0]}",
+                }, allow_plaintext_http_hosts=grants)
+                self.endpoint = await self.relay.start()
+                self.assertEqual((await self.post()).status_code, 200)
+                header, data = self.requests[-1]
+                self.assertEqual(header.splitlines()[0], f"POST http://{endpoint}/v1/messages HTTP/1.1".encode())
+                self.assertEqual(data, b'{"messages":[]}')
+
+    def test_http_grants_distinguish_absolute_and_relative_dns_names(self):
+        for grant_host, url_host in (("gateway.internal.", "gateway.internal"),
+                                     ("gateway.internal", "gateway.internal.")):
+            for grant_port in ("", ":80"):
+                for url_port in ("", ":80"):
+                    grant, endpoint = grant_host + grant_port, url_host + url_port
+                    with self.subTest(grant=grant, endpoint=endpoint), self.assertRaisesRegex(
+                        ValueError, "AW requires TLS"
+                    ):
+                        ModelRelay(self.bridge, {"ANTHROPIC_BASE_URL": f"http://{endpoint}"},
+                                   allow_plaintext_http_hosts=[grant])
+
+    def test_http_grants_reject_malformed_names(self):
+        for entry in (".", ".example", "model..example", "model..", "192.0.2.1.", "192.0.2.1.:80"):
+            with self.subTest(entry=entry), self.assertRaises(ValueError):
+                ModelRelay(self.bridge, {"ANTHROPIC_BASE_URL": f"http://{entry}"},
+                           allow_plaintext_http_hosts=[entry])
 
     async def test_no_proxy_other_port_keeps_proxy_failure_closed(self):
         await self.proxy_route(f"127.0.0.1:{self.ports[0] % 65535 + 1}")
@@ -312,15 +358,40 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 1)
 
     async def test_no_proxy_authority_preserves_ipv6_brackets_and_exact_port(self):
-        for host in ("api.example.test", "[::1]"):
-            for bypass, direct in ((host, True), (host.strip("[]"), True), (f"{host}:8443", True),
-                                   (f"{host}:8444", False)):
-                with self.subTest(host=host, bypass=bypass):
-                    relay = ModelRelay(self.bridge, {
-                        "ANTHROPIC_BASE_URL": f"https://{host}:8443/prefix",
-                        "HTTPS_PROXY": "http://127.0.0.1:1", "NO_PROXY": bypass,
-                    })
-                    self.assertEqual(relay.proxy is None, direct)
+        for scheme, host in (("http", "127.0.0.1"), ("https", "api.example.test"), ("https", "[::1]")):
+            rules = [(host, True), (host.strip("[]"), True), (f"{host}:8080", True),
+                     (f"{host}:08080", True), (f"{host}:8081", False), (f"{host}:08081", False)]
+            if host == "api.example.test":
+                rules.append(("other.test, .example.test:08080", True))
+            for port in ("8080", "08080"):
+                url = f"{scheme}://{host}:{port}/prefix"
+                for bypass, direct in rules:
+                    with self.subTest(url=url, bypass=bypass):
+                        relay = ModelRelay(self.bridge, {
+                            "ANTHROPIC_BASE_URL": url, f"{scheme.upper()}_PROXY": "http://127.0.0.1:1",
+                            "NO_PROXY": bypass,
+                        })
+                        self.assertEqual(relay.proxy is None, direct)
+
+    def test_no_proxy_matches_the_effective_port(self):
+        proxy = "http://127.0.0.1:1"
+        for scheme, port in (("http", 80), ("https", 443)):
+            for host in ("gateway.internal", "192.0.2.1", "[fd00::1]"):
+                rules = [(host, True), (f"{host}:{port}", True), (f"{host}:0{port}", True),
+                         (f"{host}:8080", False), ("*", True)]
+                if host == "gateway.internal":
+                    rules.append((".internal", True))
+                if host == "[fd00::1]":
+                    rules.extend([("fd00::1", True), ("fd00:", False)])
+                for suffix in ("", f":{port}"):
+                    url = f"{scheme}://{host}{suffix}"
+                    for rule, direct in rules:
+                        with self.subTest(url=url, rule=rule):
+                            relay = ModelRelay(self.bridge, {
+                                "ANTHROPIC_BASE_URL": url, f"{scheme.upper()}_PROXY": proxy,
+                                "NO_PROXY": rule,
+                            }, allow_plaintext_http_hosts=[host])
+                            self.assertEqual(relay.proxy, None if direct else proxy)
 
     async def test_redirect_latches_failure_without_forwarding_to_another_origin(self):
         self.status = 307
@@ -369,6 +440,27 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(ValueError):
                 ModelRelay(self.bridge, environment)
+
+        for endpoint in ("other.internal", "evil-llm-gateway.internal:8080",
+                         "llm-gateway.internal.evil.com:8080", "llm-gateway.internal:8081",
+                         "[fd00::2]:8080", "[fd00::1]:8081"):
+            with self.subTest(endpoint=endpoint), self.assertRaisesRegex(ValueError, "AW requires TLS"):
+                ModelRelay(self.bridge, {"ANTHROPIC_BASE_URL": f"http://{endpoint}",
+                    "NO_PROXY": "*", "ALLOW_PLAINTEXT_HTTP_HOSTS": endpoint},
+                    allow_plaintext_http_hosts=["llm-gateway.internal:8080", "[fd00::1]:8080"])
+        for url in ("http://user@model", "http://@model", "http://model/?x", "http://model/#x"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                ModelRelay(self.bridge, {"ANTHROPIC_BASE_URL": url}, allow_plaintext_http_hosts=["model"])
+        env = {"ANTHROPIC_BASE_URL": "http://[fd00::1]:8080", "HTTP_PROXY": "http://localhost:9000"}
+        for grant in ("[fd00:0:0:0::1]:8080", "fd00::1"):
+            relay = ModelRelay(self.bridge, {**env, "NO_PROXY": "[fd00::1]:8080"},
+                               allow_plaintext_http_hosts=[grant])
+            self.assertIsNone(relay.proxy)
+        env = {"ANTHROPIC_BASE_URL": "http://model:8080", "HTTP_PROXY": "socks5://localhost:9000"}
+        with self.assertRaisesRegex(ValueError, "HTTP\\(S\\) proxy"):
+            ModelRelay(self.bridge, env, allow_plaintext_http_hosts=["model"])
+        relay = ModelRelay(self.bridge, {**env, "NO_PROXY": "model:8080"}, allow_plaintext_http_hosts=["model"])
+        self.assertIsNone(relay.proxy)
 
 
 if __name__ == "__main__":

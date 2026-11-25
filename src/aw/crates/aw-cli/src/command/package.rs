@@ -223,7 +223,7 @@ pub(super) fn show_target(path: &str, selection: &str) -> crate::cli::Result<cra
         agent["adapter"] == adapter && target.is_none_or(|target| target == name.as_str())
     });
     let view = match (matches.next(), matches.next()) {
-        (Some((name, _)), None) => {
+        (Some((name, agent)), None) => {
             let requirements = aw_config::requirements::project(&config, name)?;
             let mut view = serde_json::json!({
                 "target": name,
@@ -231,6 +231,10 @@ pub(super) fn show_target(path: &str, selection: &str) -> crate::cli::Result<cra
                 "input_enabled": requirements.iter().any(|event| event.event == "input.submit"),
                 "target_requires_service": requirements.iter().any(|event| event.required),
             });
+            let hosts = aw_config::plaintext_http_hosts(agent);
+            if !hosts.is_empty() {
+                view["allow_plaintext_http_hosts"] = serde_json::json!(hosts);
+            }
             if aw_adapter::deployment::emits_session_start_hint(adapter)
                 && requirements
                     .iter()

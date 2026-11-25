@@ -62,6 +62,28 @@ Agent/Provider ID、步骤 ID 和操作名与 `metadata.name` 使用相同语法
 Provider 引用与步骤 ID 重复，避免启用时才暴露引用拼写错误。默认值是合同语义，
 解析器不会将它们填入原始文档。
 
+## Claude SDK 模型网关
+
+Claude Python SDK 常驻 worker 的 `ModelRelay` 默认只允许 `localhost`、`127.0.0.1` 和 `::1` 使用 HTTP。
+同一目标下的一次性前台 worker 直接使用原生客户端或 `CheckedClient`，其请求不经过这层检查。
+要接入可信的 HTTP 网关，请在 `spec.agents` 下对应的 `adapter: claude-sdk` 目标中添加以下配置。
+
+```yaml
+claude_sdk:
+  allow_plaintext_http_hosts: ["llm-gateway.internal:8080"]
+```
+
+空列表表示没有额外授权。单独的主机名匹配该主机的所有端口，带端口的条目只匹配指定端口，HTTP 缺省端口为 80。
+ASCII DNS 名匹配时忽略大小写，保留末尾点。`gateway.internal.` 和 `gateway.internal` 需要分别授权。
+网关也可使用 IPv4 或 IPv6 地址，IPv6 指定端口时要加方括号。
+`aw config validate` 会拒绝通配符、CIDR 和 URL。
+
+将原生 `ANTHROPIC_BASE_URL` 指向网关。HTTP 会以明文传输模型凭据和请求数据。
+转发层遵循 `HTTP_PROXY` 和 `NO_PROXY`。要直连示例网关，可设置 `NO_PROXY=llm-gateway.internal`。
+
+修改列表后请重启 worker。若 `ResidentClaude.from_config` 使用 Deployment Descriptor，请从同一配置重新生成
+Descriptor 并以只读权限（例如 `0400`）部署，再启动 worker。移除授权并重新部署后，转发层会重新要求该主机使用 TLS。
+
 ## Qoder SDK 执行资产
 
 在 `qoder-sdk` 目标的 `agents.<id>.qoder_sdk` 下设置这些字段。

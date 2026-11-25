@@ -71,9 +71,11 @@ Provider 效果。
 返回值可用 `serde_json` 序列化；`DeploymentDescriptor::parse` 读取已保存的字节，
 拒绝重复键、未知字段、非法结构和不支持的版本。
 
-Descriptor 仅携带原始字节 `configuration_sha256`、配置目标 `target`、Profile 的
+Descriptor 携带原始字节 `configuration_sha256`、配置目标 `target`、Profile 的
 `adapter`/`version`/`entrypoint`、绝对路径 `endpoint`、`wait_for_input_submit`、
-`availability` 和合同版本，不包含 Provider 配置或执行计划。`auto` endpoint
+`availability` 和合同版本。若目标适用 `session.start`，编译器在 `qoder-public-hooks`
+中写入 `observe_session_start: true`。若目标授权一个或多个主机使用明文 HTTP，
+编译器在 `claude-resident-hooks` 中写入 `allow_plaintext_http_hosts`。Descriptor 不包含 Provider 配置或执行计划。`auto` endpoint
 解析为 `state_dir/aw.sock`；未解析或相对服务路径会被拒绝。编译不读取环境，不启动
 进程，不执行安装。
 

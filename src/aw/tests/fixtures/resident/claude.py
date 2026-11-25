@@ -126,14 +126,17 @@ async def task(index, mode, consumer="response", settings_origin=None, factory=N
             (directory / "requests.json").write_text(json.dumps(fixture.REQUESTS))
             super().reply(data, kind)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # Exercise an address outside the implicit loopback grant on both launch paths.
+    host = "127.0.0.2" if settings_origin or os.environ["AW_TEST_SCENARIO"] == "cooperative-attach" else "127.0.0.1"
+    server = ThreadingHTTPServer((host, 0), Handler)
+    endpoint = f"http://{host}:{server.server_port}"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     (directory / "endpoint.json").write_text(
         json.dumps(
             {
                 "pid": os.getpid(),
-                "port": server.server_port,
+                "host": host, "port": server.server_port,
                 "lifetime": "one task",
                 "stop": "server.shutdown(); server.server_close(); thread.join()",
             }
@@ -158,7 +161,8 @@ async def task(index, mode, consumer="response", settings_origin=None, factory=N
         max_turns=2,
         hooks={name: [HookMatcher(hooks=[hook])] for name in ("PreToolUse", "PostToolUse")},
         env={
-            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+            "ANTHROPIC_BASE_URL": endpoint,
+            "NO_PROXY": host,
             "ANTHROPIC_API_KEY": "local-fixture",
             "AW_TEST_MODE": mode,
             "AW_TEST_TENANT": str(index),
@@ -171,14 +175,14 @@ async def task(index, mode, consumer="response", settings_origin=None, factory=N
         from claude_settings import configure
 
         options, native_files = configure(
-            options, directory, settings_origin, f"http://127.0.0.1:{server.server_port}"
+            options, directory, settings_origin, endpoint
         )
     client = factory(options)
     failed = False
     try:
         async with client:
             if settings_origin is not None:
-                assert client._aw_relay.upstream == f"http://127.0.0.1:{server.server_port}"
+                assert client._aw_relay.upstream == endpoint
                 assert client.options.settings == options.settings
                 assert options.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1"
             info = await client.get_server_info()

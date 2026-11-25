@@ -15,6 +15,7 @@ from claude_agent_sdk._internal.query import Query
 
 AW = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(AW / "crates/aw-adapter/native/claude-sdk"))
+sys.path.insert(0, str(AW / "sdk/python/src/aw_sdk"))
 from aw_invocations import Invocations
 from aw_resident import ManagedClient
 from aw_transport import ManagedTransport

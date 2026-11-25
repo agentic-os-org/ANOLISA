@@ -49,6 +49,8 @@ struct Fields {
     wait_for_input_submit: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     observe_session_start: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow_plaintext_http_hosts: Vec<String>,
     availability: Availability,
 }
 

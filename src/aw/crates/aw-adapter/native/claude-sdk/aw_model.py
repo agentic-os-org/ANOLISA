@@ -14,9 +14,11 @@ from urllib.request import proxy_bypass_environment
 import httpx
 
 if __package__:
+    from aw_sdk.aw_http_hosts import allows_http
     from .aw_claude import CallbackFailure
     from .aw_model_stream import MAX_FRAME, MessageStream, rewrite_message
 else:
+    from aw_http_hosts import allows_http
     from aw_claude import CallbackFailure
     from aw_model_stream import MAX_FRAME, MessageStream, rewrite_message
 
@@ -52,10 +54,23 @@ async def send(writer: asyncio.StreamWriter, data: bytes) -> None:
         raise DownstreamClosed from error
 
 
+def _normalize_no_proxy_port(rule: str) -> str:
+    host, _, port = rule.strip().rpartition(":")
+    # A bare IPv6 literal has no port, even when its last hextet is decimal.
+    if not host or (":" in host and not host.endswith("]")):
+        return rule
+    if port.isascii() and port.isdecimal():
+        return f"{host}:{port.lstrip('0') or '0'}"
+    return rule
+
+
 class ModelRelay:
     """One bounded relay per client; no upstream redirects or direct fallback path."""
 
-    def __init__(self, bridge: Any, environment: dict[str, str]) -> None:
+    def __init__(
+        self, bridge: Any, environment: dict[str, str], *,
+        allow_plaintext_http_hosts: list[str] | None = None,
+    ) -> None:
         self.bridge = bridge
         self.upstream = environment.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip(
             "/"
@@ -64,15 +79,16 @@ class ModelRelay:
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+            or "?" in self.upstream
+            or "#" in self.upstream
         ):
             raise ValueError(
                 "AW requires an HTTP(S) Anthropic base URL without embedded credentials"
             )
-        if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        granted_http = parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        if granted_http and not allows_http(parsed.netloc, allow_plaintext_http_hosts or []):
             raise ValueError("AW requires TLS for non-loopback model endpoints")
         if any(
             environment.get(key) not in {None, "", "0"}
@@ -91,15 +107,21 @@ class ModelRelay:
             for key, value in environment.items()
             if key.lower().endswith("_proxy") and value
         }
-        self.proxy = (
-            None
-            # Preserve port-specific rules and bare IPv6 host rules.
-            if (proxy_bypass_environment(parsed.netloc, proxies)
-                or proxy_bypass_environment(parsed.hostname, proxies))
-            else (proxies.get(parsed.scheme) or proxies.get("all"))
-        )
+        host = parsed.hostname
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+        authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        if "no" in proxies:
+            proxies["no"] = ",".join(_normalize_no_proxy_port(rule) for rule in proxies["no"].split(","))
+        bypass = proxy_bypass_environment(authority, proxies)
+        # urllib can split the last IPv6 hextet as a port. Match bare literals whole.
+        if ":" in host and not bypass:
+            bypass = any(host == rule.strip().lower() for rule in proxies.get("no", "").split(","))
+        self.proxy = None if bypass else (proxies.get(parsed.scheme) or proxies.get("all"))
         if self.proxy and urlsplit(self.proxy).scheme not in {"http", "https"}:
             raise ValueError("AW model relay requires an HTTP(S) proxy or matching NO_PROXY")
+        # HTTP Core 1.0 drops IPv6 brackets when building a forward proxy's
+        # absolute-form request target. Preserve the checked authority on the wire.
+        self._ipv6_forward_proxy = self.proxy is not None and parsed.scheme == "http" and ":" in host
         self.tls = ssl.create_default_context(
             cafile=environment.get("SSL_CERT_FILE"), capath=environment.get("SSL_CERT_DIR")
         )
@@ -245,8 +267,10 @@ class ModelRelay:
         await self.bridge.invocations.check_model_request(body)
         forwarded = {key: value for key, value in headers.items() if key not in HOP_HEADERS}
         forwarded["accept-encoding"] = "identity"
+        url = self.upstream + path
+        extensions = {"target": str(httpx.URL(url)).encode("ascii")} if self._ipv6_forward_proxy else None
         async with self.http.stream(
-            "POST", self.upstream + path, headers=forwarded, content=data
+            "POST", url, headers=forwarded, content=data, extensions=extensions
         ) as response:
             if 300 <= response.status_code < 400:
                 raise CallbackFailure("AW model redirects are unsupported")

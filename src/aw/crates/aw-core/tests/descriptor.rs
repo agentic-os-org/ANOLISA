@@ -335,3 +335,59 @@ fn session_start_hint_is_controlled_by_compile_options() {
         Err(DescriptorError::Mismatch)
     ));
 }
+
+#[test]
+fn plaintext_http_grants_bind_both_the_hint_and_configuration_bytes() {
+    let mut value = document();
+    let grants = json!([
+        "Model.Example.",
+        "model.example",
+        "Model.Example.:8080",
+        "model.example:8080"
+    ]);
+    let agent = json!({"adapter":"claude-sdk","argv":["python","worker.py"],
+        "claude_sdk":{"allow_plaintext_http_hosts":grants}});
+    value["spec"]["agents"]["sdk"] = agent;
+    let mut caps = capabilities();
+    caps.adapter = "claude-sdk".into();
+    let input = bytes(&value);
+    let descriptor = compile(&input, "sdk", caps.clone(), Availability::Required).unwrap();
+    let mut hints = serde_json::to_value(&descriptor).unwrap();
+    assert_eq!(hints["allow_plaintext_http_hosts"], grants);
+    verify(
+        &descriptor,
+        &input,
+        "sdk",
+        caps.clone(),
+        Availability::Required,
+    )
+    .unwrap();
+    for (index, changed) in [
+        "Model.Example",
+        "model.example.",
+        "Model.Example:8080",
+        "model.example.:8080",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        hints["allow_plaintext_http_hosts"] = grants.clone();
+        hints["allow_plaintext_http_hosts"][index] = json!(changed);
+        let edited = DeploymentDescriptor::parse(&bytes(&hints)).unwrap();
+        assert!(matches!(
+            verify(&edited, &input, "sdk", caps.clone(), Availability::Required),
+            Err(DescriptorError::Mismatch)
+        ));
+    }
+    value["spec"]["agents"]["sdk"]["claude_sdk"]["allow_plaintext_http_hosts"] = json!([]);
+    assert!(matches!(
+        verify(
+            &descriptor,
+            &bytes(&value),
+            "sdk",
+            caps,
+            Availability::Required
+        ),
+        Err(DescriptorError::Mismatch)
+    ));
+}

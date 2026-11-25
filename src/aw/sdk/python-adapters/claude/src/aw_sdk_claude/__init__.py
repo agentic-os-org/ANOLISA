@@ -47,7 +47,7 @@ class ResidentClaude:
             descriptor_file=descriptor_file,
             requires_service=True,
         )
-        return cls(
+        worker = cls(
             endpoint=wiring["endpoint"],
             target=wiring["target"],
             config=config_file,
@@ -55,6 +55,8 @@ class ResidentClaude:
             attach_timeout_ms=attach_timeout_ms,
             reconnect_ms=reconnect_ms,
         )
+        worker._http_hosts = wiring.get("allow_plaintext_http_hosts", [])
+        return worker
 
     def __init__(
         self,
@@ -75,6 +77,7 @@ class ResidentClaude:
             raise ValueError("attach_timeout_ms must be 100..60000")
         self.attach_timeout_ms = attach_timeout_ms
         self.pid = pid
+        self._http_hosts: list[str] = []
         self._clients: WeakSet["ManagedClient"] = WeakSet()
         self._closing: asyncio.Task | None = None
         self.instance = Instance(
@@ -114,6 +117,7 @@ class ResidentClaude:
 
         client = ManagedClient(
             options,
+            allow_plaintext_http_hosts=self._http_hosts,
             scope_factory=lambda install: SdkScope(
                 self.instance, self.attach_timeout_ms, install, before_open=check_open
             ),

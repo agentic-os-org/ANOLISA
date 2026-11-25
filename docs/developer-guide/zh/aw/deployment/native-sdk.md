@@ -87,8 +87,8 @@ aw connect --config /absolute/aw.yaml --sdk-pid APPLICATION_PID --timeout-ms 100
 `attachTimeoutMs`，默认 5000 ms。回退模式可在 AW 不可用时继续原生运行。只配置工具后策略时，
 仍使用内部工具前观察关联调用。准入后的每个 Query 持有一个 Scope。
 
-启用 `session.start` 时，新生成的 `qoder-public-hooks` Descriptor 包含可选的
-`observe_session_start` 字段；其他 Profile 保持原有 Descriptor 字段不变。
+目标启用 `session.start` 时，新生成的 `qoder-public-hooks` Descriptor 包含可选的
+`observe_session_start` 字段。
 接入层将缺少该字段的旧 Descriptor 按关闭处理。启用 `session.start` 时重新生成
 Descriptor，变更任一启动事件后重启接入模块。
 
@@ -192,6 +192,8 @@ SDK 监听并确认 Ready，不启动 Agent，也不会向任意 PID 注入。
 
 编译 Descriptor 时须使用与 SDK 匹配的 AW 构建及应用和 Service 共同使用的精确配置文件。发布前检查命令退出状态，
 先生成到暂存位置，成功后将 JSON 与 `aw.yaml` 一同安装再启动应用。
+若 `claude-resident-hooks` Descriptor 含非空的 `allow_plaintext_http_hosts` 列表，
+安装时须清除该 Descriptor 文件的所有写权限位，例如使用 `0400`。
 
 | 目标框架 | `--profile` | SDK 入口 |
 | --- | --- | --- |

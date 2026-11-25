@@ -326,7 +326,9 @@ fn shared_configuration_scopes_descriptor_and_sdk_hints_to_the_selected_target()
     let mut document = configuration(directory.path(), "qoder-sdk");
     document["spec"]["agents"] = json!({
         "qoder": {"adapter": "qoder-sdk", "argv": ["/absent/agent"]},
-        "qwenpaw": {"adapter": "qwenpaw", "argv": ["/absent/agent"]}
+        "qwenpaw": {"adapter": "qwenpaw", "argv": ["/absent/agent"]},
+        "claude": {"adapter": "claude-sdk", "argv": ["/absent/agent"],
+            "claude_sdk":{"allow_plaintext_http_hosts":["model-proxy.cluster.local:8080"]}}
     });
     for event in ["session.start", "input.submit"] {
         document["spec"]["events"][event] = json!({
@@ -338,6 +340,7 @@ fn shared_configuration_scopes_descriptor_and_sdk_hints_to_the_selected_target()
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     for (target, profile, adapter, selected) in [
         ("qoder", "qoder-public-hooks", "qoder-sdk", true),
+        ("claude", "claude-resident-hooks", "claude-sdk", false),
         (
             "qwenpaw",
             "qwenpaw-installed-native-hooks",
@@ -363,6 +366,12 @@ fn shared_configuration_scopes_descriptor_and_sdk_hints_to_the_selected_target()
         let shown = run("show", &["--sdk-target", adapter]);
         for view in [&descriptor, &shown] {
             assert_eq!(view["target"], target);
+            assert_eq!(
+                view.get("allow_plaintext_http_hosts"),
+                (target == "claude")
+                    .then_some(json!(["model-proxy.cluster.local:8080"]))
+                    .as_ref()
+            );
             assert_eq!(
                 view.get("observe_session_start"),
                 selected.then_some(json!(true)).as_ref()

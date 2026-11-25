@@ -111,9 +111,8 @@ unavailable. An internal tool-before observation still correlates an
 after-only policy. Once admitted, each Query uses one Scope.
 
 Current `qoder-public-hooks` deployment descriptors include the optional
-`observe_session_start` hint when `session.start` is enabled; other profiles
-leave their descriptor fields unchanged. The bridge reads older descriptors
-with the hint absent as disabled. Regenerate the descriptor when enabling
+`observe_session_start` hint when `session.start` is enabled for the target.
+The bridge reads older descriptors with the hint absent as disabled. Regenerate the descriptor when enabling
 `session.start`, and restart the bridge when changing either startup event.
 
 `aw.query` accepts the original Query input and returns a proxy preserving native
@@ -243,6 +242,9 @@ Generate the Descriptor using the same AW build and exact configuration file
 that the application and Service will use. Check the command's exit status
 before publishing the output; generate into a staging location and install the
 JSON together with `aw.yaml` before starting the application.
+If a `claude-resident-hooks` Descriptor contains a nonempty
+`allow_plaintext_http_hosts` list, install the Descriptor with all write bits
+cleared (for example, mode `0400`).
 
 | Target framework | `--profile` | SDK entrypoint |
 | --- | --- | --- |

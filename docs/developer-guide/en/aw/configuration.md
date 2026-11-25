@@ -72,6 +72,35 @@ fields. Missing Provider references and duplicate step IDs are errors even in
 disabled steps, so enabling a step does not uncover a hidden reference typo.
 Defaults are documented behavior, not values inserted into the parsed document.
 
+## Claude SDK model gateway
+
+The resident Claude Python SDK worker's `ModelRelay` requires TLS outside
+`localhost`, `127.0.0.1` and `::1` by default. A one-shot foreground worker
+on the same target uses the native client or `CheckedClient` directly, so its
+requests bypass this relay policy. To use a trusted HTTP gateway, add this section to its existing
+`adapter: claude-sdk` target under `spec.agents`.
+
+```yaml
+claude_sdk:
+  allow_plaintext_http_hosts: ["llm-gateway.internal:8080"]
+```
+
+The empty list grants no additional hosts. A name without a port matches any port
+on that host. An entry with a port matches only that port (HTTP defaults to 80).
+ASCII DNS names match case-insensitively. A trailing dot is significant:
+`gateway.internal.` and `gateway.internal` require separate grants. Use a literal IPv4
+or IPv6 address for an IP gateway and brackets for IPv6 with a port. Wildcards,
+CIDRs and URLs are rejected by `aw config validate`.
+
+Point the native `ANTHROPIC_BASE_URL` at the gateway. HTTP sends model credentials
+and request data in plaintext. The relay honors `HTTP_PROXY` and `NO_PROXY`.
+Set `NO_PROXY=llm-gateway.internal` for a direct connection to the example gateway.
+
+Restart the worker after changing the list. For `ResidentClaude.from_config` with a
+Deployment Descriptor, regenerate it from the same configuration and install it
+read-only (for example, mode `0400`) before starting the worker. Remove the grant
+and redeploy to restore the relay’s TLS requirement for that host.
+
 ## Qoder SDK execution assets
 
 Set these fields under `agents.<id>.qoder_sdk` for a `qoder-sdk` target.
