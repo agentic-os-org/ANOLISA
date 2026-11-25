@@ -261,3 +261,37 @@ fn rejects_expired_deadlines_and_invalid_connect_paths() {
         );
     }
 }
+
+#[test]
+fn reply_fits_send_queue_without_waiting_for_reader() {
+    for size in [64 * 1024, 128_000] {
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        let send_buffer: libc::c_int = 64 * 1024;
+        // Linux doubles SO_SNDBUF. This frame fits but crosses the POLLOUT threshold.
+        // SAFETY: the sender and option value are live during setsockopt.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    sender.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&raw const send_buffer).cast(),
+                    std::mem::size_of_val(&send_buffer) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let payload = "x".repeat(size - 2);
+        let deadline = || Instant::now() + Duration::from_secs(1);
+        write_releasing(&mut sender, &payload, deadline(), try_send).unwrap();
+        // The queued body can clear POLLOUT even though the whole reply fit.
+        let mut poll = libc::pollfd {
+            fd: sender.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: the socket and pollfd remain live for the call.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0);
+        assert_eq!(read::<String>(&mut receiver, deadline()).unwrap(), payload);
+    }
+}

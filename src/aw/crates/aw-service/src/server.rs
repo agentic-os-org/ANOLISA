@@ -178,7 +178,7 @@ fn connection(
             self.0.resources.connections.fetch_sub(1, Ordering::AcqRel);
         }
     }
-    let _connection = Connection(Arc::clone(&runtime));
+    let mut connection = Some(Connection(Arc::clone(&runtime)));
     // A legal request may fill the whole eight MiB frame; every received byte
     // resets the initial stall budget so only idle connections are shed,
     // while the total window still matches the protocol's call deadline cap.
@@ -203,27 +203,32 @@ fn connection(
             }
     );
     let result = (|| {
-        if runtime.resources.connections.load(Ordering::Acquire) > runtime.limits.connections
-            && !matches!(
-                &request.operation,
-                Operation::Status
-                    | Operation::SdkControl { .. }
-                    | Operation::SdkCallback { close: true, .. }
-                    | Operation::Stop
-                    | Operation::ReleaseInstance { .. }
-                    | Operation::Unbind { .. }
-                    | Operation::CloseEvent { .. }
-                    | Operation::CloseHookEvent { .. }
-                    | Operation::CloseInputEvent { .. }
-                    | Operation::FinishInvocation { .. }
-                    | Operation::CheckScope { .. }
-                    | Operation::Registration {
-                        command: crate::RegistrationCommand::Query { .. }
-                            | crate::RegistrationCommand::Release { .. }
-                    }
-            )
-        {
-            return Err(runtime.overload("connection_limit"));
+        if !matches!(
+            &request.operation,
+            Operation::Status
+                | Operation::SdkControl { .. }
+                | Operation::SdkCallback { close: true, .. }
+                | Operation::Stop
+                | Operation::ReleaseInstance { .. }
+                | Operation::Unbind { .. }
+                | Operation::CloseEvent { .. }
+                | Operation::CloseHookEvent { .. }
+                | Operation::CloseInputEvent { .. }
+                | Operation::FinishInvocation { .. }
+                | Operation::CheckScope { .. }
+                | Operation::Registration {
+                    command: crate::RegistrationCommand::Query { .. }
+                        | crate::RegistrationCommand::Release { .. }
+                }
+        ) {
+            let _admission = runtime
+                .resources
+                .connection_admission
+                .lock()
+                .map_err(|_| rejected("state_poisoned"))?;
+            if runtime.resources.connections.load(Ordering::Acquire) > runtime.limits.connections {
+                return Err(runtime.overload("connection_limit"));
+            }
         }
         if matches!(&request.operation, Operation::UpdatePolicy { .. }) {
             return prepare_connected(&stream, &runtime, request, expires, peer, process.as_ref());
@@ -266,7 +271,21 @@ fn connection(
         error,
         audit_key,
     };
-    if ipc::write(&mut stream, &response, expires).is_err() && binding {
+    let write = ipc::write_releasing(&mut stream, &response, expires, |stream, pending| {
+        // The reader may submit another request as soon as the final byte
+        // arrives. Serialize that admission check with sending and releasing.
+        let _admission = runtime
+            .resources
+            .connection_admission
+            .lock()
+            .map_err(|_| io::Error::other("connection admission poisoned"))?;
+        let sent = ipc::try_send(stream, pending)?;
+        if sent == pending.len() {
+            drop(connection.take());
+        }
+        Ok(sent)
+    });
+    if write.is_err() && binding {
         if let Some(instance_id) = response
             .result
             .as_ref()

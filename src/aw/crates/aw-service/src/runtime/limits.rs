@@ -58,6 +58,7 @@ impl Limits {
 #[derive(Default)]
 pub(crate) struct Resources {
     pub(crate) connections: AtomicUsize,
+    pub(crate) connection_admission: Mutex<()>,
     pub(crate) rejected: AtomicU64,
     pub(crate) peak_invocations: AtomicUsize,
     reasons: Mutex<BTreeMap<&'static str, u64>>,
