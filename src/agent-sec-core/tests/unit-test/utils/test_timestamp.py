@@ -5,7 +5,6 @@ import time
 from datetime import datetime, timezone
 
 import pytest
-
 from agent_sec_cli.utils.timestamp import (
     epoch_to_utc_iso,
     normalize_iso_to_utc_iso,
