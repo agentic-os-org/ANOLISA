@@ -48,8 +48,11 @@ test('skill-metrics: the filter-driven loader drops stale responses', () => {
 
   // The agent-list effect re-fires on every time-range change; its cleanup
   // must drop responses from superseded ranges.
-  assert.match(source, /fetchAgentNames\(startNs, endNs\)[\s\S]{0,200}if \(!cancelled\) setAgents\(names\);/,
-    'SkillMetricsPage: the agent-list write must be gated on the effect cleanup flag');
+  assert.match(
+    source,
+    /fetchAgentNames\(startNs, endNs\)[\s\S]{0,200}if \(!cancelled\) \{\s*setAgents\(names\);\s*setAgentName\(/,
+    'SkillMetricsPage: agent-list and selection writes must be gated on the effect cleanup flag',
+  );
   assert.match(source, /return \(\) => \{\s*cancelled = true;\s*\};/,
     'SkillMetricsPage: the agent-list effect must cancel in-flight responses on cleanup');
 });

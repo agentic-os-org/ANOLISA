@@ -76,14 +76,18 @@ export const SkillMetricsPage: React.FC = () => {
     // interleave: if the older range's response resolves last, setAgents
     // would overwrite the newer range's list with agents that may not exist
     // under it, and the dropdown would offer choices that return empty
-    // reports. The cleanup flag drops responses from superseded ranges —
-    // same shape as the session-events effect on the security page.
+    // reports. Reconcile agentName against the resolved list inside the same
+    // cleanup guard so a removed agent resets to All agents while superseded
+    // responses cannot alter either list or selection.
     let cancelled = false;
     const startNs = startMs * 1_000_000;
     const endNs = endMs * 1_000_000;
     fetchAgentNames(startNs, endNs)
       .then((names) => {
-        if (!cancelled) setAgents(names);
+        if (!cancelled) {
+          setAgents(names);
+          setAgentName((prev) => (prev && !names.includes(prev) ? '' : prev));
+        }
       })
       .catch(() => {});
     return () => {

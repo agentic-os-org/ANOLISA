@@ -790,6 +790,167 @@ test('skill metrics: a failed reload must not keep the previous report', async (
   assert.equal(driver.slots[7].value, 'boom', 'the error banner must explain the newest failure');
 });
 
+function renderSkillMetricsPage() {
+  const { calls, stubs } = deferredFetchStubs(['fetchSkillMetrics', 'fetchAgentNames']);
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    '../i18n': { useI18n: () => ({ t: (key) => key }) },
+    recharts: {
+      ...componentStub('BarChart'), ...componentStub('Bar'), ...componentStub('XAxis'),
+      ...componentStub('YAxis'), ...componentStub('Tooltip'), ...componentStub('ResponsiveContainer'),
+    },
+    '../utils/apiClient': { ...stubs },
+    '../components/DateTimePicker': componentStub('DateTimePicker'),
+  };
+  const pageModule = loadPageModule('src/pages/SkillMetricsPage.tsx', moduleStubs, driver);
+  const page = pageModule.SkillMetricsPage;
+  assert.equal(typeof page, 'function', 'SkillMetricsPage must be a component');
+  const rendered = driver.render(page);
+  assert.equal(driver.slots[2].value, '', 'slot 2 must be agentName');
+  assert.deepEqual(driver.slots[3].value, [], 'slot 3 must be agents');
+  return { calls, driver, page, rendered };
+}
+
+test('skill metrics: switching to a range without the selected agent resets to all agents', async () => {
+  const { calls, driver, page, rendered: initial } = renderSkillMetricsPage();
+  let rendered = initial;
+
+  // Initial range offers alpha and beta; the user selects alpha.
+  const cleanup1 = rendered.effects[1]();
+  assert.equal(calls.fetchAgentNames.length, 1);
+  calls.fetchAgentNames[0].resolve(['alpha', 'beta']);
+  await settle();
+  rendered = driver.render(page);
+  const agentSelect = findElement(rendered.element, (node) => node.type === 'select');
+  assert.ok(agentSelect, 'the agent <select> must be rendered');
+  agentSelect.props.onChange({ target: { value: 'alpha' } });
+  assert.equal(driver.slots[2].value, 'alpha', 'sanity: alpha must be selected');
+
+  // Switching to a range whose agents exclude alpha must reset agentName to ''.
+  driver.slots[0].setter(1_000);
+  driver.slots[1].setter(2_000);
+  rendered = driver.render(page);
+  if (typeof cleanup1 === 'function') cleanup1();
+  rendered.effects[1]();
+  assert.equal(calls.fetchAgentNames.length, 2);
+  calls.fetchAgentNames[1].resolve(['beta']);
+  await settle();
+
+  assert.deepEqual(driver.slots[3].value, ['beta'], 'agents must update to the new range');
+  assert.equal(
+    driver.slots[2].value,
+    '',
+    'selected agent absent from the new range must reset to All agents',
+  );
+
+  // Re-rendering with the reconciled selection drives fetchSkillMetrics without agentName.
+  rendered = driver.render(page);
+  const updatedSelect = findElement(rendered.element, (node) => node.type === 'select');
+  assert.equal(updatedSelect.props.value, '', 'the rendered <select> must show All agents');
+  rendered.effects[0]();
+  assert.equal(calls.fetchSkillMetrics.length, 1);
+  assert.deepEqual(
+    calls.fetchSkillMetrics[0].args,
+    [1_000 * 1_000_000, 2_000 * 1_000_000, undefined, 'day'],
+    'subsequent fetchSkillMetrics must omit the removed agentName',
+  );
+});
+
+test('skill metrics: switching to a range with no agents resets the selected agent', async () => {
+  const { calls, driver, page, rendered: initial } = renderSkillMetricsPage();
+  let rendered = initial;
+
+  const cleanup1 = rendered.effects[1]();
+  calls.fetchAgentNames[0].resolve(['alpha']);
+  await settle();
+  rendered = driver.render(page);
+  const agentSelect = findElement(rendered.element, (node) => node.type === 'select');
+  agentSelect.props.onChange({ target: { value: 'alpha' } });
+  assert.equal(driver.slots[2].value, 'alpha', 'sanity: alpha must be selected');
+
+  driver.slots[0].setter(3_000);
+  driver.slots[1].setter(4_000);
+  rendered = driver.render(page);
+  if (typeof cleanup1 === 'function') cleanup1();
+  rendered.effects[1]();
+  calls.fetchAgentNames[1].resolve([]);
+  await settle();
+
+  assert.deepEqual(driver.slots[3].value, [], 'agents must update to empty list');
+  assert.equal(
+    driver.slots[2].value,
+    '',
+    'selected agent must reset to All agents when the new range has no agents',
+  );
+
+  rendered = driver.render(page);
+  const updatedSelect = findElement(rendered.element, (node) => node.type === 'select');
+  assert.equal(updatedSelect.props.value, '', 'the rendered <select> must show All agents');
+  rendered.effects[0]();
+  assert.equal(calls.fetchSkillMetrics.length, 1);
+  assert.deepEqual(
+    calls.fetchSkillMetrics[0].args,
+    [3_000 * 1_000_000, 4_000 * 1_000_000, undefined, 'day'],
+    'subsequent fetchSkillMetrics must omit agentName when the new range is empty',
+  );
+});
+
+test('skill metrics: a still-present agent stays selected and a stale range list cannot clobber it', async () => {
+  const { calls, driver, page, rendered: initial } = renderSkillMetricsPage();
+  let rendered = initial;
+
+  // Initial range populates alpha and the user selects it.
+  const cleanup0 = rendered.effects[1]();
+  calls.fetchAgentNames[0].resolve(['alpha']);
+  await settle();
+  rendered = driver.render(page);
+  const agentSelect = findElement(rendered.element, (node) => node.type === 'select');
+  agentSelect.props.onChange({ target: { value: 'alpha' } });
+  assert.equal(driver.slots[2].value, 'alpha', 'sanity: alpha must be selected');
+
+  // Range 1 fires a slow agent-list request that will resolve with a list lacking alpha.
+  driver.slots[0].setter(1_000);
+  driver.slots[1].setter(2_000);
+  rendered = driver.render(page);
+  if (typeof cleanup0 === 'function') cleanup0();
+  const cleanup1 = rendered.effects[1]();
+  assert.equal(calls.fetchAgentNames.length, 2);
+
+  // Range 2 supersedes Range 1 and still includes alpha.
+  driver.slots[0].setter(3_000);
+  driver.slots[1].setter(4_000);
+  rendered = driver.render(page);
+  if (typeof cleanup1 === 'function') cleanup1();
+  rendered.effects[1]();
+  assert.equal(calls.fetchAgentNames.length, 3);
+
+  // Range 2 resolves first with alpha present; Range 1 lands last without alpha.
+  calls.fetchAgentNames[2].resolve(['alpha', 'beta']);
+  calls.fetchAgentNames[1].resolve(['gamma']);
+  await settle();
+  await settle();
+
+  assert.deepEqual(
+    driver.slots[3].value,
+    ['alpha', 'beta'],
+    'stale range response must not overwrite the newer agent list',
+  );
+  assert.equal(
+    driver.slots[2].value,
+    'alpha',
+    'a still-present agent must remain selected and survive a stale range response',
+  );
+
+  rendered = driver.render(page);
+  rendered.effects[0]();
+  assert.equal(calls.fetchSkillMetrics.length, 1);
+  assert.deepEqual(
+    calls.fetchSkillMetrics[0].args,
+    [3_000 * 1_000_000, 4_000 * 1_000_000, 'alpha', 'day'],
+    'subsequent fetchSkillMetrics must retain the still-present agentName',
+  );
+});
+
 test('security overview: a failed card must not keep the previous range payload', async () => {
   const { calls, driver, rendered } = renderSecurityPage();
   const loadOverview = rendered.callbacks[1];
