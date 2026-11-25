@@ -1499,14 +1499,21 @@ impl AgentSight {
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
                 self.flush_completions_for_pid(*pid);
-                if let Ok(mut targets) = self.resource_targets.write() {
-                    targets.remove(pid);
-                }
+                let target_agent = self
+                    .resource_targets
+                    .write()
+                    .ok()
+                    .and_then(|mut targets| targets.remove(pid));
                 // Unknown-process scans also retain inode references until exit.
                 self.probes.detach_ssl_probes(*pid);
-                // Remove from tracking if it was an agent
-                if let Some(agent) = self.scanner.on_process_exit(*pid) {
-                    let agent_name = agent.agent_info.name.clone();
+                // Remove from tracking if it was an agent (via cmdline scan,
+                // DNS rule, startup connection scan, or descendant tracking).
+                if let Some(agent_name) = self
+                    .scanner
+                    .on_process_exit(*pid)
+                    .map(|agent| agent.agent_info.name)
+                    .or(target_agent)
+                {
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
                 } else {
                     self.flush_deferred_genai_for_pid(*pid);
