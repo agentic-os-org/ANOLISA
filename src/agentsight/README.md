@@ -248,7 +248,12 @@ npm install
 npm run dev          # starts webpack-dev-server on http://localhost:3004
 ```
 
-When finished, run `make build-frontend && cargo build --release` to embed the updated UI.
+Stop the dev server, then return to the AgentSight directory to rebuild the binary with the updated UI.
+
+```bash
+cd ..
+make build-frontend && cargo build --release
+```
 
 ### Resource Benchmarking (Linux)
 
