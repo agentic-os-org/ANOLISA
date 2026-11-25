@@ -331,7 +331,12 @@ impl AnthropicParser {
                                     Some(CurrentBlock::Thinking { signature: sig, .. }) => {
                                         sig.push_str(signature);
                                     }
-                                    _ => {
+                                    None => {
+                                        log::debug!(
+                                            "aggregate_sse_events: ignoring signature_delta without active block at index {index}"
+                                        );
+                                    }
+                                    Some(_) => {
                                         log::debug!(
                                             "aggregate_sse_events: ignoring mismatched signature_delta at block index {index}"
                                         );
