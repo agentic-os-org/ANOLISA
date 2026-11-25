@@ -26,6 +26,10 @@ _requires_v1 = pytest.mark.skipif(
     _IS_V2,
     reason="harden, verify and log-sandbox are not migrated to V2",
 )
+_requires_v2 = pytest.mark.skipif(
+    not _IS_V2,
+    reason="V2 keeps --offset applied to aggregates for frozen-fixture compatibility",
+)
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -1035,11 +1039,9 @@ class TestEventsPagination:
         assert result.returncode != 0
         assert "Invalid value" in result.stderr or "Error" in result.stderr
 
-    def test_count_with_offset(self):
-        """TC-034: --count should respect --offset parameter.
-
-        Expected: Count of events after applying offset
-        """
+    @_requires_v1
+    def test_count_ignores_offset(self):
+        """TC-034 (V1): --count aggregates the full filtered set, ignoring --offset."""
         self._create_multiple_events(13)
         time.sleep(0.1)
 
@@ -1047,18 +1049,30 @@ class TestEventsPagination:
         result_total = run_cli("events", "--count")
         total_count = json.loads(result_total.stdout)
 
-        # Get count with offset
+        # An aggregate has no rows to skip, so offset must not reduce it
         result_offset = run_cli("events", "--offset", "10", "--count")
         offset_count = json.loads(result_offset.stdout)
 
-        # Should be different (offset count < total count)
+        assert offset_count == total_count
+
+    @_requires_v2
+    def test_count_applies_offset(self):
+        """TC-034 (V2): --count still reports the rows remaining after --offset."""
+        self._create_multiple_events(13)
+        time.sleep(0.1)
+
+        result_total = run_cli("events", "--count")
+        total_count = json.loads(result_total.stdout)
+
+        result_offset = run_cli("events", "--offset", "10", "--count")
+        offset_count = json.loads(result_offset.stdout)
+
+        assert offset_count == total_count - 10
         assert offset_count < total_count
 
-    def test_count_by_with_offset(self):
-        """TC-034 (extended): --count-by should respect --offset parameter.
-
-        Expected: Count-by statistics after applying offset
-        """
+    @_requires_v1
+    def test_count_by_ignores_offset(self):
+        """TC-034 (V1): --count-by groups the full filtered set."""
         self._create_multiple_events(13)
         time.sleep(0.1)
 
@@ -1070,7 +1084,28 @@ class TestEventsPagination:
         total_events = sum(full_counts.values())
         assert total_events >= 13
 
-        # Get count-by with offset 10
+        # Offset paging belongs to list output; grouping must be unchanged
+        result_offset = run_cli(
+            "events", "--offset", "10", "--count-by", "category", "--output", "json"
+        )
+        assert result_offset.returncode == 0
+        offset_counts = json.loads(result_offset.stdout)
+
+        assert offset_counts == full_counts
+
+    @_requires_v2
+    def test_count_by_applies_offset(self):
+        """TC-034 (V2): --count-by skips the newest offset rows before grouping."""
+        self._create_multiple_events(13)
+        time.sleep(0.1)
+
+        result_full = run_cli("events", "--count-by", "category", "--output", "json")
+        assert result_full.returncode == 0
+        full_counts = json.loads(result_full.stdout)
+
+        total_events = sum(full_counts.values())
+        assert total_events >= 13
+
         result_offset = run_cli(
             "events", "--offset", "10", "--count-by", "category", "--output", "json"
         )
@@ -1078,10 +1113,8 @@ class TestEventsPagination:
         offset_counts = json.loads(result_offset.stdout)
 
         offset_total = sum(offset_counts.values())
-
-        # After offset 10, should have fewer events
-        assert offset_total < total_events
         assert offset_total == total_events - 10
+        assert offset_total < total_events
 
 
 # ---------------------------------------------------------------------------

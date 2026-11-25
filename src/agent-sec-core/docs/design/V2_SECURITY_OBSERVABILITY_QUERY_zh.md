@@ -51,8 +51,8 @@ V1 CLI 直接读本地 SQLite，V1 daemon 则另有查询 RPC；V2 保留业务�
 | 接口 | 行为 | daemon 数据来源 |
 |---|---|---|
 | `events` | 过滤、分页；table/json/jsonl 输出 | `sec.events.list` |
-| `events --count` | 匹配事件数，保留 V1 offset 语义 | `sec.events.list` 的 total |
-| `events --count-by <field>` | category/event_type/trace_id 分组，输出 JSON object | 无 offset 时用 `sec.events.count_by`；有 offset 时分页读取后按 V1 语义聚合 |
+| `events --count` | 匹配事件数；V2 当前仍为 `max(total - offset, 0)`（见下方 V1/V2 差异） | `sec.events.list` 的 total |
+| `events --count-by <field>` | category/event_type/trace_id 分组，输出 JSON object；V2 当前把 offset 传给聚合，先跳过 N 条最新事件再分组 | `sec.events.count_by` |
 | `events --summary` | 安全态势文本摘要，未指定时间时默认最近 24 小时 | `sec.events.list`，复用摘要 formatter |
 | `observability report --session-id <id>` | 指定授权范围内的会话，`--format text/json` | session/run/timeline；session 附带安全聚合 |
 | `observability report --last` | 授权范围内最近有记录的会话 | `obs.sessions.list` 后执行同一报告路径 |
@@ -66,9 +66,13 @@ Report JSON 与 V1 frozen fixture 完整对照，不新增顶层 `uid`；RPC 的
 `--since/--until/--last-hours`、`--limit/--offset`、`--output/-o`。
 默认 limit 为 100、offset 为 0、输出为 table；保留 V1 参数互斥与错误退出语义。
 CLI limit 可以通过多个有界 RPC page 完成，不能把 daemon 单页上限当成 CLI 总量上限。
-`--count` 为 `max(total - offset, 0)`；daemon total 自身不受分页 offset 影响。
-`--count-by` 的 offset 是先跳过按时间倒序排列的事件再分组，不是跳过分组结果；
-V1 RPC `sec.events.count_by` 拒绝 limit/offset，因此 CLI 不能直接透传这些参数。
+V2 当前实现保留 V1 旧语义：`--count` 为 `max(total - offset, 0)`；`--count-by` 的 offset
+先跳过按时间倒序排列的事件再分组，daemon `sec.events.count_by` 接受该参数，V2 frozen
+fixtures 仍按此约定。
+V1 Python CLI 自 #6102 起改为对完整过滤集聚合、忽略 `--offset`：聚合没有可跳过的行，
+且 V1 daemon 的 `sec.events.count_by` 拒绝 limit/offset。因此显式传入非零 offset 时
+V1 与 V2 当前输出不同；V2 对齐需要单独的兼容性变更记录，并同步更新 frozen fixtures，
+本次 V1 修复不预设 V2 已经改变。
 
 `--summary` 与 `sec.summary` 不是同一输出：前者保留 V1 安全态势文本，后者是 dashboard
 聚合数据。V1 文本摘要最多读取 10,000 条；迁移先保留此上限，不宣称它是无限量全库分析。
