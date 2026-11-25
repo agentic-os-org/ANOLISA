@@ -248,7 +248,12 @@ npm install
 npm run dev          # 在 http://localhost:3004 启动 webpack-dev-server
 ```
 
-完成后，运行 `make build-frontend && cargo build --release` 将更新后的 UI 嵌入二进制。
+停止开发服务器后，回到 AgentSight 目录，重新构建包含最新界面的二进制文件。
+
+```bash
+cd ..
+make build-frontend && cargo build --release
+```
 
 ### 资源 benchmark（Linux）
 
