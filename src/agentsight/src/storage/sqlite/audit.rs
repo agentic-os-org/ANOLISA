@@ -436,12 +436,15 @@ impl AuditStore {
 /// what SQLite cannot hold.
 ///
 /// Representability is already enforced one layer up — `system_audit`'s
-/// `reject_unrepresentable_window` refuses it on the API and the sibling
-/// stores check the same conversion — because a wrap is silently wrong in
-/// both directions: a timestamp beyond `i64::MAX` becomes negative, sorts
-/// before every real row, and turns a "since year 2262" bound into "every
-/// row" (`query_since`) or a "purge everything" cutoff into "delete nothing"
-/// (`purge_before`).
+/// `reject_unrepresentable_window` refuses out-of-range API bounds, whereas
+/// the sibling retention stores (`TokenStore`, `HttpStore`,
+/// `TokenConsumptionStore`) clamp purge cutoffs via `clamp_cutoff_ns` rather
+/// than wrapping — because a wrap is silently wrong in both directions: a
+/// timestamp beyond `i64::MAX` becomes negative, sorts before every real row,
+/// and turns a "since year 2262" bound into "every row" (`query_since`) or a
+/// "purge everything" cutoff into "delete nothing" (`purge_before`).
+/// `AuditStore` rejects unrepresentable nanosecond values across inserts,
+/// queries, and purges.
 fn ns_to_sqlite(ns: u64, what: &str) -> Result<i64> {
     i64::try_from(ns)
         .map_err(|_| anyhow::anyhow!("{what} {ns}ns does not fit in SQLite's signed integer"))
