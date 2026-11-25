@@ -1,6 +1,6 @@
 PYTHON ?= python3
 CARGO ?= cargo
-VERSION ?= 0.2.1
+VERSION ?= 0.2.2
 COMPONENTS ?= core
 BACKENDS ?= sec-core tokenless
 OUTPUT ?= $(abspath $(CURDIR)/../target/aw-packages)

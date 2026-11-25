@@ -15,7 +15,7 @@ Tokenless 压缩工具文本，减少后续模型上下文，也可以建议输�
 安装到独立的扩展 prefix：
 
 ```bash
-export AW_VERSION=0.2.1
+export AW_VERSION=0.2.2
 export AW_TOKENLESS_BUNDLE="aw-provider-tokenless-$AW_VERSION-linux-$(uname -m)"
 tar -xzf "$AW_TOKENLESS_BUNDLE.tar.gz"
 export AW_EXTENSION_PREFIX="$HOME/.local/lib/aw/extensions"

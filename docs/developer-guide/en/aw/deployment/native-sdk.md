@@ -542,10 +542,10 @@ Install the core candidate tarball (and only the optional framework adapter
 tarball your application uses) in the application directory:
 
 ```bash
-npm install /absolute/artifacts/anolisa-aw-sdk-0.2.1.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-0.2.2.tgz
 # Optional framework adapters (install only when needed):
-npm install /absolute/artifacts/anolisa-aw-sdk-qoder-0.2.1.tgz
-npm install /absolute/artifacts/anolisa-aw-sdk-pi-0.2.1.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-qoder-0.2.2.tgz
+npm install /absolute/artifacts/anolisa-aw-sdk-pi-0.2.2.tgz
 ```
 
 Use an absolute socket path in a private directory owned by the application

@@ -74,10 +74,10 @@ asyncio.run(main())
 在应用环境安装核心 wheel，并按需仅安装实际使用的可选框架适配 wheel：
 
 ```bash
-python3 -m pip install /absolute/artifacts/anolisa_aw_sdk-0.2.1-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk-0.2.2-py3-none-any.whl
 # 可选框架适配包（按需安装）：
-python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_qwenpaw-0.2.1-py3-none-any.whl
-python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_claude-0.2.1-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_qwenpaw-0.2.2-py3-none-any.whl
+python3 -m pip install /absolute/artifacts/anolisa_aw_sdk_claude-0.2.2-py3-none-any.whl
 ```
 
 顶层 `aw_sdk` 导入不加载任何 Agent 框架，核心 wheel 也不包含框架私有适配源码。`Instance` 接受绝对 `endpoint`、配置中的

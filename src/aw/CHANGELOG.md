@@ -2,6 +2,36 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## [0.2.2] - 2026-11-25
+
+### Added
+
+- **AW**: Updated to v0.2.2, record instance observations, exits, and source
+  coverage transitions locally. Hook plans and public execution audit show
+  gaps in optional sources such as AgentSight while preserving native dispatch
+  ownership ([#10402](https://github.com/agentic-os-org/ANOLISA/pull/10402)).
+
+### Fixed
+
+- **AW**: Updated to v0.2.2, isolate Python preflight probe results in a private
+  `0600` FIFO for Claude SDK, AgentScope, QwenPaw, Hermes, and Codex Hook
+  manifests. Claude SDK and AgentScope version probes use the same 15-second
+  budget. Temporary runtime discovery sets `OTEL_SDK_DISABLED=true` and removes
+  standard `opentelemetry/instrumentation/auto_instrumentation` paths from
+  `PYTHONPATH`, keeping startup banners and automatic instrumentation from
+  interfering with preflight and preserving the application's environment
+  ([#10641](https://github.com/agentic-os-org/ANOLISA/pull/10641)).
+- **AW**: Updated to v0.2.2, restore public audit projection for Codex
+  `tool.after` with explicit structured completion fields or a standard MCP
+  `CallToolResult` (omitted `isError` defaults to `success`).
+  `aw audit-export read` exports the `ExecutionEvent` with `resultDigest` and
+  `resultStatus`, plus its `AuditRecord`. A plain-string Codex Shell
+  `tool_response` without an exit code remains `projection_unavailable`
+  (`aw.native_metadata_unavailable`), with no inferred `resultStatus: "success"`.
+  Native Hook interception and model-visible result replacement for these
+  Shell callbacks continue as before
+  ([#10610](https://github.com/agentic-os-org/ANOLISA/pull/10610)).
+
 ## [0.2.1] - 2026-11-24
 
 ### Added
