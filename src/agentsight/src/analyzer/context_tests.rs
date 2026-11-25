@@ -897,3 +897,144 @@ fn delivery_merges_sse_continuation_bytes_usage_for_split_terminal_events() {
         }
     }
 }
+
+#[test]
+fn capped_prefix_continuation_does_not_override_authoritative_message_delta() {
+    let analyzer = Analyzer::new();
+
+    // 1. Direct SseComplete with authoritative terminal message_delta in sse_events,
+    //    while continuation contains only the preliminary message_start (and even an interim delta).
+    let mut prefix_only_result = captured(
+        "/v1/messages",
+        json!({"model":"fixture","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}),
+        json!([
+            {"type":"message_start","message":{"id":"capped-prefix","role":"assistant","model":"fixture","content":[],"usage":{"input_tokens":1200,"cache_creation_input_tokens":400,"cache_read_input_tokens":800,"output_tokens":1}}},
+            {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"hello"}},
+            {"type":"message_delta","delta":{"stop_reason":null},"usage":{"input_tokens":500,"cache_creation_input_tokens":100,"cache_read_input_tokens":100,"output_tokens":4}},
+            {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":3,"cache_creation_input_tokens":2,"cache_read_input_tokens":4,"output_tokens":9}},
+            {"type":"message_stop"}
+        ]),
+        true,
+    );
+    if let AggregatedResult::SseComplete(pair) = &mut prefix_only_result {
+        pair.response.sse_continuation_bytes = Some(
+            concat!(
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"capped-prefix\",\"role\":\"assistant\",\"model\":\"fixture\",\"content\":[],\"usage\":{\"input_tokens\":1200,\"cache_creation_input_tokens\":400,\"cache_read_input_tokens\":800,\"output_tokens\":1}}}\n\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\"usage\":{\"input_tokens\":500,\"cache_creation_input_tokens\":100,\"cache_read_input_tokens\":100,\"output_tokens\":4}}\n\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"output_tokens\":1"
+            )
+            .as_bytes()
+            .to_vec(),
+        );
+    }
+
+    // 2. End-to-end real Aggregator exceeding the 1 MiB continuation buffer cap so the
+    //    continuation buffer keeps only the preliminary prefix while sse_events has the
+    //    terminal authoritative message_delta past 1 MiB.
+    let parser = Parser::new();
+    let mut aggregator = Aggregator::with_limits(
+        4,
+        &RuntimeLimits {
+            retain_raw_sse: true,
+            max_sse_retained_bytes: 8 * 1024 * 1024,
+            max_connection_body_bytes: 8 * 1024 * 1024,
+            connection_max_bytes: 16 * 1024 * 1024,
+            ..Default::default()
+        },
+    );
+    let req_body = json!({"model":"fixture","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hello"}]}).to_string();
+    let req_raw = format!(
+        "POST /v1/messages HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{req_body}",
+        req_body.len()
+    );
+    assert!(
+        aggregator
+            .process_result(parser.parse_event(event(1, req_raw.as_bytes())))
+            .is_empty()
+    );
+    let sse_head = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"cap-e2e\",\"role\":\"assistant\",\"model\":\"fixture\",\"content\":[],\"usage\":{\"input_tokens\":1200,\"cache_creation_input_tokens\":400,\"cache_read_input_tokens\":800,\"output_tokens\":1}}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+    );
+    assert!(
+        aggregator
+            .process_result(parser.parse_event(event(0, sse_head.as_bytes())))
+            .is_empty()
+    );
+    let delta_chunk = format!(
+        "event: content_block_delta\ndata: {}\n\n",
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x".repeat(4000)}})
+    );
+    for _ in 0..300 {
+        assert!(
+            aggregator
+                .process_result(parser.parse_event(event(0, delta_chunk.as_bytes())))
+                .is_empty()
+        );
+    }
+    let sse_tail = concat!(
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":4,\"output_tokens\":9}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    );
+    let results = aggregator.process_result(parser.parse_event(event(0, sse_tail.as_bytes())));
+    let [capped_e2e_result] = results.as_slice() else {
+        panic!("expected one completed SSE call");
+    };
+    let AggregatedResult::SseComplete(pair) = capped_e2e_result else {
+        panic!("expected SseComplete");
+    };
+    let cont_bytes = pair
+        .response
+        .sse_continuation_bytes
+        .as_deref()
+        .expect("1 MiB continuation prefix must be populated");
+    assert_eq!(cont_bytes.len(), 1 << 20);
+    assert!(
+        !String::from_utf8_lossy(cont_bytes).contains("\"output_tokens\":9"),
+        "continuation prefix must have truncated before the terminal message_delta"
+    );
+
+    // Assert hard-coded authoritative values across analyze_aggregated, analyze_for_delivery,
+    // and analyze_for_owned_delivery without deriving expectations from the merger under test.
+    for (name, result) in [
+        ("prefix_only", &prefix_only_result),
+        ("capped_e2e", capped_e2e_result),
+    ] {
+        let mut candidates = vec![("aggregated", build(&analyzer.analyze_aggregated(result)))];
+        for raw in [false, true] {
+            candidates.push((
+                if raw {
+                    "delivery_raw"
+                } else {
+                    "delivery_compact"
+                },
+                build(&analyzer.analyze_for_delivery(result, raw)),
+            ));
+            candidates.push((
+                if raw { "owned_raw" } else { "owned_compact" },
+                build(&analyzer.analyze_for_owned_delivery(result.clone(), raw)),
+            ));
+        }
+        for (path_name, call) in candidates {
+            assert_eq!(call["token_usage"]["input_tokens"], 9, "{name}/{path_name}");
+            assert_eq!(
+                call["token_usage"]["cache_creation_input_tokens"], 2,
+                "{name}/{path_name}"
+            );
+            assert_eq!(
+                call["token_usage"]["cache_read_input_tokens"], 4,
+                "{name}/{path_name}"
+            );
+            assert_eq!(
+                call["token_usage"]["output_tokens"], 9,
+                "{name}/{path_name}"
+            );
+            assert_eq!(
+                call["token_usage"]["total_tokens"], 18,
+                "{name}/{path_name}"
+            );
+        }
+    }
+}
