@@ -27,7 +27,9 @@ def sha256(data: bytes) -> str:
 def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> Path:
     released = read_catalog(source)
     check_payload(source, released)
-    source_contract = release_manifest((source / "component.toml").read_text(), released)
+    source_contract = release_manifest(
+        (source / "component.toml").read_text(encoding="utf-8"), released
+    )
     manifest = tomllib.loads(source_contract)
     if manifest["component"]["name"] != "os-skills" or manifest["component"]["version"] != version:
         raise ValueError("component.toml identity does not match the requested release")
@@ -48,7 +50,7 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
     contract = contract.replace('modes = ["system"]', 'modes = ["user", "system"]')
     for framework in ("openclaw", "hermes"):
         contract = contract.replace(old_adapter, new_adapter.replace("{framework}", framework), 1)
-    contract += "\n" + (Path(__file__).with_name("layout.toml")).read_text()
+    contract += "\n" + (Path(__file__).with_name("layout.toml")).read_text(encoding="utf-8")
     raw_manifest = tomllib.loads(contract)
     platform = raw_manifest["component"]["platform"]
     if "linux" not in platform["os"] or arch not in platform["arch"]:
