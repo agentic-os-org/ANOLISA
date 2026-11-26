@@ -1101,6 +1101,43 @@ fn provider_tool_request(
     }
 }
 
+#[test]
+fn approval_output_command_uses_execution_binding_without_mutating_assessment() {
+    use crate::approval::requests::request_shell_output_command;
+    use crate::tools::command_risk_output::shell_output_facts;
+
+    for input in [
+        serde_json::json!({"command": "printenv TEST_SECRET"}),
+        serde_json::json!({"cmd": "printenv TEST_SECRET"}),
+        serde_json::json!("printenv TEST_SECRET"),
+        serde_json::json!({"command": "printenv TEST_SECRET", "cmd": "uptime"}),
+        serde_json::json!({"command": null, "cmd": "printenv TEST_SECRET"}),
+    ] {
+        for tool in ["Bash", "shell", "run_shell_command"] {
+            let mut request = provider_tool_request(tool, Some(input.clone()));
+            request.preview = "$ uptime".to_string();
+            let before = format!("{:?}", request);
+            let command = request_shell_output_command(&request).expect("bound command");
+            assert_eq!(command, "printenv TEST_SECRET");
+            assert!(shell_output_facts(&command).environment);
+            assert_eq!(format!("{:?}", request), before);
+        }
+    }
+    for input in [None, Some(serde_json::json!({"missing": "printenv"}))] {
+        let request = provider_tool_request("shell", input);
+        assert!(request_shell_output_command(&request).is_none());
+    }
+    let mut local = provider_tool_request("shell command", None);
+    local.kind = ApprovalRequestKind::ShellCommand;
+    local.request_id = None;
+    local.preview = "$ printenv TEST_SECRET".to_string();
+    assert_eq!(
+        request_shell_output_command(&local).as_deref(),
+        Some("printenv TEST_SECRET")
+    );
+    assert!(request_shell_output_command(&provider_tool_request("Read", None)).is_none());
+}
+
 fn active_run_for_approval_test() -> (std::path::PathBuf, ActiveAgentRun) {
     let request = AgentRequest {
         id: "request-1".to_string(),

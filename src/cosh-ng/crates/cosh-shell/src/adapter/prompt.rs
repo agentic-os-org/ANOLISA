@@ -137,7 +137,10 @@ fn trigger_evidence_prompt(
                 "Continue the same Shell-first Agent session using this tool result.\n\
                  The native shell transcript has already printed the command and stdout/stderr. \
                  The tool_result payload is a bounded model view: use preview/ref fields, do not \
-                 assume it contains the full output. Use this tool_result first; call cosh_shell_evidence \
+                 assume it contains the full output. preview_redacted can indicate truncation or \
+                 home-path replacement, not necessarily detected secrets; preview_included does not \
+                 prove secrets are absent. Neither status describes live terminal output or scrollback. \
+                 Use this tool_result first; call cosh_shell_evidence \
                  only if this bounded view is missing output needed for the answer. \
                  Any earlier pre-approval prose in this same session is obsolete. \
                  Analyze only the result below. Do not repeat that approval was needed, do not list \

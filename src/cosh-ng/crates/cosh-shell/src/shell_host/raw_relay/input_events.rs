@@ -421,6 +421,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
             RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
             RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
+            RawInputEvent::CardDetailsScroll(id, forward) => {
+                parser.push_card_event("details_scroll", &format!("{id}:{}", u8::from(forward)))
+            }
             RawInputEvent::TrialControl { id, action } => {
                 parser.push_card_event("trial_control", &format!("{id}:{action}"))
             }

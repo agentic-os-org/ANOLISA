@@ -45,6 +45,7 @@ fn render_raw_inline_event_view<W: Write>(
         audit.observe_shell_event_batch(batch.events);
     }
     let mut terminal_output = CrLfWriter::new(output);
+    crate::approval::panel::redraw_approval_if_size_changed(inline_state, &mut terminal_output)?;
     if inline_state.questions.active_panel_id.is_some() {
         redraw_active_question_if_width_changed(
             inline_state,

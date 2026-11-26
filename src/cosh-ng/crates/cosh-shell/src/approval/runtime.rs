@@ -6,7 +6,8 @@ use crate::approval::cards::write_approval_receipt;
 use crate::approval::handoff::{queue_approved_shell_handoff, queue_interactive_shell_handoff};
 use crate::approval::panel::{
     approval_focus_from_event, approval_is_pending, clear_active_approval_panel,
-    redraw_current_approval_request, render_current_approval_request,
+    redraw_current_approval_request, render_approval_details_scroll,
+    render_current_approval_request,
 };
 use crate::approval::provider::{mark_provider_approval_resolved, provider_approval_response};
 use crate::approval::resolution::{
@@ -27,12 +28,19 @@ pub(crate) fn render_approval_actions<W: Write>(
 ) -> std::io::Result<()> {
     for (idx, event) in events.iter().enumerate() {
         let event_index = event_index_base + idx;
+        if render_approval_details_scroll(state, event, output, event_index)? {
+            continue;
+        }
         if let Some((id, action)) = approval_focus_from_event(event, &state.approvals.requests) {
             let key = format!("approval-focus-{event_index}");
             if !state.approvals.handled_actions.insert(key) {
                 continue;
             }
             if approval_is_pending(state, &id) {
+                if action != ApprovalPanelAction::Details {
+                    state.approvals.expanded_cards.remove(&id);
+                    state.approvals.details_pages.remove(&id);
+                }
                 state.approvals.focus.insert(id, action);
                 redraw_current_approval_request(state, output)?;
                 output.flush()?;
@@ -554,6 +562,7 @@ pub(crate) fn cancel_pending_approvals_for_failed_run<W: Write>(
             .push_back(id.clone());
         state.approvals.focus.remove(&id);
         state.approvals.expanded_cards.remove(&id);
+        state.approvals.details_pages.remove(&id);
         if let Some(request_id) = decision.request.request_id.as_deref() {
             let _ = handle.respond_approval(provider_deny_response(
                 ProviderResponseInput {

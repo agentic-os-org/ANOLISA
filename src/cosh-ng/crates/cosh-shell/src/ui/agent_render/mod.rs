@@ -18,6 +18,7 @@ mod approval_details;
 mod approval_journal;
 mod approval_reason;
 mod approval_receipt;
+mod approval_view;
 mod approval_warning;
 mod card;
 mod consultation;
@@ -77,39 +78,18 @@ const MAX_WIDTH: u16 = 160;
 pub struct RatatuiInlineRenderer {
     width: u16,
     column_limit: Option<u16>,
+    row_limit: Option<u16>,
     pub(crate) plain: bool,
     pub(crate) styled: bool,
     language: crate::Language,
 }
 
 impl RatatuiInlineRenderer {
-    pub fn for_terminal() -> Self {
-        let stdout_is_tty = std::io::stdout().is_terminal() && !running_under_cargo_test();
-        let terminal_columns = if stdout_is_tty {
-            ratatui::crossterm::terminal::size()
-                .ok()
-                .map(|(cols, _)| cols)
-                .filter(|cols| *cols > 0)
-        } else {
-            None
-        };
-        let columns = match (configured_terminal_width(), terminal_columns) {
-            (Some(configured), Some(actual)) => Some(configured.min(actual)),
-            (configured, actual) => configured.or(actual),
-        };
-        Self {
-            width: columns.unwrap_or(DEFAULT_WIDTH).clamp(MIN_WIDTH, 200),
-            column_limit: columns,
-            plain: plain_output_requested() || columns.is_some_and(|columns| columns < MIN_WIDTH),
-            styled: stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
-            language: crate::Language::EnUs,
-        }
-    }
-
     pub fn with_width(width: u16) -> Self {
         Self {
             width: width.clamp(20, 240),
             column_limit: None,
+            row_limit: None,
             plain: false,
             styled: false,
             language: crate::Language::EnUs,
@@ -125,6 +105,7 @@ impl RatatuiInlineRenderer {
         Self {
             width: width.clamp(20, 240),
             column_limit: None,
+            row_limit: None,
             plain: true,
             styled: false,
             language: crate::Language::EnUs,

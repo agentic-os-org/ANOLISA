@@ -19,6 +19,7 @@ mod trial;
 pub(super) struct CardInputState {
     trial: trial::TrialInputState,
     selected: usize,
+    approval_details_open: bool,
     free_text: String,
     active_kind: Option<CardInputKind>,
     selected_options: Vec<usize>,
@@ -174,6 +175,7 @@ impl CardInputState {
             let selected = capture_initial_selection(capture);
             self.active_kind = Some(kind);
             self.selected = selected;
+            self.approval_details_open = false;
             self.free_text = match capture {
                 RawInputCapture::TextQuestion { initial_text, .. } => initial_text.clone(),
                 _ => String::new(),
@@ -202,6 +204,7 @@ impl CardInputState {
         self.active_kind = None;
         self.trial = trial::TrialInputState::default();
         self.selected = 0;
+        self.approval_details_open = false;
         self.free_text.clear();
         self.selected_options.clear();
         self.session_marked_for_clear.clear();
@@ -337,6 +340,9 @@ impl CardInputState {
                     }
                     events.extend(self.draft_complete_command_on_submit(capture));
                     let event = self.submit(capture);
+                    if matches!(&event, Some(RawInputEvent::CardDetails(_))) {
+                        self.approval_details_open = true;
+                    }
                     let submitted = event.is_some();
                     events.extend(event);
                     // Always clear free_text after a submit attempt so that a
@@ -504,8 +510,13 @@ impl CardInputState {
                     }
                     RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                         if (byte == b'd' || byte == b'D') && self.free_text.is_empty() {
-                            self.selected = 2;
-                            events.push(RawInputEvent::CardDetails(id.clone()));
+                            if let Some(details_index) = capture_action_set(capture)
+                                .action_index(crate::ui::ApprovalPanelAction::Details)
+                            {
+                                self.selected = details_index;
+                                self.approval_details_open = true;
+                                events.push(RawInputEvent::CardDetails(id.clone()));
+                            }
                         } else if byte.is_ascii() {
                             self.free_text.push(byte as char);
                         } else {

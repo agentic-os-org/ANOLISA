@@ -52,7 +52,7 @@ fn phrase_message_id(code: &str) -> Option<crate::MessageId> {
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use super::approval::wrapped_preview_rows;
+use super::wrap_plain_line;
 
 /// V6a continuation line under the metadata row: `└ 风险: <phrase>`.
 /// `reason` is already the localized natural-language phrase (never a raw
@@ -65,7 +65,7 @@ pub(super) fn approval_reason_line(reason: &str, i18n: crate::I18n) -> String {
 }
 
 pub(super) fn approval_reason_rows(reason: &str, width: usize, i18n: crate::I18n) -> Vec<String> {
-    wrapped_preview_rows(&approval_reason_line(reason, i18n), width, 2)
+    wrap_plain_line(&approval_reason_line(reason, i18n), width)
 }
 
 /// Styled continuation lines: label in the border color, phrase dimmed.

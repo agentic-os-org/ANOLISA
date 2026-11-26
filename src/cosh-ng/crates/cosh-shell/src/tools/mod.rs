@@ -7,6 +7,7 @@ mod command_risk_compound;
 mod command_risk_git;
 mod command_risk_launcher;
 mod command_risk_model;
+pub(crate) mod command_risk_output;
 mod command_risk_parser;
 mod command_risk_pipeline;
 #[cfg(test)]

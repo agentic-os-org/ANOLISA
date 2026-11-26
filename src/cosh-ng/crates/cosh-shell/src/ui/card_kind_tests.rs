@@ -63,6 +63,7 @@ fn input_ownership_and_output_events_use_distinct_symbols() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");

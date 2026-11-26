@@ -593,6 +593,7 @@ fn activity_panel_keeps_card_border_aligned_to_renderer_width() {
 fn activity_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -910,6 +911,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 turn_extension: false,
                 deny_always_trust: false,
                 irrecoverable: false,
+                output_command: None,
                 hook_warnings: Vec::new(),
             })
             .join("\n");
@@ -960,6 +962,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
 fn recommendation_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -1111,6 +1114,7 @@ fn recommendation_action_panel_keeps_card_border_aligned_to_renderer_width() {
 fn recommendation_action_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -1630,6 +1634,7 @@ fn health_banner_styled_output_keeps_finding_body_primary() {
     let report = oom_health_report();
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 120,
         plain: false,
         styled: true,
@@ -1661,6 +1666,7 @@ fn health_banner_styled_labels_are_readable_not_dim_only() {
     let report = oom_health_report();
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 120,
         plain: false,
         styled: true,

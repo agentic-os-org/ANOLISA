@@ -87,11 +87,17 @@ Trust mode is not a blanket bypass. Irrecoverable system-control commands such a
 
 ## Read and answer a card
 
-Check the tool name, input preview, risk, and Hook warnings. Choose **Approve** or **Deny**; use **Details** when the preview is shortened. If requests are queued, the card shows the queue position.
+Check the tool name, input preview, risk, and Hook warnings. Choose **Approve** or **Deny**; use **Details** when the preview is shortened. Details switches to a paged view inside the same card: Up/Down pages through the full command and output/authorization boundaries, and Left/Right returns to the action view. Enter on Details does not approve the request. If requests are queued, the card shows the queue position.
+
+Long or multiple Hook notices use a short summary on the main card, with the strongest decision first. **Details** preserves every notice in full.
 
 When you approve a `shell` tool, cosh runs the command in the foreground bash or zsh. Its output and interactive prompts stay visible, and `Ctrl+C` can interrupt it. Approved foreground commands run one at a time.
 
-**Terminal output is not redacted** and may stay in your terminal's scrollback. A shell approval card shows this before execution, including before **Allow all this turn**. Redaction of model messages or audit records does not redact the live terminal. This also applies when a command runs without a card. Deny requests that could print values you do not want visible.
+**Terminal output is not redacted** and may stay in your terminal's scrollback. Ordinary static resource checks omit the repeated warning; **Details** explains this boundary. Recognized environment values, sensitive sources and full process arguments get specific pre-consent warnings. Unpredictable output keeps a neutral notice. This is a presentation hint, not proof that an unmentioned command is safe.
+
+When **Allow all this turn** is selected, the card explains that you approve the current request and skip individual confirmation for eligible queued and later shell tools in the same turn. The scope description is not repeated while other actions are selected. Existing exclusions still apply: high-risk requests, forced Hooks, local shell requests, missing execution bindings and blocked retries. Live output stays as-is even without a card. Deny requests that could print values you do not want visible.
+
+Model previews and audit copies have separate limits and redaction. `preview_redacted` can mean truncation or home-directory replacement, not necessarily detected credentials; `preview_included` does not prove credentials are absent. Neither status describes the live terminal or its scrollback.
 
 If an approved command waits for password input, a pager, or plain terminal input, cosh can show a hint and interrupt it after 120 seconds by default. Set `shell.input_wait_timeout_secs = 0` to disable this timeout. Fullscreen TUIs and pipeline reads are exempt.
 

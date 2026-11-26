@@ -174,6 +174,7 @@ pub(crate) enum RawInputEvent {
     CardAlwaysTrust(String),
     CardDeny(String),
     CardDetails(String),
+    CardDetailsScroll(String, bool),
     CardCancel(String),
     CardAnswer(String),
     QuestionSubmitAttempt(String),

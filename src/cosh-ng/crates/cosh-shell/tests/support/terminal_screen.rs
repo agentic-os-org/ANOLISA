@@ -10,6 +10,7 @@ use nix::libc;
 use wait_timeout::ChildExt;
 
 use super::raw_cli::{raw_cli_shared_run_guard, RawCliRunGuard};
+use super::terminal_recording::TerminalRecording;
 
 const ROWS: u16 = 24;
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -26,6 +27,7 @@ pub(crate) struct TerminalSession {
     action_start: usize,
     last_output: Instant,
     root: tempfile::TempDir,
+    recording: Option<TerminalRecording>,
     _gate: RawCliRunGuard,
 }
 
@@ -73,10 +75,42 @@ impl TerminalSession {
         files: &[(&str, &str)],
         extra_envs: &[(&str, &str)],
     ) -> Self {
+        Self::spawn_with_recording(shell, integration, cols, files, extra_envs, None)
+    }
+
+    pub(crate) fn spawn_for_shell_with_recording(
+        shell: &str,
+        integration: &str,
+        cols: u16,
+        files: &[(&str, &str)],
+        extra_envs: &[(&str, &str)],
+        recording_name: &str,
+    ) -> Self {
+        Self::spawn_with_recording(
+            shell,
+            integration,
+            cols,
+            files,
+            extra_envs,
+            Some(recording_name),
+        )
+    }
+
+    fn spawn_with_recording(
+        shell: &str,
+        integration: &str,
+        cols: u16,
+        files: &[(&str, &str)],
+        extra_envs: &[(&str, &str)],
+        recording_name: Option<&str>,
+    ) -> Self {
         let gate = raw_cli_shared_run_guard();
+        let temp_base = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical screen fixture temp directory");
         let root = tempfile::Builder::new()
             .prefix("cosh-screen-")
-            .tempdir()
+            .tempdir_in(temp_base)
             .expect("screen fixture HOME");
         fs::write(root.path().join(".bashrc"), "PS1='screen$ '\n").unwrap();
         fs::write(
@@ -166,6 +200,22 @@ impl TerminalSession {
                 Ok(())
             });
         }
+        let recording = recording_name.map(|name| {
+            let language = extra_envs
+                .iter()
+                .find_map(|(key, value)| (*key == "COSH_SHELL_LANG").then_some(*value))
+                .unwrap_or("en");
+            let mut recording = TerminalRecording::new(name, shell, language, ROWS, cols);
+            let adapter = expanded_envs
+                .iter()
+                .find_map(|(key, value)| (*key == "COSH_SHELL_ADAPTER").then_some(value.as_str()))
+                .unwrap_or("fake");
+            let provider = expanded_envs
+                .iter()
+                .find_map(|(key, value)| (*key == "COSH_CORE_PATH").then_some(value.as_str()));
+            recording.provider_fixture(adapter, provider);
+            recording
+        });
         let child = command.spawn().expect("spawn screen session");
         let mut session = Self {
             child,
@@ -178,8 +228,12 @@ impl TerminalSession {
             action_start: 0,
             last_output: Instant::now(),
             root,
+            recording,
             _gate: gate,
         };
+        if let Some(recording) = &mut session.recording {
+            recording.bind_process(session.child.id());
+        }
         let mut expected = vt100::Parser::new(ROWS, cols, 0);
         expected.process(session.published_prompt().as_bytes());
         session.wait_screen("initial prompt", |screen| {
@@ -220,7 +274,12 @@ impl TerminalSession {
             assert!(Instant::now() < deadline, "PTY write timeout");
             match self.master.write(&bytes[written..]) {
                 Ok(0) => panic!("PTY write closed"),
-                Ok(count) => written += count,
+                Ok(count) => {
+                    if let Some(recording) = &mut self.recording {
+                        recording.bytes("input", &bytes[written..written + count]);
+                    }
+                    written += count;
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.read_output(),
                 Err(error) => panic!("PTY write: {error}"),
             }
@@ -247,6 +306,9 @@ impl TerminalSession {
             0,
             "resize parent PTY"
         );
+        if let Some(recording) = &mut self.recording {
+            recording.resize(rows, cols);
+        }
     }
 
     pub(crate) fn wait_screen(&mut self, label: &str, predicate: impl Fn(&vt100::Screen) -> bool) {
@@ -257,6 +319,9 @@ impl TerminalSession {
                 && self.last_output.elapsed() >= QUIET
                 && predicate(self.screen())
             {
+                if let Some(recording) = &mut self.recording {
+                    recording.point(label);
+                }
                 eprintln!(
                     "{label}: cursor={:?}, screen={:?}",
                     self.screen().cursor_position(),
@@ -296,6 +361,9 @@ impl TerminalSession {
         match self.master.read(&mut bytes) {
             Ok(0) => panic!("screen PTY closed unexpectedly"),
             Ok(count) => {
+                if let Some(recording) = &mut self.recording {
+                    recording.bytes("output", &bytes[..count]);
+                }
                 self.raw.extend_from_slice(&bytes[..count]);
                 self.parser.process(&bytes[..count]);
                 self.last_output = Instant::now();
@@ -336,11 +404,35 @@ impl TerminalSession {
             self.original_flags,
             "parent terminal file flags"
         );
+        if self.recording.is_some() {
+            let mut bytes = [0; 8192];
+            loop {
+                match self.master.read(&mut bytes) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        self.recording
+                            .as_mut()
+                            .unwrap()
+                            .bytes("output", &bytes[..count]);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.raw_os_error() == Some(libc::EIO) =>
+                    {
+                        break
+                    }
+                    Err(error) => panic!("drain closed recording PTY: {error}"),
+                }
+            }
+            self.recording.take().unwrap().emit(true, status.code());
+        }
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        let recording = self.recording.take();
         if self.child.try_wait().ok().flatten().is_none() {
             unsafe {
                 libc::kill(self.child.id() as i32, libc::SIGTERM);
@@ -357,6 +449,9 @@ impl Drop for TerminalSession {
                 }
                 let _ = self.child.wait_timeout(Duration::from_secs(1));
             }
+        }
+        if let Some(recording) = recording {
+            recording.emit(false, None);
         }
     }
 }

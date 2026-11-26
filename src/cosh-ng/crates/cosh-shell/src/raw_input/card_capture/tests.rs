@@ -711,6 +711,120 @@ fn approval_capture_turn_consent_selects_approve_turn_and_details() {
     );
 }
 
+#[test]
+fn approval_capture_details_shortcut_enter_preserves_action_identity() {
+    use crate::ui::{ApprovalActionSet, ApprovalPanelAction};
+
+    for action_set in [
+        ApprovalActionSet::Standard,
+        ApprovalActionSet::TurnConsent,
+        ApprovalActionSet::StandardHighRisk,
+        ApprovalActionSet::TurnConsentHighRisk,
+        ApprovalActionSet::Hook,
+    ] {
+        let capture = RawInputCapture::Approval {
+            id: "details-request".to_string(),
+            action_set,
+        };
+        for shortcut in *b"dD" {
+            for split in [false, true] {
+                let mut state = CardInputState::default();
+                state.apply_capture(&capture);
+                let events = if split {
+                    let mut events = state.consume(&capture, &[shortcut]);
+                    state.apply_capture(&capture);
+                    events.extend(state.consume(&capture, b"\n"));
+                    events
+                } else {
+                    state.consume(&capture, &[shortcut, b'\n'])
+                };
+                assert_eq!(
+                    events,
+                    vec![RawInputEvent::CardDetails("details-request".to_string()); 2],
+                    "{action_set:?}, shortcut={shortcut}, split={split}"
+                );
+                assert_eq!(
+                    action_set.action_at(state.selected),
+                    Some(ApprovalPanelAction::Details)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn approval_capture_details_shortcut_survives_queue_action_changes() {
+    use crate::ui::{ApprovalActionSet, ApprovalPanelAction};
+
+    for (before, after) in [
+        (ApprovalActionSet::Standard, ApprovalActionSet::TurnConsent),
+        (ApprovalActionSet::TurnConsent, ApprovalActionSet::Standard),
+        (
+            ApprovalActionSet::StandardHighRisk,
+            ApprovalActionSet::TurnConsentHighRisk,
+        ),
+    ] {
+        let mut capture = RawInputCapture::Approval {
+            id: "details-request".to_string(),
+            action_set: before,
+        };
+        let mut state = CardInputState::default();
+        state.apply_capture(&capture);
+        assert_eq!(
+            state.consume(&capture, b"d"),
+            vec![RawInputEvent::CardDetails("details-request".to_string())]
+        );
+        capture = RawInputCapture::Approval {
+            id: "details-request".to_string(),
+            action_set: after,
+        };
+        state.apply_capture(&capture);
+        assert_eq!(
+            state.consume(&capture, b"\n"),
+            vec![RawInputEvent::CardDetails("details-request".to_string())],
+            "{before:?} -> {after:?}"
+        );
+        let deny = after.action_index(ApprovalPanelAction::Deny).unwrap();
+        let details = after.action_index(ApprovalPanelAction::Details).unwrap();
+        assert_eq!(
+            state.consume(&capture, b"\x1b[C"),
+            vec![RawInputEvent::CardFocus(
+                "details-request".to_string(),
+                deny
+            )]
+        );
+        assert_eq!(
+            state.consume(&capture, b"\x1b[C\x1b[C"),
+            vec![RawInputEvent::CardFocus(
+                "details-request".to_string(),
+                details
+            )]
+        );
+    }
+}
+
+#[test]
+fn approval_capture_details_scroll_keeps_enter_bound_to_details() {
+    let capture = RawInputCapture::Approval {
+        id: "req-1".to_string(),
+        action_set: crate::ui::ApprovalActionSet::Standard,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+    let events = state.consume(&capture, b"d\x1b[B\x1b[A\n");
+    assert_eq!(
+        events,
+        vec![
+            RawInputEvent::CardDetails("req-1".to_string()),
+            RawInputEvent::CardDetailsScroll("req-1".to_string(), true),
+            RawInputEvent::CardDetailsScroll("req-1".to_string(), false),
+            RawInputEvent::CardDetails("req-1".to_string()),
+        ]
+    );
+    assert!(!super::events::releases_capture(&events[1]));
+    assert!(!super::events::releases_capture(&events[2]));
+}
+
 /// 已有焦点后新请求到达（Standard -> TurnConsent）：选择索引按动作值重映射，
 /// 回车提交的仍是切换前高亮的动作，而不是新动作集里同索引的动作。
 #[test]

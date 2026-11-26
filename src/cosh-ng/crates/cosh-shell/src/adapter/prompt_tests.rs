@@ -867,6 +867,14 @@ fn tool_result_prompt_declares_preview_ref_boundary() {
     };
 
     let prompt = prompt_from_request(&request);
+    for phrase in [
+        "preview_redacted can indicate truncation",
+        "home-path replacement",
+        "preview_included does not prove secrets are absent",
+        "Neither status describes live terminal output or scrollback",
+    ] {
+        assert!(prompt.contains(phrase), "{prompt}");
+    }
     assert!(
         prompt.contains("bounded model view: use preview/ref fields"),
         "{prompt}"
