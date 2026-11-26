@@ -359,14 +359,15 @@ fn split_sections(
         let (indent, trimmed) = split_leading_indent(line);
 
         if let Some(fence) = open_fence {
-            if is_closing_fence(indent, trimmed, fence) {
+            if !trimmed.is_empty() && indent < fence.container_indent {
+                // The end of the list item closes its fence before this line.
                 open_fence = None;
-                in_paragraph = false;
-                while list_indents.last().is_some_and(|&col| indent < col) {
-                    list_indents.pop();
+            } else {
+                if is_closing_fence(indent, trimmed, fence) {
+                    open_fence = None;
                 }
+                continue;
             }
-            continue;
         }
 
         if trimmed.is_empty() {
