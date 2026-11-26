@@ -86,7 +86,7 @@ pub(super) fn begin(paths: &DatabasePaths, changes: &ChangeSet) -> Result<Prepar
     super::capacity::check_bytes(paths, changes)?;
     let id = journal::new_id()?;
     let mut entry = Journal {
-        schema_version: 1,
+        schema_version: journal::SCHEMA_VERSION,
         transaction_id: id,
         database_root: paths.root.clone(),
         package_manager: paths.manager(),

@@ -671,3 +671,115 @@ fn replacement_workspace_with_another_marker_is_a_conflict() {
     assert!(refused.exists());
     assert!(temporary.exists());
 }
+
+#[test]
+fn sigkill_right_after_claiming_the_workspace_is_retired() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env("workspace-claimed", false, &[]);
+    let entry = pending(&fixture);
+    let workspace = entry.workspace();
+    let leftovers = fs::entries(&workspace).unwrap();
+    assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+    assert!(
+        leftovers[0]
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".aw-workspace-nonce.")),
+        "the marker must be the only entry"
+    );
+
+    // Nothing was staged yet, so the marker alone is enough evidence: recovery
+    // retires the claimed workspace and rolls the transaction back.
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 1));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!workspace.exists());
+    assert!(!entry.directory().exists());
+    let inventory = Inventory::read(&fixture.paths, None).unwrap();
+    assert!(inventory.installations.is_empty());
+}
+
+#[test]
+fn sigkill_after_recording_the_nonce_retires_the_empty_workspace() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env("workspace-recorded", false, &[]);
+    let entry = pending(&fixture);
+    let workspace = entry.workspace();
+    assert!(
+        entry.workspace_nonce.is_some(),
+        "the journal must already carry the nonce"
+    );
+    assert!(
+        fs::entries(&workspace).unwrap().is_empty(),
+        "the marker is not written yet"
+    );
+
+    // A crash between the journal write and the marker leaves an empty directory;
+    // it holds no evidence and nothing to lose, so recovery retires it.
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 1));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn staging_entry_shaped_like_a_directory_is_a_conflict() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let entry = pending(&fixture);
+    let workspace = entry.workspace();
+    let staged = fs::entries(&workspace)
+        .unwrap()
+        .into_iter()
+        .find(|path| is_staging(path))
+        .expect("staging file");
+    let directory = workspace.join(format!(".aw-staging-{}-4242-9", entry.transaction_id));
+    std::fs::create_dir(&directory).unwrap();
+
+    // A directory that copies a canonical staging name cannot be reclaimed with
+    // unlinkat; recovery reports a conflict and aborts instead of erroring out.
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert_eq!(report.conflicts, vec![workspace.clone()]);
+    assert!(directory.is_dir());
+    assert!(staged.exists());
+
+    // Removing the impostor by hand restores the previous state, and the next
+    // pass finishes the rollback.
+    std::fs::remove_dir(&directory).unwrap();
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 1));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn workspace_moved_away_after_the_crash_preserves_both_directories() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let entry = pending(&fixture);
+    let workspace = entry.workspace();
+    let moved = workspace.with_file_name(format!(
+        "{}-moved",
+        workspace.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::rename(&workspace, &moved).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+    let foreign = workspace.join("foreign.bin");
+    std::fs::write(&foreign, b"foreign bytes\n").unwrap();
+
+    // The replacement at the recorded path carries no marker, so recovery refuses
+    // it; the directory it cannot see any more is never touched either.
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert_eq!(report.conflicts, vec![workspace]);
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign bytes\n");
+    assert!(moved.is_dir());
+}

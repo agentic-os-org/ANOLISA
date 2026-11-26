@@ -262,9 +262,12 @@ pub(in crate::store::transaction) fn remove_staging(
         let name = cstring(name)?;
         // SAFETY: name is one child of the verified directory; unlinkat never follows symlinks.
         if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(error.into());
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ENOENT) => {}
+                // A directory shaped like a staging name is left for the caller's
+                // conflict report instead of aborting recovery.
+                Some(libc::EISDIR | libc::EPERM | libc::EACCES) => continue,
+                _ => return Err(std::io::Error::last_os_error().into()),
             }
         }
         removed.push(entry);
@@ -353,15 +356,42 @@ pub(in crate::store::transaction) fn write_workspace_marker(
     Ok(())
 }
 
-fn unlink(directory: &File, name: &CString) -> Result<()> {
+/// Delete one verified child. A name that stopped being a regular file between
+/// validation and removal is reported as `false` so the caller raises a conflict
+/// instead of failing recovery with an opaque `EISDIR`.
+fn unlink(directory: &File, name: &CString) -> Result<bool> {
     // SAFETY: `name` is a single child of the verified workspace descriptor.
     if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
         let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(error.into());
-        }
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) => Ok(true),
+            Some(libc::EISDIR | libc::EPERM | libc::EACCES) => Ok(false),
+            _ => Err(error.into()),
+        };
     }
-    Ok(())
+    Ok(true)
+}
+
+/// True when `name` is still a regular file reachable through the descriptor.
+fn regular(directory: &File, name: &CString) -> Result<bool> {
+    let mut status: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `name` is a single child of the verified workspace descriptor.
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            &mut status,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(false);
+        }
+        return Err(error.into());
+    }
+    Ok(status.st_mode & libc::S_IFMT == libc::S_IFREG)
 }
 
 /// Remove the workspace only when its marker proves ownership by `recorded` and
@@ -381,27 +411,38 @@ pub(in crate::store::transaction) fn clear_workspace(
         let Some(name) = entry.file_name() else {
             return Ok(false);
         };
-        if staging_name(name, owner) {
-            staging.push(cstring(name)?);
-        } else if marker.is_none()
+        let staged = staging_name(name, owner);
+        let claims_ownership = !staged
+            && marker.is_none()
             && workspace_marker_nonce(name)
-                .is_some_and(|nonce| workspace_nonce_matches(recorded, &nonce))
-        {
-            marker = Some(cstring(name)?);
-        } else {
+                .is_some_and(|nonce| workspace_nonce_matches(recorded, &nonce));
+        if !staged && !claims_ownership {
             return Ok(false);
+        }
+        let name = cstring(name)?;
+        if !regular(directory, &name)? {
+            return Ok(false);
+        }
+        if staged {
+            staging.push(name);
+        } else {
+            marker = Some(name);
         }
     }
     let Some(marker) = marker else {
         return Ok(false);
     };
     for name in &staging {
-        unlink(directory, name)?;
+        if !unlink(directory, name)? {
+            return Ok(false);
+        }
     }
     if !staging.is_empty() {
         directory.sync_all()?;
     }
-    unlink(directory, &marker)?;
+    if !unlink(directory, &marker)? {
+        return Ok(false);
+    }
     directory.sync_all()?;
     let identity = super::identity_of(directory)?;
     super::rmdir(workspace, Some(&identity))

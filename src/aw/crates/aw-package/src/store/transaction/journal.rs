@@ -17,6 +17,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+/// Version 2 added the workspace nonce; version 1 journals stay readable so
+/// an interrupted transaction from an older binary can still be recovered.
+pub(super) const SCHEMA_VERSION: u32 = 2;
 pub(super) const MAX_JOURNAL_BYTES: u64 = 96 * 1024 * 1024;
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -97,7 +100,7 @@ impl Journal {
 
     pub fn validate(&self, paths: &DatabasePaths, directory: &Path) -> Result<()> {
         require(
-            self.schema_version == 1
+            matches!(self.schema_version, 1 | 2)
                 && self.database_root == paths.root
                 && self.package_manager == paths.manager()
                 && self.directory() == directory,

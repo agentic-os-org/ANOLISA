@@ -140,6 +140,7 @@ fn execute(
     let nonce = fs::new_workspace_nonce()?;
     entry.workspace_nonce = Some(fs::workspace_nonce_hash(&nonce));
     entry.write()?;
+    journal::checkpoint("workspace-recorded");
     fs::write_workspace_marker(&entry.workspace(), &nonce)?;
     journal::checkpoint("workspace-claimed");
     let locator = changes.marker_after.clone();
