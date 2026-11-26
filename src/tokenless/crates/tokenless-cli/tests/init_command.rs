@@ -2017,3 +2017,134 @@ fn a_startup_line_does_not_break_an_escaped_control_character() {
         named.combined()
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-07 (round 8) — a log pair around the whole detector run
+// ---------------------------------------------------------------------------
+
+/// A startup file whose braces pair up around the detector run: Bash sources it
+/// before the script and its EXIT trap fires after, so the status document sits
+/// *inside* a balanced pair of prose braces. Neither brace is the detector's.
+const STARTUP_PAIRED_BRACES: &str = "echo 'shell-initialized {'\ntrap 'echo \"}\"' EXIT\n";
+
+/// The shipped Codex detector behind that log pair, on both of its JSON paths.
+#[test]
+#[cfg(unix)]
+fn paired_startup_and_exit_braces_do_not_swallow_the_shipped_codex_status() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    with_tokenless_stub(&fixture);
+    let startup = startup_file(fixture._root.path(), STARTUP_PAIRED_BRACES);
+
+    // With `jq` on PATH, and on a jq-free PATH where the detector's own printf
+    // writes the document: the trap wraps both of them the same way.
+    let mut paths = vec![format!("{}:/usr/bin:/bin", fixture.bin.display())];
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if link_shell_tools(&tools) {
+        paths.push(format!("{}:{}", fixture.bin.display(), tools.display()));
+    }
+
+    for path in &paths {
+        let list = finish(
+            fixture
+                .command_with_path(&["init", "--list"], path)
+                .env("BASH_ENV", &startup)
+                .output()
+                .expect("run tokenless init"),
+        );
+        list.assert_code(0);
+        assert_eq!(
+            status_of(&list.stdout, "codex"),
+            "installable",
+            "PATH {path}:\n{}",
+            list.stdout
+        );
+        assert!(
+            !list.stdout.contains("not parseable JSON"),
+            "a valid document inside a log pair was reported unreadable on PATH {path}:\n{}",
+            list.stdout
+        );
+    }
+
+    // And the registration the false `unreadable` skipped.
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &paths[0])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert!(
+        !named.combined().contains("already installed and ready"),
+        "a fresh Codex was reported ready:\n{}",
+        named.combined()
+    );
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "the log pair cost the registration:\n{}",
+        named.combined()
+    );
+}
+
+/// The shipped Qoder detector behind the same log pair, against a compatible
+/// host stub.
+#[test]
+#[cfg(unix)]
+fn paired_startup_and_exit_braces_do_not_swallow_the_shipped_qoder_status() {
+    let fixture = Fixture::new(&[Target::installable("qoder")]);
+    fs::copy(
+        bundled_adapters().join("qoder/scripts/detect.sh"),
+        fixture.adapter_dir.join("qoder/scripts/detect.sh"),
+    )
+    .expect("copy shipped qoder detector");
+    let stub = fixture.stub_bin();
+    write_script(&stub.join("qodercli"), "#!/bin/sh\nexit 0\n");
+    let startup = startup_file(fixture._root.path(), STARTUP_PAIRED_BRACES);
+    let path = format!(
+        "{}:{}",
+        stub.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "qoder"),
+        "installable",
+        "the shipped detector's status was lost inside a log pair:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "qoder"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["qoder".to_string()],
+        "the registration was skipped:\n{}",
+        named.combined()
+    );
+}

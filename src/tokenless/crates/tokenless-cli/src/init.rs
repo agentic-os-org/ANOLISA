@@ -395,7 +395,9 @@ fn interpret_detect(
 /// prose line that happens to hold a brace — a partial document is a bug in the
 /// detector. Honouring only the leading brace let one line of Bash startup
 /// output hide a broken document, and the exit code that followed reported a
-/// registration nobody had verified.
+/// registration nobody had verified. A document that parses is never unreadable,
+/// so a log line holding a brace pair costs nothing: the walk steps inside it
+/// and still reads the status it surrounds.
 ///
 /// The whole output still has to fail: a document that parses and merely
 /// carries no recognised field is the detector's answer, not a broken one.
@@ -431,15 +433,13 @@ fn opens_object_literal(bytes: &[u8], open: usize) -> bool {
 /// JSON objects a detector published on stdout.
 ///
 /// The whole output is tried first because a detector that publishes nothing
-/// else parses in one step. Failing that, every balanced `{...}` span is tried
-/// on its own, so a document survives whatever shares the stream with it:
-/// `codex` pretty-prints one object across several lines, a detector may log
-/// around it, and the lifecycle scripts inherit the caller's environment — so
-/// a `BASH_ENV` startup file that writes to stdout lands ahead of the status.
-/// Reading line by line lost that document, and the exit code that followed
-/// reported a registration nobody had verified. A brace such output left
-/// unclosed does not hide the document either, because the scan resyncs on the
-/// next one instead of treating everything after it as nested.
+/// else parses in one step. Failing that, the stream is walked brace by brace,
+/// so a document survives whatever shares the stream with it: `codex`
+/// pretty-prints one object across several lines, a detector may log around it,
+/// and the lifecycle scripts inherit the caller's environment — so a `BASH_ENV`
+/// startup file that writes to stdout lands ahead of the status, and its EXIT
+/// trap lands after it. Reading line by line lost that document, and the exit
+/// code that followed reported a registration nobody had verified.
 fn json_objects(stdout: &str) -> Vec<serde_json::Value> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
@@ -450,35 +450,39 @@ fn json_objects(stdout: &str) -> Vec<serde_json::Value> {
     {
         return vec![value];
     }
-    json_object_spans(trimmed)
-        .into_iter()
-        .filter_map(|span| serde_json::from_str::<serde_json::Value>(span).ok())
-        .filter(|value| value.is_object())
-        .collect()
+    published_objects(trimmed)
 }
 
-/// Every JSON object document in `text`, outermost first, in the order they
-/// open.
+/// Walk `text` brace by brace and parse every JSON object document in it.
 ///
-/// Each `{` is a candidate document: [`matching_brace`] looks for the brace
-/// that closes it, tracking strings so a brace inside a path neither splits nor
-/// closes one, and an escape consuming exactly the one byte after it so a `\f`
-/// in a path does not swallow the quote that ends the string. Quotes are read
-/// from the candidate's own brace onwards, so prose before it — quoted or not —
-/// cannot change how the document is scanned.
+/// Each `{` is a candidate document, scanned by [`matching_brace`]: strings are
+/// tracked from the candidate's own brace onwards, so prose before it — quoted
+/// or not — cannot change how it is read, a brace inside a path neither splits
+/// nor closes it, and an escape consumes exactly the one byte after it.
 ///
-/// A candidate that never closes is prose, not a document, and the scan resyncs
-/// on the next brace: one unmatched `{` in a startup log must not swallow the
-/// status behind it. Unless the candidate opened as an object literal — then it
-/// is one broken document, and a brace-shaped region inside it is part of that
-/// document rather than a second answer to salvage, so the scan stops and
-/// [`status_unreadable`] reports it. The resync budget keeps a wall of unmatched
-/// braces linear instead of quadratic; exhausting it leaves fewer documents in
-/// the result, which reads as [`DetectStatus::Unreadable`] — the conservative
-/// answer — rather than as a status nobody published.
-fn json_object_spans(text: &str) -> Vec<&str> {
+/// A candidate that balances *and* parses is the answer, and the walk continues
+/// after it: a nested object is part of that document, not a second answer.
+/// Every other candidate is stepped over rather than skipped —
+///
+/// * balanced but not JSON: a log line that happens to hold a brace pair, which
+///   is exactly what a paired startup and exit message leaves around the whole
+///   detector run, so the document it surrounds is still ahead;
+/// * never closed: prose with an unmatched brace, which must not swallow the
+///   documents behind it.
+///
+/// The one candidate that stops the walk is an object literal — a brace whose
+/// first non-whitespace byte is a double quote — that never closes. That is a
+/// detector's broken document, and a brace-shaped region inside it is part of
+/// that document rather than an answer to salvage, so [`status_unreadable`]
+/// reports it instead of an inner object standing in for the missing status.
+///
+/// Stepping over candidates is budgeted, so output that is mostly braces stays
+/// linear instead of quadratic; exhausting the budget yields fewer documents,
+/// which reads as [`DetectStatus::Unreadable`] — the conservative answer —
+/// rather than as a status nobody published.
+fn published_objects(text: &str) -> Vec<serde_json::Value> {
     let bytes = text.as_bytes();
-    let mut spans: Vec<&str> = Vec::new();
+    let mut objects = Vec::new();
     let mut cursor = 0;
     let mut resyncs = MAX_BRACE_RESYNCS;
     while cursor < bytes.len() {
@@ -486,30 +490,30 @@ fn json_object_spans(text: &str) -> Vec<&str> {
             break;
         };
         let open = cursor + offset;
-        match matching_brace(text, open) {
-            // Nested objects are part of this document rather than a second
-            // answer, so the scan continues after the closing brace.
-            Some(close) => {
-                spans.push(&text[open..=close]);
+        if let Some(close) = matching_brace(text, open) {
+            if let Ok(value @ serde_json::Value::Object(_)) =
+                serde_json::from_str::<serde_json::Value>(&text[open..=close])
+            {
+                objects.push(value);
                 cursor = close + 1;
+                continue;
             }
-            None => {
-                if opens_object_literal(bytes, open) || resyncs == 0 {
-                    break;
-                }
-                resyncs -= 1;
-                cursor = open + 1;
-            }
+        } else if opens_object_literal(bytes, open) {
+            break;
         }
+        if resyncs == 0 {
+            break;
+        }
+        resyncs -= 1;
+        cursor = open + 1;
     }
-    spans
+    objects
 }
 
-/// How many unclosed braces the scanner steps over before giving up.
+/// How many brace candidates the walk steps over before giving up.
 ///
-/// A status document is a few hundred bytes and a stray brace in a startup log
-/// costs one resync, so this is only ever reached by output that is mostly
-/// unmatched braces.
+/// A status document is a few hundred bytes, a log line around it costs one
+/// step, so this is only ever reached by output that is mostly braces.
 const MAX_BRACE_RESYNCS: usize = 64;
 
 /// The brace closing the object that opens at `open`, or `None` when the text
@@ -1279,18 +1283,56 @@ mod tests {
     }
 
     #[test]
-    fn json_object_spans_track_strings_and_nesting() {
+    fn the_walk_tracks_strings_and_nesting() {
         // A quoted startup line, a brace inside a path and an escaped quote
         // must not hide or split the document.
         let stdout = "echo \"shell initialized\"\n{\"path\": \"/opt/we{ird}/to\\\"kenless\", \"status\": \"ready\"}\n";
         assert_eq!(json_objects(stdout).len(), 1, "{stdout}");
         assert_eq!(declared(Some(1), stdout), DetectStatus::Ready);
         // A nested object is one document, not two.
-        assert_eq!(json_object_spans("{\"a\": {\"b\": 1}}").len(), 1);
+        assert_eq!(json_objects("{\"a\": {\"b\": 1}}").len(), 1);
         // A document that never closes publishes nothing, which is what makes
         // it unreadable rather than an answer.
-        assert!(json_object_spans("{\"a\": \"x").is_empty());
-        assert!(json_object_spans("no braces here").is_empty());
+        assert!(json_objects("{\"a\": \"x").is_empty());
+        assert!(json_objects("no braces here").is_empty());
+    }
+
+    #[test]
+    fn a_balanced_log_pair_around_the_document_is_stepped_into() {
+        // A startup line and an EXIT trap that each print one brace leave the
+        // whole detector run inside a balanced pair of prose braces. The pair is
+        // not JSON, so it may not cost the document it surrounds: the walk steps
+        // inside it instead of over it.
+        let stdout = "shell-initialized {\n{\n  \"status\": \"installable\"\n}\n}\n";
+        assert_eq!(json_objects(stdout).len(), 1, "{stdout}");
+        assert!(!status_unreadable(stdout));
+        assert_eq!(declared(Some(0), stdout), DetectStatus::Installable);
+
+        // The compact shape the shipped qoder detector publishes, wrapped the
+        // same way, and the same wrapper around a pretty-printed document.
+        let compact = "shell-initialized {\n{\"status\":\"installable\"}\n}\n";
+        assert_eq!(declared(Some(0), compact), DetectStatus::Installable);
+
+        // Nested log pairs: every level is prose, the document is still read.
+        let nested = "a {\nb {\n{\"status\":\"ready\"}\n}\n}\n";
+        assert_eq!(json_objects(nested).len(), 1, "{nested}");
+        assert_eq!(declared(Some(1), nested), DetectStatus::Ready);
+
+        // A log pair in front of two documents keeps both.
+        let two = "{\n{\"status\":\"ready\"}\n{\"status\":\"installable\"}\n}\n";
+        assert_eq!(json_objects(two).len(), 2, "{two}");
+        assert_eq!(declared(Some(1), two), DetectStatus::Ready);
+    }
+
+    #[test]
+    fn a_log_pair_around_a_broken_document_stays_unreadable() {
+        // Stepping inside a prose pair must not rescue a document that was
+        // opened as JSON and never closed: that is still one broken answer, so
+        // nothing may stand in for the status the detector failed to publish.
+        let stdout = format!("shell-initialized {{\n{BROKEN_CODEX_STATUS}}}\n");
+        assert!(json_objects(&stdout).is_empty(), "{stdout}");
+        assert!(status_unreadable(&stdout));
+        assert_eq!(declared(Some(0), &stdout), DetectStatus::Unreadable);
     }
 
     #[test]
@@ -1337,7 +1379,7 @@ mod tests {
         // escaped, so a valid document never closed and the target came out
         // unreadable instead of installable.
         let form_feed = r#"{"path": "/opt/bin\ftokenless", "status": "installable"}"#;
-        assert_eq!(json_object_spans(form_feed).len(), 1, "{form_feed}");
+        assert_eq!(json_objects(form_feed).len(), 1, "{form_feed}");
         assert_eq!(declared(Some(0), form_feed), DetectStatus::Installable);
         assert!(!status_unreadable(form_feed));
 
