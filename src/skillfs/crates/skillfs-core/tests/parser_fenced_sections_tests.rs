@@ -232,3 +232,109 @@ description: How to author a SKILL.md
         entry.parse_status
     );
 }
+
+#[test]
+fn test_top_level_sections_follow_unclosed_list_fences() {
+    let content = r#"---
+name: demo
+description: List examples followed by contract sections
+---
+
+10. Parameter example
+    ```sh
+    echo example
+
+## Parameters
+
+- `target` (string, required): Output target
+
+10. Return example
+    ~~~sh
+    echo result
+
+## Returns
+
+- `result` (string): Output result
+"#;
+
+    let entry = parse_skill_md(content, "demo");
+    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+    assert_eq!(
+        entry
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["target"],
+    );
+    assert_eq!(
+        entry
+            .returns
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
+        ["result"],
+    );
+}
+
+#[test]
+fn test_unclosed_nested_list_fence_ends_at_parent_item_content() {
+    let content = r#"---
+name: demo
+description: A parameter with a nested example
+---
+
+## Parameters
+
+- `source` (string, required): Input source
+  1. Example
+     ```markdown
+
+     - `example` (string, required): Still in the example
+  - `nested` (string, optional): Outside the example
+- `target` (string, required): Output target
+"#;
+
+    let entry = parse_skill_md(content, "demo");
+    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+    assert_eq!(
+        entry
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["source", "nested", "target"],
+    );
+}
+
+#[test]
+fn test_dedented_fence_opens_outside_the_list() {
+    let content = r#"---
+name: demo
+description: Adjacent list and top-level examples
+---
+
+10. A list example
+    ```markdown
+    Literal text
+```
+## Parameters
+
+- `example` (string, required): Still inside the top-level example
+```
+## Parameters
+
+- `target` (string, required): Output target
+"#;
+
+    let entry = parse_skill_md(content, "demo");
+    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+    assert_eq!(
+        entry
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["target"],
+    );
+}
