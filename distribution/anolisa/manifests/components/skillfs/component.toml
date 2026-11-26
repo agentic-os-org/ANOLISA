@@ -1,6 +1,6 @@
 [component]
 name = "skillfs"
-version = "0.5.8"
+version = "0.5.9"
 layer = "runtime"
 domain = "tools"
 display_name = "SkillFS"

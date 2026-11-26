@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-11-26
+
+### Added
+
+- Use `skillfs explain --config PATH` before mounting to see which source copy
+  wins and whether a Skill appears in the default view. Add `--skill NAME` to
+  inspect one Skill and `--format json` for a structured report
+  ([#10100](https://github.com/agentic-os-org/ANOLISA/pull/10100)).
+
+### Fixed
+
+- Count unique Skills toward `max_skills`. Report duplicate names across
+  categories without letting them consume slots needed by other Skills
+  ([#10560](https://github.com/agentic-os-org/ANOLISA/pull/10560)).
+- Stop fallback descriptions at the next ATX heading and end parameter
+  and return sections before later top-level content
+  ([#10497](https://github.com/agentic-os-org/ANOLISA/pull/10497),
+  [#10651](https://github.com/agentic-os-org/ANOLISA/pull/10651)).
+- Read parameter and return sections that follow a fenced example at the end
+  of a Markdown list item
+  ([#10709](https://github.com/agentic-os-org/ANOLISA/pull/10709)).
+- Preserve the original `SKILL.md` when a conditional block repeats `@else`.
+  Command normalization ignores inline directive references and malformed
+  directive markers
+  ([#10475](https://github.com/agentic-os-org/ANOLISA/pull/10475),
+  [#10552](https://github.com/agentic-os-org/ANOLISA/pull/10552)).
+- Skip directories and other non-regular session log entries. Read the
+  usage script's JSON configuration and write its JSON reports in UTF-8
+  ([#10572](https://github.com/agentic-os-org/ANOLISA/pull/10572),
+  [#10620](https://github.com/agentic-os-org/ANOLISA/pull/10620)).
+
 ## [0.5.8] - 2026-11-20
 
 ### Fixed
