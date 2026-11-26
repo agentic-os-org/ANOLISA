@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.30.4] - 2026-11-26
+
+### Fixed
+
+- Ordinary shell commands and terminal output do less work under memory pressure, while secret redaction and live input activity tracking are preserved. Repeated editing notifications are compacted in diagnostic journals. Sustained pressure can still delay startup and commands (#10786)
+
 ## [0.30.3] - 2026-11-26
 
 ### Changed
