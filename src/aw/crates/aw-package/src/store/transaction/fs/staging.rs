@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::{CString, OsStr},
     fs::File,
-    io::{Read, Write},
+    io::Write,
     os::fd::{AsRawFd, FromRawFd},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -16,10 +16,30 @@ use std::{
 /// owning transaction id after it.
 pub(super) const STAGING_PREFIX: &str = ".aw-staging-";
 
-/// True when `name` is a fallback staging name owned by `owner`.
+/// True when `name` is exactly the fallback staging name `owner` generates:
+/// `.aw-staging-<owner>-<pid>-<sequence>`. A same-prefix name with any other
+/// suffix is not ours to reclaim, so recovery never deletes it.
 pub(super) fn staging_name(name: &OsStr, owner: &str) -> bool {
-    name.to_str()
-        .is_some_and(|name| name.starts_with(&format!("{STAGING_PREFIX}{owner}-")))
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix(STAGING_PREFIX) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix(owner) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix('-') else {
+        return false;
+    };
+    let mut parts = rest.split('-');
+    let (Some(pid), Some(sequence), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !pid.is_empty()
+        && !sequence.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[derive(Debug)]
@@ -255,11 +275,9 @@ pub(in crate::store::transaction) fn remove_staging(
     Ok(removed)
 }
 
-/// Marker file that proves a workspace still belongs to the journal describing it.
-pub(in crate::store::transaction) const WORKSPACE_MARKER: &str = ".aw-workspace-nonce";
-
-/// Temporary name used while the marker is published; a crash may leave it behind.
-pub(in crate::store::transaction) const WORKSPACE_MARKER_TMP: &str = ".aw-workspace-nonce.tmp";
+/// Prefix of the workspace marker name; the encoded nonce follows it, so only
+/// the transaction that recorded that nonce can create the file.
+pub(in crate::store::transaction) const WORKSPACE_MARKER_PREFIX: &str = ".aw-workspace-nonce.";
 
 const WORKSPACE_NONCE_BYTES: usize = 32;
 
@@ -279,104 +297,111 @@ pub(in crate::store::transaction) fn workspace_nonce_hash(nonce: &[u8]) -> Strin
     format!("{:x}", Sha256::digest(nonce))
 }
 
-/// True when the marker still carries the nonce the journal recorded.
-pub(in crate::store::transaction) fn workspace_nonce_matches(recorded: &str, marker: &[u8]) -> bool {
-    recorded == workspace_nonce_hash(marker)
+/// True when the marker name still carries the nonce the journal recorded.
+pub(in crate::store::transaction) fn workspace_nonce_matches(recorded: &str, nonce: &[u8]) -> bool {
+    recorded == workspace_nonce_hash(nonce)
 }
 
-/// Publish the marker without ever exposing a half-written one.
+fn marker_name(nonce: &[u8]) -> String {
+    let mut name = String::with_capacity(WORKSPACE_MARKER_PREFIX.len() + 2 * nonce.len());
+    name.push_str(WORKSPACE_MARKER_PREFIX);
+    for byte in nonce {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name
+}
+
+fn decode_hex(encoded: &str) -> Option<Vec<u8>> {
+    if !encoded.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    let mut digits = encoded.bytes();
+    while let (Some(high), Some(low)) = (digits.next(), digits.next()) {
+        let high = (high as char).to_digit(16)?;
+        let low = (low as char).to_digit(16)?;
+        bytes.push((high * 16 + low) as u8);
+    }
+    Some(bytes)
+}
+
+/// The nonce encoded in a marker name, when `name` has the marker shape.
+pub(in crate::store::transaction) fn workspace_marker_nonce(name: &OsStr) -> Option<Vec<u8>> {
+    let encoded = name.to_str()?.strip_prefix(WORKSPACE_MARKER_PREFIX)?;
+    let nonce = decode_hex(encoded)?;
+    (nonce.len() == WORKSPACE_NONCE_BYTES).then_some(nonce)
+}
+
+/// Publish the marker without an intermediate name: exclusive creation keeps a
+/// second writer out, and the encoded nonce in the name is the ownership proof
+/// recovery compares against the journal.
 pub(in crate::store::transaction) fn write_workspace_marker(
     workspace: &Path,
     nonce: &[u8],
 ) -> Result<()> {
     let directory = super::directory(workspace)?;
-    let temporary = cstring(OsStr::new(WORKSPACE_MARKER_TMP))?;
-    let marker = cstring(OsStr::new(WORKSPACE_MARKER))?;
-    let mut file = opened(
+    let name = marker_name(nonce);
+    let file = opened(
         &directory,
-        OsStr::new(WORKSPACE_MARKER_TMP),
+        OsStr::new(&name),
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         0o600,
     )?;
-    file.write_all(nonce)?;
     file.sync_all()?;
     drop(file);
-    // SAFETY: both names are single children of the anchored workspace directory.
-    if unsafe {
-        libc::renameat2(
-            directory.as_raw_fd(),
-            temporary.as_ptr(),
-            directory.as_raw_fd(),
-            marker.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error().into());
-    }
     directory.sync_all()?;
     Ok(())
 }
 
-/// Read the marker bytes through the anchored descriptor; a longer file than the
-/// nonce is returned as-is so the caller's hash comparison rejects it.
-pub(in crate::store::transaction) fn read_workspace_marker(
-    directory: &File,
-    workspace: &Path,
-) -> Result<Option<Vec<u8>>> {
-    let file = match opened(directory, OsStr::new(WORKSPACE_MARKER), libc::O_RDONLY, 0) {
-        Ok(file) => file,
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let mut marker = Vec::new();
-    let mut reader = file.take((WORKSPACE_NONCE_BYTES + 1) as u64);
-    reader.read_to_end(&mut marker)?;
-    let _ = workspace;
-    Ok(Some(marker))
+fn unlink(directory: &File, name: &CString) -> Result<()> {
+    // SAFETY: `name` is a single child of the verified workspace descriptor.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error.into());
+        }
+    }
+    Ok(())
 }
 
-/// True when only a marker temporary remains: the crash happened while the
-/// marker was published, before any staging file existed.
-pub(in crate::store::transaction) fn marker_temporaries(entries: &[PathBuf]) -> bool {
-    !entries.is_empty()
-        && entries.iter().all(|entry| {
-            entry
-                .file_name()
-                .is_some_and(|name| name == OsStr::new(WORKSPACE_MARKER_TMP))
-        })
-}
-
-/// Remove the staging names of `owner`, the marker, and then the directory when
-/// nothing else remains. Returns whether the directory was removed; unknown
-/// content is never touched, so the caller can report a conflict instead.
+/// Remove the workspace only when its marker proves ownership by `recorded` and
+/// every other entry is a staging name `owner` generates. Staging files go first
+/// and the directory is synced before the marker is retired, so an interrupted
+/// cleanup still leaves the marker the next pass needs. Unknown content is never
+/// touched: the function reports `false` so the caller raises a conflict.
 pub(in crate::store::transaction) fn clear_workspace(
     directory: &File,
     workspace: &Path,
     owner: &str,
+    recorded: &str,
 ) -> Result<bool> {
-    let mut remove = Vec::new();
+    let mut staging = Vec::new();
+    let mut marker = None;
     for entry in super::entries_in(directory, workspace)? {
         let Some(name) = entry.file_name() else {
-            continue;
+            return Ok(false);
         };
-        let ours = staging_name(name, owner)
-            || name == OsStr::new(WORKSPACE_MARKER)
-            || name == OsStr::new(WORKSPACE_MARKER_TMP);
-        if !ours {
+        if staging_name(name, owner) {
+            staging.push(cstring(name)?);
+        } else if marker.is_none()
+            && workspace_marker_nonce(name)
+                .is_some_and(|nonce| workspace_nonce_matches(recorded, &nonce))
+        {
+            marker = Some(cstring(name)?);
+        } else {
             return Ok(false);
         }
-        remove.push(cstring(name)?);
     }
-    for name in &remove {
-        // SAFETY: every name is a child of the verified workspace descriptor.
-        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(error.into());
-            }
-        }
+    let Some(marker) = marker else {
+        return Ok(false);
+    };
+    for name in &staging {
+        unlink(directory, name)?;
     }
+    if !staging.is_empty() {
+        directory.sync_all()?;
+    }
+    unlink(directory, &marker)?;
     directory.sync_all()?;
     let identity = super::identity_of(directory)?;
     super::rmdir(workspace, Some(&identity))
@@ -488,6 +513,62 @@ mod tests {
             entries(&parent).is_empty(),
             "no named staging file may remain"
         );
+    }
+
+    #[test]
+    fn staging_name_requires_the_complete_generated_format() {
+        assert!(staging_name(OsStr::new(".aw-staging-txn-1-0"), "txn"));
+        assert!(staging_name(OsStr::new(".aw-staging-txn-42-17"), "txn"));
+        assert!(!staging_name(OsStr::new(".aw-staging-txn-notes"), "txn"));
+        assert!(!staging_name(OsStr::new(".aw-staging-txn-1"), "txn"));
+        assert!(!staging_name(OsStr::new(".aw-staging-txn-1-2-3"), "txn"));
+        assert!(!staging_name(OsStr::new(".aw-staging-txn--1"), "txn"));
+        assert!(!staging_name(OsStr::new(".aw-staging-other-1-0"), "txn"));
+    }
+
+    #[test]
+    fn marker_names_round_trip_the_nonce_and_reject_foreign_shapes() {
+        let nonce = vec![0xab; WORKSPACE_NONCE_BYTES];
+        let name = marker_name(&nonce);
+        assert!(name.starts_with(WORKSPACE_MARKER_PREFIX));
+        assert_eq!(
+            workspace_marker_nonce(OsStr::new(&name)),
+            Some(nonce.clone())
+        );
+        assert!(workspace_nonce_matches(
+            &workspace_nonce_hash(&nonce),
+            &workspace_marker_nonce(OsStr::new(&name)).unwrap()
+        ));
+        assert_eq!(
+            workspace_marker_nonce(OsStr::new(".aw-workspace-nonce.tmp")),
+            None
+        );
+        assert_eq!(
+            workspace_marker_nonce(OsStr::new(".aw-workspace-nonce.zz")),
+            None
+        );
+        assert_eq!(
+            workspace_marker_nonce(OsStr::new(".aw-workspace-nonce.abcd")),
+            None
+        );
+    }
+
+    #[test]
+    fn clear_workspace_requires_the_recorded_marker() {
+        let (_root, parent) = staging_directory();
+        let nonce = vec![7u8; WORKSPACE_NONCE_BYTES];
+        let workspace = parent.join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::write(workspace.join(marker_name(&nonce)), b"").expect("marker");
+        std::fs::write(workspace.join(format!("{STAGING_PREFIX}txn-1-0")), b"stage")
+            .expect("stage");
+        let directory = std::fs::File::open(&workspace).expect("workspace");
+        assert!(!clear_workspace(&directory, &workspace, "txn", &"0".repeat(64)).unwrap());
+        assert!(workspace.join(marker_name(&nonce)).exists());
+        assert!(
+            clear_workspace(&directory, &workspace, "txn", &workspace_nonce_hash(&nonce)).unwrap()
+        );
+        assert!(!workspace.exists());
     }
 
     #[test]

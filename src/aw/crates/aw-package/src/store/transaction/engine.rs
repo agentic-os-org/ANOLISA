@@ -135,7 +135,8 @@ fn execute(
     fs::mkdir(&entry.workspace(), 0o700)?;
     entry.workspace_identity = Some(fs::directory_identity(&entry.workspace())?);
     // The journal records the nonce before the marker exists, so a crash in
-    // this window leaves an empty workspace that recovery can retire safely.
+    // this window leaves an empty workspace; afterwards the marker name carries
+    // the nonce recovery compares against. Staging starts only after both.
     let nonce = fs::new_workspace_nonce()?;
     entry.workspace_nonce = Some(fs::workspace_nonce_hash(&nonce));
     entry.write()?;

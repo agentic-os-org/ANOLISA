@@ -10,8 +10,7 @@ pub(super) use faults::{
     fail_staging_write, fail_tmpfile, replace_workspace_after_check,
 };
 pub(super) use staging::{
-    anonymous, clear_workspace, marker_temporaries, new_workspace_nonce, publish,
-    read_workspace_marker, remove_staging, workspace_nonce_hash, workspace_nonce_matches,
+    anonymous, clear_workspace, new_workspace_nonce, publish, remove_staging, workspace_nonce_hash,
     write_bytes, write_workspace_marker,
 };
 

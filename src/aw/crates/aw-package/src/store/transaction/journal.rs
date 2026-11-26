@@ -47,8 +47,8 @@ pub(super) struct Journal {
     pub prefix_created: bool,
     pub prefix_identity: Option<Identity>,
     pub workspace_identity: Option<Identity>,
-    /// SHA-256 of the random bytes stored in the workspace marker; recovery
-    /// reclaims the workspace only when that marker hashes to this value.
+    /// SHA-256 of the nonce encoded in the workspace marker name; recovery
+    /// reclaims the workspace only when that name carries this nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_nonce: Option<String>,
     pub lock_created: bool,

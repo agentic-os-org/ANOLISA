@@ -267,32 +267,21 @@ pub(super) fn finish(
     let workspace = entry.workspace();
     // A reusable (dev, ino) cannot prove the workspace survived: a replacement
     // created at the same path may reuse it. Reclaim only a directory whose
-    // marker hashes to the recorded nonce; anything else is a conflict.
+    // marker name encodes the nonce the journal recorded; anything else, such as
+    // a stray temporary or foreign payload, is a conflict.
     match fs::directory(&workspace) {
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => conflicts.push(workspace),
         Ok(held) => {
-            let entries = fs::entries_in(&held, &workspace)?;
-            let claimed = if entries.is_empty() {
+            let claimed = if fs::entries_in(&held, &workspace)?.is_empty() {
                 // Nothing to lose, including a directory created before its journal.
                 fs::rmdir(&workspace, Some(&fs::identity_of(&held)?))?
-            } else if fs::marker_temporaries(&entries) {
-                // The crash landed inside marker publication; only the temporary exists.
-                fs::clear_workspace(&held, &workspace, &entry.transaction_id)?
+            } else if let Some(recorded) = entry.workspace_nonce.as_deref() {
+                #[cfg(test)]
+                fs::check_workspace();
+                fs::clear_workspace(&held, &workspace, &entry.transaction_id, recorded)?
             } else {
-                match (
-                    entry.workspace_nonce.as_deref(),
-                    fs::read_workspace_marker(&held, &workspace)?,
-                ) {
-                    (Some(recorded), Some(marker))
-                        if fs::workspace_nonce_matches(recorded, &marker) =>
-                    {
-                        #[cfg(test)]
-                        fs::check_workspace();
-                        fs::clear_workspace(&held, &workspace, &entry.transaction_id)?
-                    }
-                    _ => false,
-                }
+                false
             };
             if !claimed {
                 conflicts.push(workspace);

@@ -465,10 +465,12 @@ fn extras_enumeration_failure_keeps_the_journal_for_a_later_recovery() {
     assert_eq!(directories.len(), 1);
     let entry = journal::read(&fixture.paths, &directories[0]).unwrap();
 
-    // `classify` lists the transaction directory first, then `finish` lists it
-    // again to detect leftovers. Fail the second listing on its readdir
-    // boundary: a partial `extras` answer must not lead to journal removal.
-    let failure = fs::fail_enumeration_nth(&directories[0], 1, 1);
+    // Reaching `finish` with no staging left costs several listings: `classify`
+    // lists the directory, then reaps nothing, then lists it again, and `finish`
+    // reaps nothing before its own `extras` listing. Skip those three and fail
+    // the fourth on its readdir boundary: a partial `extras` answer must not lead
+    // to journal removal.
+    let failure = fs::fail_enumeration_nth(&directories[0], 1, 3);
     let error = super::super::recover(&fixture.paths, &AtomicBool::new(false))
         .expect_err("extras enumeration failure must abort recovery");
     assert!(
@@ -576,4 +578,96 @@ fn workspace_recreated_at_the_same_path_keeps_foreign_bytes() {
     let report = fixture.recover();
     assert_eq!(report.conflicts, vec![workspace]);
     assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign bytes\n");
+}
+
+#[test]
+fn staging_names_outside_the_generated_format_are_conflicts() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let entry = pending(&fixture);
+    let workspace = entry.workspace();
+    let staging = fs::entries(&workspace)
+        .unwrap()
+        .into_iter()
+        .find(|path| is_staging(path))
+        .expect("staging file");
+
+    // The transaction owns `.aw-staging-<id>-<pid>-<sequence>` only. A neighbour
+    // that merely shares the prefix is not ours to reclaim.
+    let foreign = workspace.join(format!(".aw-staging-{}-notes", entry.transaction_id));
+    std::fs::write(&foreign, b"unrelated bytes\n").unwrap();
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert_eq!(report.conflicts, vec![workspace.clone()]);
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"unrelated bytes\n");
+    assert!(staging.exists(), "the owned staging payload must survive");
+
+    let report = fixture.recover();
+    assert_eq!(report.conflicts, vec![workspace]);
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"unrelated bytes\n");
+}
+
+#[test]
+fn marker_only_workspace_finishes_a_later_recovery() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let entry = pending(&fixture);
+    let workspace = entry.workspace();
+    for path in fs::entries(&workspace).unwrap() {
+        if is_staging(&path) {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    assert_eq!(
+        fs::entries(&workspace).unwrap().len(),
+        1,
+        "only the ownership marker remains"
+    );
+
+    // A crash between staging removal and marker retirement must leave enough
+    // evidence for the next pass: the marker name still carries the nonce.
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 1));
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert!(!workspace.exists());
+    assert!(!entry.directory().exists());
+}
+
+#[test]
+fn replacement_workspace_with_another_marker_is_a_conflict() {
+    let fixture = Fixture::new();
+    fixture.kill_with_env(
+        "staged-bytes-unpublished",
+        false,
+        &[("AW_PACKAGE_TEST_FORCE_FALLBACK", "yes")],
+    );
+    let entry = pending(&fixture);
+    let workspace = entry.workspace();
+    std::fs::remove_dir_all(&workspace).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+
+    // A replacement that guesses the marker shape but carries another nonce, or
+    // leaves only a half-written temporary, is not proven ours.
+    let refused = workspace.join(format!(".aw-workspace-nonce.{}", "0".repeat(64)));
+    std::fs::write(&refused, b"").unwrap();
+    let temporary = workspace.join(".aw-workspace-nonce.tmp");
+    std::fs::write(&temporary, b"n").unwrap();
+    let foreign = workspace.join(format!(".aw-staging-{}-4242-7", entry.transaction_id));
+    std::fs::write(&foreign, b"foreign bytes\n").unwrap();
+
+    let report = fixture.recover();
+    assert_eq!((report.committed, report.rolled_back), (0, 0));
+    assert_eq!(report.conflicts, vec![workspace.clone()]);
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign bytes\n");
+    assert!(refused.exists());
+    assert!(temporary.exists());
 }
