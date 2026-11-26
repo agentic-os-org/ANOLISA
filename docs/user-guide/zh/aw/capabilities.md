@@ -18,6 +18,14 @@ Hook，支持显式启用的 `replace_input`、`replace_result` 与 `withhold_re
 调用对应的 `SourceSession` 方法。应用在结束轮次前采用 `turn.stop` 返回的决策。
 [通用 Runtime SDK 接入](../../../developer-guide/zh/aw/deployment/native-sdk.md#通用应用接入)
 
+使用包含 `aw_sdk.profile_source` 的 Python SDK 时，应用可为 `session.start`、`input.submit`、
+`tool.before`、`tool.after`、`turn.stop` 和 `session.end` 声明调用点。
+`ProfileSource.probe()` 校验 Profile 并拒绝不支持的事件。依次调用 `install()` 和 `verify()`，
+再等待 `activate()` 建立直连，或指定 `cooperative=True` 后通过 `aw connect --sdk-pid` 挂接。
+每个业务请求进入 `async with profile.request()`，也可传入已有的 SDK Session。
+迭代器结果须声明对应的流式调用形态，有界缓冲流只交付检查后的分块。工具输入须为 JSON 对象或其
+JSON 字符串编码。可写路径支持内置字典、列表和元组，只读字段映射还可读取对象已存储的属性。
+
 ## Hook 支持矩阵
 
 ✓ 已声明且有契约测试覆盖，× 尚不支持。多数 Adapter 在获准文本槽中替换结果并保留原生回执与失败状态；Codex 的普通模型文本替换范围见下文。

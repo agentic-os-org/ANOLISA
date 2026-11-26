@@ -21,6 +21,17 @@ from the application's native boundaries. The application adopts the returned
 `turn.stop` decision before allowing the turn to end.
 [Runtime SDK integration](../../../developer-guide/en/aw/deployment/native-sdk.md#framework-free-integration)
 
+Python applications using an SDK build that includes `aw_sdk.profile_source` can
+declare call sites for `session.start`, `input.submit`, `tool.before`, `tool.after`,
+`turn.stop` and `session.end`. `ProfileSource.probe()` checks the profile and rejects
+unsupported events. Call `install()` and `verify()`, then await `activate()` for a
+direct connection or use `cooperative=True` with `aw connect --sdk-pid`. Bind each
+business request with `async with profile.request()` or pass its existing SDK session.
+Use iterator call shapes for lazy results. A buffered stream delivers the checked
+items only. Tool inputs require a JSON object or its JSON string encoding. Writable
+paths traverse built-in dictionaries, lists and tuples. Stored object attributes
+remain available for read-only mappings.
+
 ## Hook support matrix
 
 ✓ Declared with contract coverage; × unsupported. Most Adapters replace authorized text slots while preserving native envelopes and failure status. Codex has a narrower model-text contract described below.
