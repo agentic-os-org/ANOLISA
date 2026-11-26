@@ -35,6 +35,25 @@ pub fn is_codex_rollout(events: &[serde_json::Value]) -> bool {
     })
 }
 
+/// Version 1 complements the byte count so every pre-classification (raw size)
+/// entry is rescanned. The store compares mtime separately.
+pub(crate) fn scan_fingerprint_v1(file_size: i64) -> i64 {
+    !file_size
+}
+
+pub(crate) fn is_subagent(events: &[serde_json::Value]) -> bool {
+    events.iter().any(|event| {
+        if envelope_type(event) != "session_meta" {
+            return false;
+        }
+        let source = &event["payload"]["source"];
+        source == "subagent"
+            || source
+                .get("subagent")
+                .is_some_and(|marker| !marker.is_null() && marker.as_bool() != Some(false))
+    })
+}
+
 /// Accumulates one agent turn (reasoning + tool calls + assistant text)
 /// before it is flushed into a single ATIF agent step.
 #[derive(Default)]

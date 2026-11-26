@@ -78,7 +78,7 @@ impl Fixture {
     fn state(&self) -> (i64, i64) {
         let metadata = std::fs::metadata(self.file()).unwrap();
         (
-            metadata.len() as i64,
+            !(metadata.len() as i64), // Codex v1 scan fingerprint
             metadata
                 .modified()
                 .unwrap()
