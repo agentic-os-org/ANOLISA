@@ -73,11 +73,12 @@ pub(crate) fn resolve_target(selector: TargetSelector) -> Result<OsTarget, OsAda
 /// Ubuntu. Operators on unrecognized distributions must set `target_os`
 /// explicitly rather than rely on a fuzzy guess.
 pub fn parse_os_release(content: &str) -> Option<OsTarget> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let mut id: Option<String> = None;
     for line in content.lines() {
-        let line = line.trim();
+        let line = line.trim_matches(is_ascii_blank);
         if let Some(rest) = line.strip_prefix("ID=") {
-            id = Some(unquote(rest).to_ascii_lowercase());
+            id = parse_os_release_value(rest).map(|val| val.to_ascii_lowercase());
         }
     }
 
@@ -88,16 +89,74 @@ pub fn parse_os_release(content: &str) -> Option<OsTarget> {
     }
 }
 
-/// Strip matched surrounding single or double quotes from an os-release value.
-fn unquote(s: &str) -> &str {
-    let s = s.trim();
-    if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-    {
-        &s[1..s.len() - 1]
-    } else {
-        s
+/// Only ASCII space and horizontal tab act as shell blanks in `os-release(5)`.
+fn is_ascii_blank(ch: char) -> bool {
+    matches!(ch, ' ' | '\t')
+}
+
+/// Parse one `os-release(5)` assignment value, honoring single or double
+/// quotes, shell-style backslash escapes, and trailing `#` comments while
+/// rejecting unclosed quotes or trailing non-comment tokens fail-closed.
+fn parse_os_release_value(raw: &str) -> Option<String> {
+    let s = raw.trim_end_matches(is_ascii_blank);
+    if s.is_empty() {
+        return Some(String::new());
     }
+    if s.starts_with(is_ascii_blank) {
+        return allows_trailing_comment(s).then(String::new);
+    }
+    if let Some(rest) = s.strip_prefix('\'') {
+        let end = rest.find('\'')?;
+        let value = &rest[..end];
+        let tail = &rest[end + 1..];
+        return allows_trailing_comment(tail).then(|| value.to_string());
+    }
+    if let Some(rest) = s.strip_prefix('"') {
+        let mut out = String::with_capacity(rest.len());
+        let mut chars = rest.char_indices();
+        while let Some((idx, ch)) = chars.next() {
+            match ch {
+                '"' => {
+                    let tail = &rest[idx + 1..];
+                    return allows_trailing_comment(tail).then_some(out);
+                }
+                '\\' => {
+                    let (_, next) = chars.next()?;
+                    if !matches!(next, '$' | '"' | '\\' | '`') {
+                        out.push('\\');
+                    }
+                    out.push(next);
+                }
+                _ => out.push(ch),
+            }
+        }
+        return None;
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.char_indices();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '\\' => {
+                let (_, next) = chars.next()?;
+                out.push(next);
+            }
+            '"' | '\'' => return None,
+            c if is_ascii_blank(c) => {
+                let tail = &s[idx..];
+                return allows_trailing_comment(tail).then_some(out);
+            }
+            _ => out.push(ch),
+        }
+    }
+    Some(out)
+}
+
+/// After a complete quoted or unquoted value, only ASCII blanks or a
+/// blank-separated `#` comment may follow on the same line.
+fn allows_trailing_comment(tail: &str) -> bool {
+    let trimmed = tail.trim_start_matches(is_ascii_blank);
+    trimmed.is_empty() || (tail.len() > trimmed.len() && trimmed.starts_with('#'))
 }
 
 #[cfg(test)]
@@ -170,5 +229,96 @@ mod tests {
             resolve_target(TargetSelector::Alinux).unwrap(),
             OsTarget::Alinux
         );
+    }
+
+    #[test]
+    fn os_release_strips_leading_utf8_bom_and_inline_comments() {
+        assert_eq!(
+            parse_os_release("\u{feff}ID=ubuntu\nID_LIKE=debian\n"),
+            Some(OsTarget::Ubuntu)
+        );
+        assert_eq!(
+            parse_os_release("ID=ubuntu # Ubuntu LTS\n"),
+            Some(OsTarget::Ubuntu)
+        );
+        assert_eq!(
+            parse_os_release("ID=\"alinux\" # Alibaba Cloud Linux\n"),
+            Some(OsTarget::Alinux)
+        );
+        assert_eq!(
+            parse_os_release("ID='debian' # Debian GNU/Linux\n"),
+            Some(OsTarget::Ubuntu)
+        );
+        assert_eq!(
+            parse_os_release("ID=\"ubuntu\" # \"quoted comment\"\n"),
+            Some(OsTarget::Ubuntu)
+        );
+        assert_eq!(
+            parse_os_release("ID='anolis' # 'quoted comment'\n"),
+            Some(OsTarget::Alinux)
+        );
+    }
+
+    #[test]
+    fn os_release_unescapes_shell_escapes_and_rejects_malformed_values() {
+        assert_eq!(parse_os_release("ID=u\\buntu\n"), Some(OsTarget::Ubuntu));
+        assert_eq!(
+            parse_os_release("ID=\"al\\inux\"\n"),
+            None,
+            "unknown backslash sequence inside double quotes stays literal"
+        );
+        // Unclosed quotes, escaped closing quotes, or trailing non-comment tokens fail closed.
+        assert_eq!(parse_os_release("ID=\"ubuntu\n"), None);
+        assert_eq!(parse_os_release("ID='alinux\n"), None);
+        assert_eq!(parse_os_release("ID=\"ubuntu\\\"\n"), None);
+        assert_eq!(parse_os_release("ID=\"ubuntu\"debian\n"), None);
+        assert_eq!(parse_os_release("ID=\"ubuntu\"#nospace\n"), None);
+        assert_eq!(parse_os_release("ID=ubuntu debian\n"), None);
+        assert_eq!(parse_os_release("ID=ub\"untu\n"), None);
+        // A later malformed ID= assignment overrides an earlier valid one fail-closed.
+        assert_eq!(parse_os_release("ID=ubuntu\nID=\"alinux\n"), None);
+    }
+
+    #[test]
+    fn os_release_rejects_unicode_whitespace_and_lone_cr() {
+        // Positive controls: ASCII space/tab blanks and CRLF line endings remain accepted.
+        assert_eq!(
+            parse_os_release("ID=ubuntu\t#tab\n"),
+            Some(OsTarget::Ubuntu)
+        );
+        assert_eq!(
+            parse_os_release(" \tID=\"ubuntu\"\t#tab\r\n"),
+            Some(OsTarget::Ubuntu)
+        );
+        assert_eq!(parse_os_release("ID=ubuntu\r\n"), Some(OsTarget::Ubuntu));
+
+        // Non-ASCII Unicode whitespace (e.g. U+00A0 NBSP) and lone CR are not shell blanks.
+        assert_eq!(parse_os_release("ID=ubuntu\u{00a0}#comment\n"), None);
+        assert_eq!(parse_os_release("ID=\"ubuntu\"\u{00a0}#comment\n"), None);
+        assert_eq!(parse_os_release("ID='ubuntu'\u{00a0}#comment\n"), None);
+        assert_eq!(parse_os_release("ID=ubuntu\u{00a0}\n"), None);
+        assert_eq!(parse_os_release("\u{00a0}ID=ubuntu\n"), None);
+        assert_eq!(parse_os_release("ID=\u{00a0}ubuntu\n"), None);
+        assert_eq!(parse_os_release("ID=ubuntu\r"), None);
+    }
+
+    #[test]
+    fn os_release_enforces_bash_assignment_blank_semantics() {
+        // An unescaped ASCII blank directly after '=' cannot precede a value.
+        assert_eq!(parse_os_release("ID= ubuntu\n"), None);
+        assert_eq!(parse_os_release("ID=\tubuntu\n"), None);
+        assert_eq!(parse_os_release("ID= \"ubuntu\"\n"), None);
+        assert_eq!(parse_os_release("ID=ubuntu\nID= ubuntu\n"), None);
+
+        // Blank + '#' after '=' is an empty assignment with a trailing comment,
+        // whereas '#' immediately after '=' is literal unquoted text.
+        assert_eq!(parse_os_release_value(" #comment"), Some(String::new()));
+        assert_eq!(
+            parse_os_release_value("#comment"),
+            Some("#comment".to_string())
+        );
+        assert_eq!(parse_os_release("ID= #comment\n"), None);
+        assert_eq!(parse_os_release("ID=#comment\n"), None);
+        assert_eq!(parse_os_release("ID=ubuntu\nID= #comment\n"), None);
     }
 }
