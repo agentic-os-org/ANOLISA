@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::CommandAssessmentSummaryModel;
+use crate::ui::{CommandAssessmentSummaryModel, HookWarningView};
 
 fn turn_consent_model(next_label: Option<&str>) -> ApprovalPanelModel<'_> {
     ApprovalPanelModel {
@@ -19,7 +19,495 @@ fn turn_consent_model(next_label: Option<&str>) -> ApprovalPanelModel<'_> {
         turn_extension: false,
         deny_always_trust: false,
         irrecoverable: false,
+        output_command: None,
         hook_warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn approval_output_disclosure_uses_bound_command_and_neutral_fallback() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for width in [40, 80] {
+            let renderer = RatatuiInlineRenderer::with_width(width).with_language(language);
+            for (command, expected) in [
+                (Some("uptime; free -h"), "ordinary"),
+                (Some("printenv TEST_SECRET"), "environment"),
+                (Some("ps aux"), "arguments"),
+                (Some("cat ~/.ssh/id_rsa"), "sensitive"),
+                (Some("custom-inspect"), "unknown"),
+                (None, "unknown"),
+            ] {
+                let mut model = turn_consent_model(None);
+                model.turn_consent = false;
+                model.queue_total = 1;
+                model.preview = "uptime";
+                model.output_command = command;
+                let text = renderer.approval_panel_lines(model).join("\n");
+                let compact = panel_content_without_layout(&text);
+                let phrase = match (language, expected) {
+                    (_, "ordinary") => None,
+                    (crate::Language::ZhCn, "environment") => Some("环境变量"),
+                    (crate::Language::ZhCn, "arguments") => Some("进程参数"),
+                    (crate::Language::ZhCn, "sensitive") => Some("敏感内容"),
+                    (crate::Language::ZhCn, _) => Some("无法预判"),
+                    (_, "environment") => Some("Environmentvalues"),
+                    (_, "arguments") => Some("Fullprocessarguments"),
+                    (_, "sensitive") => Some("Sensitivecontent"),
+                    (_, _) => Some("Unpredictable"),
+                };
+                if let Some(phrase) = phrase {
+                    assert!(compact.contains(phrase), "{expected}: {text}");
+                } else {
+                    assert!(!compact.contains("Terminal") && !compact.contains("终端"), "{text}");
+                }
+                assert!(text.contains(if language == crate::Language::ZhCn { "拒绝" } else { "Deny" }));
+            }
+        }
+    }
+}
+
+#[test]
+fn approval_output_disclosure_preserves_indented_risk_hierarchy() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for width in [40, 80] {
+            let renderer = RatatuiInlineRenderer::with_width(width)
+                .within_rows(16)
+                .with_language(language);
+            let mut model = turn_consent_model(None);
+            model.turn_consent = false;
+            model.queue_total = 1;
+            model.output_command = Some("printenv TEST_SECRET");
+            let text = renderer.approval_panel_lines(model.clone()).join("\n");
+            let prefix = if language == crate::Language::ZhCn { "└风险:" } else { "└Risk:" };
+            let compact = text.chars().filter(|character| !character.is_whitespace() && *character != '│').collect::<String>();
+            assert!(compact.contains(prefix), "{text}");
+            model.output_command = Some("uptime");
+            model.reason = Some("synthetic reason");
+            let text = renderer.approval_panel_lines(model).join("\n");
+            let compact = text.chars().filter(|character| !character.is_whitespace() && *character != '│').collect::<String>();
+            assert!(compact.contains(prefix), "{text}");
+        }
+    }
+}
+
+#[test]
+fn approval_output_disclosure_turn_scope_is_visible_on_non_shell_first_card() {
+    let mut model = turn_consent_model(None);
+    model.subject = "tool Read";
+    model.selected_action = ApprovalPanelAction::ApproveTurn;
+    model.expanded = false;
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        let renderer = RatatuiInlineRenderer::with_width(40).with_language(language);
+        let text = renderer.approval_panel_lines(model.clone()).join("\n");
+        let compact = panel_content_without_layout(&text);
+        for phrase in if language == crate::Language::ZhCn {
+            ["批准当前", "已排队", "新到达", "Shell工具", "原样"]
+        } else {
+            ["Approvethis", "queued", "new", "shelltools", "as-is"]
+        } {
+            assert!(compact.contains(phrase), "{text}");
+        }
+    }
+}
+
+#[test]
+fn approval_slim_card_keeps_batch_policy_out_of_unselected_actions() {
+    let renderer = RatatuiInlineRenderer::with_width(40).within_rows(16);
+    let mut model = turn_consent_model(None);
+    model.output_command = Some("uptime");
+    for action in [ApprovalPanelAction::Approve, ApprovalPanelAction::Deny, ApprovalPanelAction::Details] {
+        model.selected_action = action;
+        model.expanded = action == ApprovalPanelAction::Details;
+        let text = renderer.approval_panel_lines(model.clone()).join("\n");
+        assert!(!text.contains("Eligible queued"), "{text}");
+        if action != ApprovalPanelAction::Details {
+            assert!(!text.contains("Model previews"), "{text}");
+        }
+        assert!(!text.contains("Default: deny"), "{text}");
+    }
+    model.selected_action = ApprovalPanelAction::ApproveTurn;
+    model.expanded = false;
+    let text = renderer.approval_panel_lines(model).join("\n");
+    assert!(panel_content_without_layout(&text).contains("Eligiblequeued/newshelltools"), "{text}");
+}
+
+#[test]
+fn approval_slim_card_aliases_share_viewport_and_plain_preview_limits() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for width in [40, 41, 80] {
+            for renderer in [
+                RatatuiInlineRenderer::with_width(width).within_rows(16).with_language(language),
+                RatatuiInlineRenderer::plain_with_width(width).within_rows(16).with_language(language),
+            ] {
+                for subject in ["tool Bash", "tool run_shell_command"] {
+                    let mut model = turn_consent_model(None);
+                    model.subject = subject;
+                    model.turn_consent = false;
+                    model.queue_total = 1;
+                    model.risk = "high";
+                    model.expanded = true;
+                    let preview = "printenv TEST_SYNTHETIC_VALUE; ".repeat(20);
+                    model.preview = &preview;
+                    model.output_command = Some("printenv TEST_SYNTHETIC_VALUE");
+                    model.selected_action = ApprovalPanelAction::Details;
+                    let lines = renderer.approval_panel_lines(model);
+                    assert!(lines.len() <= 15, "{}", lines.join("\n"));
+                    assert_rendered_width(&lines.join("\n"), width as usize);
+                    assert!(!lines.join("\n").contains("Default: deny"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn approval_slim_details_plain_subminimum_width_never_draws_outside_viewport() {
+    let renderer = RatatuiInlineRenderer::plain_with_width(20).within_columns(20);
+    let mut model = turn_consent_model(None);
+    model.expanded = true;
+    model.selected_action = ApprovalPanelAction::Details;
+    model.preview = "printenv TEST_SYNTHETIC_VALUE; ps -eo args=CMD";
+    let lines = renderer.approval_panel_lines(model);
+    assert_rendered_width(&lines.join("\n"), 20);
+    assert!(!lines.join("\n").contains("/details"));
+}
+
+#[test]
+fn approval_review_plain_details_counts_wrapped_actions_in_height() {
+    let renderer = RatatuiInlineRenderer::plain_with_width(20)
+        .within_columns(20)
+        .within_rows(16)
+        .with_language(crate::Language::ZhCn);
+    let mut model = turn_consent_model(None);
+    model.expanded = true;
+    model.selected_action = ApprovalPanelAction::Details;
+    model.output_command = Some("printenv TEST_SYNTHETIC_VALUE; ps aux");
+    for risk in ["medium", "high"] {
+        model.risk = risk;
+        for page in 0..32 {
+            let lines = renderer.approval_details_view_lines(&model, page);
+            assert!(lines.len() <= 15, "page {page}: {}", lines.join("\n"));
+            assert_rendered_width(&lines.join("\n"), 20);
+            assert!(lines.join("\n").contains("拒绝"));
+        }
+    }
+}
+
+#[test]
+fn approval_review_turn_scope_keeps_command_risk_and_actions_in_40x16() {
+    let renderer = RatatuiInlineRenderer::with_width(40).within_rows(16);
+    let mut model = turn_consent_model(None);
+    model.risk = "high";
+    model.reason = Some("may run repo-embedded scripts");
+    model.deny_always_trust = true;
+    model.preview = "git status; printenv; ps aux";
+    model.output_command = Some(model.preview);
+    model.selected_action = ApprovalPanelAction::ApproveTurn;
+    let lines = renderer.approval_panel_lines(model);
+    let text = lines.join("\n");
+    assert!(lines.len() <= 15, "{text}");
+    assert!(text.contains("Approval req-2"), "{text}");
+    assert!(text.contains("git status"), "{text}");
+    assert!(text.contains("repo-embedded"), "{text}");
+    assert!(text.contains("Deny"), "{text}");
+    assert!(text.contains("> [ Allow all this turn ]"), "{text}");
+}
+
+#[test]
+fn approval_review_turn_scope_with_hook_notice_fits_40x16() {
+    let renderer = RatatuiInlineRenderer::with_width(40).within_rows(16);
+    let mut model = turn_consent_model(None);
+    model.risk = "high";
+    model.reason = Some("may run repo-embedded scripts");
+    model.deny_always_trust = true;
+    model.preview = "git status; printenv; ps aux";
+    model.output_command = Some(model.preview);
+    model.selected_action = ApprovalPanelAction::ApproveTurn;
+    model.hook_warnings.push(HookWarningView {
+        hook_name: "audit",
+        message: "Review requested",
+        decision: Some("ask"),
+    });
+    let lines = renderer.approval_panel_lines(model);
+    let text = lines.join("\n");
+    assert!(lines.len() <= 15, "{text}");
+    for phrase in ["Approval req-2", "git status", "repo-embedded", "audit", "Review requested", "Deny", "> [ Allow all this turn ]"] {
+        assert!(text.contains(phrase), "missing {phrase}: {text}");
+    }
+}
+
+#[test]
+fn approval_multi_line_hook_notices_fit_and_remain_complete_in_details() {
+    let message = "Review requested before running; check approval policy and output handling.";
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for hook_count in [1, 3] {
+            for subject in ["Bash", "tool Bash"] {
+            let renderer = RatatuiInlineRenderer::with_width(40).within_rows(16).with_language(language);
+            let mut model = turn_consent_model(None);
+            model.subject = subject;
+            model.risk = "high";
+            model.reason = Some("may run repo-embedded scripts");
+            model.deny_always_trust = true;
+            model.preview = "git status; printenv; ps aux";
+            model.output_command = Some(model.preview);
+            model.selected_action = ApprovalPanelAction::ApproveTurn;
+            model.hook_warnings = vec![HookWarningView { hook_name: "audit", message, decision: Some("ask") }; hook_count];
+            let lines = renderer.approval_panel_lines(model.clone());
+            let text = lines.join("\n");
+            assert!(lines.len() <= 15, "{text}");
+            for phrase in ["git status", "audit", if language == crate::Language::ZhCn { "拒绝" } else { "Deny" }] {
+                assert!(text.contains(phrase), "{text}");
+            }
+            model.selected_action = ApprovalPanelAction::Details;
+            model.expanded = true;
+            let detail_text = (0..64).map(|page| {
+                let lines = renderer.approval_details_view_lines(&model, page);
+                assert!(lines.len() <= 15, "{}", lines.join("\n"));
+                let header_rows = 2
+                    + super::super::approval_reason::approval_reason_rows(model.reason.unwrap(), 36, renderer.i18n()).len()
+                    + super::super::approval_warning::approval_warning_rows(&model, 36, renderer.i18n()).len();
+                let footer_rows = 2
+                    + super::super::approval_actions::approval_action_row_count(super::super::approval::model_action_set(&model), renderer.i18n(), 36)
+                    + super::super::wrap_plain_line(renderer.i18n().t(crate::MessageId::ApprovalDetailsPagingKeys), 36).len();
+                panel_content_without_layout(&lines[header_rows..lines.len() - footer_rows].join("\n"))
+            }).collect::<String>();
+            assert!(detail_text.contains("checkapprovalpolicyandoutputhandling."), "{detail_text}");
+            }
+        }
+    }
+}
+
+#[test]
+fn approval_irrecoverable_hook_notices_keep_warning_command_and_deny_in_40x16() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for width in [40, 41, 46, 48, 80] {
+        let renderer = RatatuiInlineRenderer::with_width(width).within_rows(16).with_language(language);
+        let mut model = turn_consent_model(None);
+        model.subject = "Bash";
+        model.risk = "high";
+        model.reason = None;
+        model.irrecoverable = true;
+        model.deny_always_trust = true;
+        model.preview = "printenv; ps aux; reboot";
+        model.output_command = Some(model.preview);
+        model.selected_action = ApprovalPanelAction::ApproveTurn;
+        model.hook_warnings = vec![HookWarningView { hook_name: "audit", message: "Review requested before running; check approval policy and output handling.", decision: Some("ask") }];
+        let lines = renderer.approval_panel_lines(model);
+        let text = lines.join("\n");
+        assert!(lines.len() <= 15, "{text}");
+        for phrase in ["printenv", "audit", if language == crate::Language::ZhCn { "拒绝" } else { "Deny" }] {
+            assert!(text.contains(phrase), "{text}");
+        }
+        assert!(text.contains(if language == crate::Language::ZhCn { "SSH" } else { "SSH drops" }) || text.contains("SSH sessions drop"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn approval_irrecoverable_hook_summary_reserves_details_and_count_width() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        let renderer = RatatuiInlineRenderer::with_width(40).within_rows(16).with_language(language);
+        let mut model = turn_consent_model(None);
+        model.subject = "Bash";
+        model.risk = "high";
+        model.irrecoverable = true;
+        model.deny_always_trust = true;
+        model.preview = "printenv; ps aux; reboot";
+        model.output_command = Some(model.preview);
+        model.selected_action = ApprovalPanelAction::ApproveTurn;
+        model.hook_warnings = vec![HookWarningView { hook_name: "abcdefghijklmnopqrst", message: "Synthetic hook notice.", decision: Some("ask") }; 10];
+        let lines = super::super::approval_warning::approval_hook_warning_lines(&model, 36, renderer.i18n());
+        assert_eq!(lines.len(), 1);
+        let summary = super::super::line_to_string(&lines[0]);
+        assert!(super::super::display_width(&summary) <= 36, "{summary}");
+        assert!(summary.contains("10"), "{summary}");
+        assert!(summary.contains(if language == crate::Language::ZhCn { "详情" } else { "Details" }), "{summary}");
+    }
+}
+
+#[test]
+fn approval_short_viewport_keeps_necessary_content_when_only_width_changes() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for width in [40, 41, 48, 80] {
+            for subject in ["Bash", "tool Bash"] {
+                let renderer = RatatuiInlineRenderer::with_width(width)
+                    .within_rows(16)
+                    .with_language(language);
+                let mut model = turn_consent_model(Some("synthetic next request"));
+                model.subject = subject;
+                model.risk = "high";
+                model.reason = Some("may run repo-embedded scripts");
+                model.deny_always_trust = true;
+                model.preview = "git status; printenv; ps aux";
+                model.output_command = Some(model.preview);
+                model.selected_action = ApprovalPanelAction::ApproveTurn;
+                model.hook_warnings = vec![HookWarningView {
+                    hook_name: "audit",
+                    message: "Review requested before running; check approval policy and output handling.",
+                    decision: Some("ask"),
+                }];
+                let lines = renderer.approval_panel_lines(model);
+                let text = lines.join("\n");
+                assert!(lines.len() <= 15, "{width} columns: {text}");
+                assert_rendered_width(&text, width as usize);
+                for phrase in ["git status", "audit", "1/2", if language == crate::Language::ZhCn { "拒绝" } else { "Deny" }] {
+                    assert!(text.contains(phrase), "{width} columns: {text}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn approval_slim_details_preserve_indented_command_bytes_across_pages() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for renderer in [
+            RatatuiInlineRenderer::with_width(40)
+                .within_rows(16)
+                .with_language(language),
+            RatatuiInlineRenderer::plain_with_width(40)
+                .within_rows(16)
+                .with_language(language),
+        ] {
+            let command = format!(
+                "printf 'SYNTHETIC_FIRST_LINE\\n';\n{}printenv INDENTED_COMMAND",
+                " ".repeat(80)
+            );
+            let mut model = turn_consent_model(None);
+            model.turn_consent = false;
+            model.queue_total = 1;
+            model.output_command = Some(&command);
+            model.expanded = true;
+            model.selected_action = ApprovalPanelAction::Details;
+            let pages = (0..32)
+                .map(|page| {
+                    let lines = renderer.approval_details_view_lines(&model, page);
+                    assert_rendered_width(&lines.join("\n"), 40);
+                    assert!(lines.len() <= 15, "{}", lines.join("\n"));
+                    lines.join("\n")
+                })
+                .collect::<Vec<_>>();
+            let text = panel_content_without_layout(&pages.join("\n"));
+            assert!(text.contains("SYNTHETIC_FIRST_LINE"), "{text}");
+            assert!(text.contains("INDENTED_COMMAND"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn approval_slim_details_page_through_boundaries_without_slash_commands() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for renderer in [
+            RatatuiInlineRenderer::with_width(40).with_language(language),
+            RatatuiInlineRenderer::plain_with_width(40).with_language(language),
+        ] {
+            for subject in ["tool Bash", "tool Read"] {
+                let mut model = turn_consent_model(None);
+                model.subject = subject;
+                model.expanded = true;
+                model.selected_action = ApprovalPanelAction::Details;
+                let text = (0..32).map(|page| {
+                    let lines = renderer.approval_details_view_lines(&model, page);
+                    assert!(lines.len() <= 23, "{}", lines.join("\n"));
+                    lines.join("\n")
+                }).collect::<Vec<_>>().join("\n");
+                let compact = panel_content_without_layout(&text);
+                for phrase in if language == crate::Language::ZhCn {
+                    ["高风险", "强制", "Hook", "缺失", "执行绑定"]
+                } else {
+                    ["High-riskrequests", "forced", "Hooks", "missing", "executionbindings"]
+                } {
+                    assert!(compact.contains(phrase), "{text}");
+                }
+                assert_eq!(compact.contains("preview_redacted"), subject == "tool Bash", "{text}");
+                assert!(!compact.contains("/details"), "{text}");
+            }
+        }
+    }
+}
+
+#[test]
+fn approval_output_disclosure_narrow_card_retains_warning_focus_and_denial() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        let renderer = RatatuiInlineRenderer::with_width(40).with_language(language);
+        let mut model = turn_consent_model(None);
+        model.output_command = Some("printenv TEST_SECRET");
+        model.preview = "printenv TEST_SECRET";
+        model.selected_action = ApprovalPanelAction::Deny;
+        let lines = renderer.approval_panel_lines(model);
+        let text = lines.join("\n");
+        assert!(lines.len() <= 15, "40x16 leaves one terminal row: {text}");
+        assert!(text.contains(if language == crate::Language::ZhCn {
+            "环境变量"
+        } else {
+            "Environment"
+        }), "{text}");
+        assert!(text.contains(if language == crate::Language::ZhCn {
+            "> [ 拒绝 ]"
+        } else {
+            "> [ Deny ]"
+        }), "{text}");
+    }
+}
+
+#[test]
+fn approval_output_warning_wraps_words_without_splitting_secrets() {
+    let renderer = RatatuiInlineRenderer::with_width(40).within_rows(16);
+    let mut model = turn_consent_model(None);
+    model.turn_consent = false;
+    model.queue_total = 1;
+    model.output_command = Some("printenv TEST_SECRET");
+    model.preview = "printenv TEST_SECRET";
+    model.selected_action = ApprovalPanelAction::Deny;
+    let lines = renderer.approval_panel_lines(model);
+    let text = lines.join("\n");
+    assert!(lines.iter().any(|line| line.contains("secrets as-is.")), "{text}");
+    assert!(lines.len() <= 15, "{text}");
+    assert!(text.contains("> [ Deny ]"), "{text}");
+}
+
+#[test]
+fn approval_output_disclosure_turn_details_fit_40x16() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        let renderer = RatatuiInlineRenderer::with_width(40).with_language(language);
+        let mut model = turn_consent_model(None);
+        model.output_command = Some("printenv TEST_SECRET");
+        model.preview = "printenv TEST_SECRET";
+        model.expanded = true;
+        model.selected_action = ApprovalPanelAction::Details;
+        let lines = renderer.approval_panel_lines(model);
+        let text = lines.join("\n");
+        assert!(lines.len() <= 15, "{text}");
+        assert!(text.contains(if language == crate::Language::ZhCn { "拒绝" } else { "Deny" }));
+        assert!(text.contains(if language == crate::Language::ZhCn { "> [ 详情 ]" } else { "> [ Details ]" }));
+    }
+}
+
+#[test]
+fn approval_output_disclosure_combined_sensitive_sources_fit_40x16() {
+    for language in [crate::Language::EnUs, crate::Language::ZhCn] {
+        for expanded in [false, true] {
+            let renderer = RatatuiInlineRenderer::with_width(40).with_language(language);
+            let mut model = turn_consent_model(None);
+            model.risk = "high";
+            model.reason = Some(if language == crate::Language::ZhCn { "敏感路径" } else { "sensitive path" });
+            model.deny_always_trust = true;
+            model.output_command = Some("uptime; printenv; ps aux; cat ~/.ssh/id_rsa");
+            model.preview = "uptime; printenv; ps aux; cat ~/.ssh/id_rsa";
+            model.expanded = expanded;
+            model.selected_action = ApprovalPanelAction::Details;
+            let lines = renderer.approval_panel_lines(model);
+            let text = lines.join("\n");
+            assert!(lines.len() <= 15, "{text}");
+            let compact = panel_content_without_layout(&text);
+            for phrase in if language == crate::Language::ZhCn {
+                ["环境变量", "敏感内容", "完整进程参数", "拒绝", "详情"]
+            } else {
+                ["Envvalues", "sensitivedata", "fullargs", "Deny", "Details"]
+            } {
+                assert!(compact.contains(phrase), "{text}");
+            }
+        }
     }
 }
 
@@ -80,21 +568,18 @@ fn approval_panel_turn_consent_wraps_actions_at_narrow_width() {
                     model.kind = kind;
                     model.subject = subject;
                     model.turn_consent = turn_consent;
+                    if turn_consent {
+                        model.selected_action = ApprovalPanelAction::ApproveTurn;
+                    }
                     let text = renderer.approval_panel_lines(model).join("\n");
                     let compact = panel_content_without_layout(&text);
                     let warning = match (language, turn_consent) {
-                        (crate::Language::ZhCn, true) => "本轮终端输出不会脱敏。",
-                        (crate::Language::ZhCn, false) => "终端输出不会脱敏。",
-                        (_, true) => "Thisturn'sterminaloutputisnotredacted.",
-                        (_, false) => "Terminaloutputisnotredacted.",
+                        (crate::Language::ZhCn, true) => "同轮已排队、新到达",
+                        (crate::Language::ZhCn, false) => "输出无法预判",
+                        (_, true) => "Eligiblequeued/newshelltools",
+                        (_, false) => "Unpredictableoutput",
                     };
                     assert_eq!(compact.contains(warning), disclosed, "{text}");
-                    let scrollback = if language == crate::Language::ZhCn {
-                        "输出可能留在滚屏记录中。"
-                    } else {
-                        "Outputmaystayinscrollback."
-                    };
-                    assert_eq!(compact.contains(scrollback), disclosed, "{text}");
                     assert!(text.contains(if language == crate::Language::ZhCn {
                         "拒绝"
                     } else {
@@ -175,6 +660,7 @@ fn approval_panel_renders_active_request_with_queue_summary() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -228,6 +714,7 @@ fn approval_panel_high_risk_shows_reason_continuation_line() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -285,6 +772,7 @@ fn approval_panel_high_risk_continuation_wraps_within_narrow_width() {
                 turn_extension: false,
                 deny_always_trust: false,
                 irrecoverable: false,
+                output_command: None,
                 hook_warnings: Vec::new(),
             })
             .join("\n");
@@ -318,6 +806,7 @@ fn approval_panel_long_subject_never_hides_risk_badge() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -352,6 +841,7 @@ fn approval_panel_unknown_risk_value_falls_back_to_localized_label() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -382,24 +872,22 @@ fn approval_panel_uses_zh_labels_without_translating_command() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
 
-    assert!(text.contains("审批 req-1"), "{text}");
-    assert!(text.contains("运行 Bash 命令？"), "{text}");
+    assert!(text.contains("审批详情 req-1"), "{text}");
     assert!(
-        text.contains("$ top -l 1 -o mem -n 20 | head -30"),
+        text.contains("top -l 1 -o mem -n 20 | head -30"),
         "{text}"
     );
-    assert!(text.contains("队列: 1/2 待处理"), "{text}");
-    assert!(text.contains("下一个 req-2 tool Bash"), "{text}");
     assert!(text.contains("允许一次"), "{text}");
     assert!(text.contains("始终信任"), "{text}");
     assert!(text.contains("拒绝"), "{text}");
     assert!(text.contains("详情"), "{text}");
-    assert!(text.contains("按键:"), "{text}");
-    assert!(text.contains("默认: 拒绝"), "{text}");
+    assert!(text.contains("上下翻页"), "{text}");
+    assert!(!text.contains("默认: 拒绝"), "{text}");
     assert_rendered_width(&text, 140);
 }
 
@@ -424,6 +912,7 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -438,8 +927,7 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
 #[test]
 fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
     let renderer = RatatuiInlineRenderer::with_width(70);
-    let text = renderer
-        .approval_panel_lines(ApprovalPanelModel {
+    let mut model = ApprovalPanelModel {
             id: "req-宽",
             kind: "tool request",
             risk: "medium",
@@ -456,14 +944,22 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
-        })
-        .join("\n");
+        };
+    model.expanded = false;
+    let main = renderer.approval_panel_lines(model.clone()).join("\n");
+    assert!(main.contains("Approval req-宽"), "{main}");
+    assert!(main.contains("Queue: 1/3 pending"), "{main}");
+    assert_rendered_width(&main, 70);
+    assert_box_lines_aligned(&main, 70);
+    model.expanded = true;
+    let text = renderer.approval_panel_lines(model).join("\n");
 
-    assert!(text.contains("Approval req-宽"), "{text}");
-    assert!(text.contains("$ cat /tmp/cosh-shell-中文"), "{text}");
+    assert!(text.contains("Approval details req-宽"), "{text}");
+    assert!(text.contains("cat /tmp/cosh-shell-中文"), "{text}");
     assert!(text.contains("> [ Details ]"), "{text}");
-    assert!(text.contains("Queue: 1/3 pending"), "{text}");
+    assert!(text.contains("Page 1/1"), "{text}");
     assert_rendered_width(&text, 70);
     assert_box_lines_aligned(&text, 70);
 }
@@ -489,6 +985,7 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -511,6 +1008,7 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
 fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -538,6 +1036,7 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
                 turn_extension: false,
                 deny_always_trust: false,
                 irrecoverable: false,
+                output_command: None,
                 hook_warnings: Vec::new(),
             },
         )
@@ -555,6 +1054,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
     let mut deny_output = Vec::new();
     RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -579,6 +1079,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         },
     )
@@ -588,6 +1089,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
     let mut details_output = Vec::new();
     RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 90,
         plain: false,
         styled: true,
@@ -612,6 +1114,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         },
     )
@@ -646,6 +1149,7 @@ fn plain_approval_panel_keeps_queue_before_actions() {
         turn_extension: false,
         deny_always_trust: false,
         irrecoverable: false,
+        output_command: None,
         hook_warnings: Vec::new(),
     });
     let text = lines.join("\n");
@@ -734,6 +1238,7 @@ fn approval_receipt_panel_uses_zh_fallback_labels() {
 fn approval_receipt_panel_uses_negative_state_not_localized_title_for_style() {
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 100,
         plain: false,
         styled: true,
@@ -1304,6 +1809,7 @@ fn approval_details_panel_keeps_borders_aligned_with_uuid_audit_reference() {
 fn styled_approval_details_write_keeps_audit_reference_inside_panel() {
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 70,
         plain: false,
         styled: true,
@@ -1657,6 +2163,7 @@ fn approval_journal_panel_scopes_audit_reference_to_owning_entry() {
 fn styled_approval_journal_write_scopes_audit_reference_to_owning_entry() {
     let renderer = RatatuiInlineRenderer {
         column_limit: None,
+        row_limit: None,
         width: 88,
         plain: false,
         styled: true,
@@ -1749,6 +2256,7 @@ fn approval_panel_irrecoverable_command_warns_and_hides_always_trust() {
             subject: "tool Bash",
             preview_label: "Command",
             preview: "reboot",
+            output_command: None,
             queue_position: 1,
             queue_total: 1,
             next_label: None,
@@ -1792,6 +2300,7 @@ fn approval_panel_medium_risk_card_keeps_always_trust_and_no_warning() {
             turn_extension: false,
             deny_always_trust: false,
             irrecoverable: false,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -1826,6 +2335,7 @@ fn approval_panel_generic_card_irrecoverable_warning_and_no_trust() {
             turn_extension: false,
             deny_always_trust: true,
             irrecoverable: true,
+            output_command: None,
             hook_warnings: Vec::new(),
         })
         .join("\n");

@@ -11,6 +11,54 @@ pub(super) fn emit_fake_tool_approval_stream(
     sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
 ) -> Result<bool, AdapterError> {
     let run_id = request.id.clone();
+    if let Some(value) = input.strip_prefix("?? approval typed fixture: ") {
+        if let Some((tool, input)) = value.split_once(" ::: ") {
+            if let Ok(tool_input) = serde_json::from_str(input) {
+                sink(AgentEvent::ToolPermissionRequest {
+                    run_id: run_id.clone(),
+                    request_id: "typed-approval-1".to_string(),
+                    tool_name: tool.to_string(),
+                    tool_input,
+                    tool_use_id: "typed-tool-1".to_string(),
+                    hook_requires_approval: false,
+                    audit_ref: None,
+                })?;
+                sink(AgentEvent::AgentCompleted {
+                    run_id,
+                    summary: "synthetic typed approval request".to_string(),
+                })?;
+                return Ok(true);
+            }
+        }
+    }
+    if let Some(commands) = input.strip_prefix("?? approval output batch fixture: ") {
+        for command in commands.trim().split(" ||| ") {
+            sink(AgentEvent::ToolCall {
+                run_id: run_id.clone(),
+                tool_id: None,
+                name: "Bash".to_string(),
+                input: command.to_string(),
+            })?;
+        }
+        sink(AgentEvent::AgentCompleted {
+            run_id,
+            summary: "synthetic batch output disclosure requests".to_string(),
+        })?;
+        return Ok(true);
+    }
+    if let Some(command) = input.strip_prefix("?? approval output fixture: ") {
+        sink(AgentEvent::ToolCall {
+            run_id: run_id.clone(),
+            tool_id: None,
+            name: "Bash".to_string(),
+            input: command.trim().to_string(),
+        })?;
+        sink(AgentEvent::AgentCompleted {
+            run_id,
+            summary: "synthetic output disclosure request".to_string(),
+        })?;
+        return Ok(true);
+    }
     if input.contains("stream batch tool approval") {
         // Multi-request turn for turn-scope batch consent (issue #1773):
         // three distinct diagnostic commands queued in one run.

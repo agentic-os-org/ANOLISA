@@ -1,3 +1,4 @@
+use crate::approval::requests::request_shell_output_command;
 use crate::runtime::prelude::*;
 use crate::tools::known_provider_tool;
 
@@ -155,40 +156,80 @@ pub(crate) fn render_current_approval_request<W: Write>(
             crate::ui::card_reason_phrase(request.risk, assessment.primary_reason, state.i18n())
         })
     });
-    let height = RatatuiInlineRenderer::for_terminal()
-        .with_language(state.language)
-        .write_approval_panel(
-            output,
-            ApprovalPanelModel {
-                id: &request.id,
-                kind: request.kind.label(),
-                risk: request.risk,
-                reason: card_reason.as_deref(),
-                subject: &request.subject,
-                preview_label,
-                preview: &request.preview,
-                queue_position: pending_position,
-                queue_total: pending_total,
-                next_label: next_label.as_deref(),
-                selected_action,
-                expanded,
-                turn_consent,
-                turn_extension,
-                deny_always_trust,
-                irrecoverable,
-                hook_warnings: request
-                    .hook_warnings
-                    .iter()
-                    .map(|w| HookWarningView {
-                        hook_name: w.hook_name.as_str(),
-                        message: w.message.as_str(),
-                        decision: w.decision.as_deref(),
-                    })
-                    .collect(),
-            },
-        )?;
+    let output_command = request_shell_output_command(request);
+    let card_reason = card_reason.filter(|_| {
+        !request.assessment.as_ref().is_some_and(|assessment| {
+            matches!(
+                assessment.primary_reason,
+                "sensitive-path" | "sensitive-search"
+            ) && output_command.as_deref().is_some_and(|command| {
+                crate::tools::command_risk_output::shell_output_facts(command).sensitive
+            })
+        })
+    });
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    let model = ApprovalPanelModel {
+        id: &request.id,
+        kind: request.kind.label(),
+        risk: request.risk,
+        reason: card_reason.as_deref(),
+        subject: &request.subject,
+        preview_label,
+        preview: &request.preview,
+        output_command: output_command.as_deref(),
+        queue_position: pending_position,
+        queue_total: pending_total,
+        next_label: next_label.as_deref(),
+        selected_action,
+        expanded,
+        turn_consent,
+        turn_extension,
+        deny_always_trust,
+        irrecoverable,
+        hook_warnings: request
+            .hook_warnings
+            .iter()
+            .map(|w| HookWarningView {
+                hook_name: w.hook_name.as_str(),
+                message: w.message.as_str(),
+                decision: w.decision.as_deref(),
+            })
+            .collect(),
+    };
+    let height = if expanded && !request.subject.starts_with("HOOK:") {
+        let page = state
+            .approvals
+            .details_pages
+            .get(&request.id)
+            .copied()
+            .unwrap_or(0);
+        let (height, selected_page) = renderer.write_approval_details_view(output, &model, page)?;
+        state
+            .approvals
+            .details_pages
+            .insert(request.id.clone(), selected_page);
+        height
+    } else {
+        renderer.write_approval_panel(output, model)?
+    };
     state.approvals.active_panel_id = Some(request.id.clone());
     state.approvals.active_panel_height = height;
+    state.approvals.active_panel_size = ratatui::crossterm::terminal::size().ok();
+    Ok(())
+}
+
+pub(crate) fn redraw_approval_if_size_changed<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let size = ratatui::crossterm::terminal::size().ok();
+    if state.approvals.active_panel_id.is_some() && state.approvals.active_panel_size != size {
+        if let Some(id) = &state.approvals.active_panel_id {
+            state.approvals.details_pages.remove(id);
+        }
+        redraw_current_approval_request(state, output)?;
+        output.flush()?;
+    }
     Ok(())
 }
 
@@ -200,6 +241,51 @@ pub(crate) fn redraw_current_approval_request<W: Write>(
     render_current_approval_request(state, output)
 }
 
+pub(crate) fn render_approval_details_scroll<W: Write>(
+    state: &mut InlineState,
+    event: &ShellEvent,
+    output: &mut W,
+    event_index: usize,
+) -> std::io::Result<bool> {
+    if event.kind != ShellEventKind::UserInputIntercepted
+        || event.component.as_deref() != Some("card")
+        || event.message.as_deref() != Some("details_scroll")
+    {
+        return Ok(false);
+    }
+    let key = format!("approval-page-{event_index}");
+    if !state.approvals.handled_actions.insert(key) {
+        return Ok(true);
+    }
+    let Some((id, direction)) = event
+        .input
+        .as_deref()
+        .and_then(|input| input.split_once(':'))
+    else {
+        return Ok(true);
+    };
+    if !matches!(direction, "0" | "1")
+        || !approval_is_pending(state, id)
+        || state.approvals.focus.get(id) != Some(&ApprovalPanelAction::Details)
+    {
+        return Ok(true);
+    }
+    let page = state
+        .approvals
+        .details_pages
+        .entry(id.to_string())
+        .or_default();
+    *page = if direction == "1" {
+        page.saturating_add(1)
+    } else {
+        page.saturating_sub(1)
+    };
+    state.approvals.expanded_cards.insert(id.to_string());
+    redraw_current_approval_request(state, output)?;
+    output.flush()?;
+    Ok(true)
+}
+
 pub(crate) fn clear_active_approval_panel<W: Write>(
     state: &mut InlineState,
     output: &mut W,
@@ -207,6 +293,7 @@ pub(crate) fn clear_active_approval_panel<W: Write>(
     let height = state.approvals.active_panel_height;
     if height == 0 {
         state.approvals.active_panel_id = None;
+        state.approvals.active_panel_size = None;
         return Ok(());
     }
 
@@ -223,6 +310,7 @@ pub(crate) fn clear_active_approval_panel<W: Write>(
     write!(output, "\r")?;
     state.approvals.active_panel_id = None;
     state.approvals.active_panel_height = 0;
+    state.approvals.active_panel_size = None;
     Ok(())
 }
 

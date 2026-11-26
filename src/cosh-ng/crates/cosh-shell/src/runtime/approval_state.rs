@@ -11,8 +11,10 @@ pub(crate) struct ApprovalState {
     pub(crate) requests: Vec<RuntimeApprovalRequest>,
     pub(crate) focus: HashMap<String, ApprovalPanelAction>,
     pub(crate) expanded_cards: HashSet<String>,
+    pub(crate) details_pages: HashMap<String, usize>,
     pub(crate) active_panel_id: Option<String>,
     pub(crate) active_panel_height: usize,
+    pub(crate) active_panel_size: Option<(u16, u16)>,
     pub(crate) journal: Vec<RuntimeApprovalJournalEntry>,
     pub(crate) pending_capture_invalidations: VecDeque<String>,
 }

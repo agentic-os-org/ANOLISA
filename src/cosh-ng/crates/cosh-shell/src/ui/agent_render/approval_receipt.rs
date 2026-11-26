@@ -50,10 +50,11 @@ impl RatatuiInlineRenderer {
 
         let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = approval_receipt_panel_height(&i18n, &model, width);
+        let preview_limit = self.approval_receipt_preview_limit(&model, width);
+        let height = approval_receipt_panel_height(&i18n, &model, width, preview_limit);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_receipt_panel(&i18n, model, area, &mut buffer);
+        render_approval_receipt_panel(&i18n, model, area, &mut buffer, preview_limit);
         buffer_to_lines(&buffer, area)
     }
 
@@ -70,10 +71,11 @@ impl RatatuiInlineRenderer {
 
         let i18n = self.i18n();
         let width = self.panel_standard_width();
-        let height = approval_receipt_panel_height(&i18n, &model, width);
+        let preview_limit = self.approval_receipt_preview_limit(&model, width);
+        let height = approval_receipt_panel_height(&i18n, &model, width, preview_limit);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_receipt_panel(&i18n, model, area, &mut buffer);
+        render_approval_receipt_panel(&i18n, model, area, &mut buffer, preview_limit);
         if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -98,6 +100,7 @@ impl RatatuiInlineRenderer {
                 receipt_preview_label(&i18n, model.subject),
                 model.preview,
                 content_width,
+                self.approval_receipt_preview_limit(&model, width),
             ));
         }
         if !model.message.is_empty() {
@@ -105,12 +108,33 @@ impl RatatuiInlineRenderer {
         }
         lines
     }
+
+    fn approval_receipt_preview_limit(
+        &self,
+        model: &ApprovalReceiptPanelModel<'_>,
+        width: u16,
+    ) -> usize {
+        let maximum = if width <= 40 { 3 } else { usize::MAX };
+        let Some(rows) = self.row_limit else {
+            return maximum;
+        };
+        let messages = if model.message.is_empty() {
+            0
+        } else {
+            wrap_plain_line(model.message, approval_receipt_content_width(width)).len()
+        };
+        (rows.saturating_sub(1) as usize)
+            .saturating_sub(2 + messages)
+            .max(1)
+            .min(maximum)
+    }
 }
 
 fn approval_receipt_panel_height(
     i18n: &crate::I18n,
     model: &ApprovalReceiptPanelModel<'_>,
     width: u16,
+    preview_limit: usize,
 ) -> u16 {
     if !approval_receipt_has_body(model) {
         return 1;
@@ -124,6 +148,7 @@ fn approval_receipt_panel_height(
             receipt_preview_label(i18n, model.subject),
             model.preview,
             content_width,
+            preview_limit,
         )
         .len() as u16
     };
@@ -175,6 +200,7 @@ fn render_approval_receipt_panel(
     model: ApprovalReceiptPanelModel<'_>,
     area: Rect,
     buffer: &mut Buffer,
+    preview_limit: usize,
 ) {
     let border = if model.negative {
         Color::Red
@@ -206,6 +232,7 @@ fn render_approval_receipt_panel(
                 receipt_preview_label(i18n, model.subject),
                 model.preview,
                 content_width,
+                preview_limit,
             )
             .len() as u16,
         ));
@@ -220,17 +247,18 @@ fn render_approval_receipt_panel(
     let mut chunk_index = 0;
     if !model.preview.is_empty() {
         let preview_label = receipt_preview_label(i18n, model.subject);
-        let preview_lines = wrapped_receipt_rows(preview_label, model.preview, content_width)
-            .into_iter()
-            .enumerate()
-            .map(|(idx, line)| {
-                if idx == 0 {
-                    styled_receipt_label_line(line, preview_label)
-                } else {
-                    Line::from(Span::raw(line))
-                }
-            })
-            .collect::<Vec<_>>();
+        let preview_lines =
+            wrapped_receipt_rows(preview_label, model.preview, content_width, preview_limit)
+                .into_iter()
+                .enumerate()
+                .map(|(idx, line)| {
+                    if idx == 0 {
+                        styled_receipt_label_line(line, preview_label)
+                    } else {
+                        Line::from(Span::raw(line))
+                    }
+                })
+                .collect::<Vec<_>>();
         Paragraph::new(preview_lines).render(chunks[chunk_index], buffer);
         chunk_index += 1;
     }
@@ -257,11 +285,11 @@ fn approval_receipt_content_width(width: u16) -> usize {
     width.saturating_sub(4).max(20) as usize
 }
 
-fn wrapped_receipt_rows(label: &str, text: &str, width: usize) -> Vec<String> {
+fn wrapped_receipt_rows(label: &str, text: &str, width: usize, max_rows: usize) -> Vec<String> {
     let prefix = format!("{label}: ");
     let continuation = " ".repeat(prefix.chars().count());
     let content_width = width.saturating_sub(prefix.chars().count()).max(1);
-    wrap_plain_line(text, content_width)
+    let mut rows = wrap_plain_line(text, content_width)
         .into_iter()
         .enumerate()
         .map(|(idx, line)| {
@@ -271,7 +299,19 @@ fn wrapped_receipt_rows(label: &str, text: &str, width: usize) -> Vec<String> {
                 format!("{continuation}{line}")
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if rows.len() > max_rows {
+        rows.truncate(max_rows);
+        if let Some(last) = rows.last_mut() {
+            while super::display_width(last) + 4 > width {
+                if last.pop().is_none() {
+                    break;
+                }
+            }
+            last.push_str(" ...");
+        }
+    }
+    rows
 }
 
 fn styled_receipt_label_line(line: String, label: &str) -> Line<'static> {

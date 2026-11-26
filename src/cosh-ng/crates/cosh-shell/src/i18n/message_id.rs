@@ -129,4 +129,5 @@ collect_message_ids!([
     approval_git_repo_config_ids,
     guide_wizard_navigation_ids,
     guide_ai_management_navigation_ids,
+    approval_disclosure_ids,
 ],);

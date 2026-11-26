@@ -234,3 +234,33 @@ macro_rules! approval_git_repo_config_ids {
         );
     };
 }
+
+macro_rules! approval_disclosure_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ApprovalOutputEnvironment,
+            ApprovalOutputSensitive,
+            ApprovalOutputArguments,
+            ApprovalOutputUnknown,
+            ApprovalOutputCombined,
+            ApprovalOutputSourceEnvironment,
+            ApprovalOutputSourceSensitive,
+            ApprovalOutputSourceArguments,
+            ApprovalOutputCombinedCompact,
+            ApprovalDetailsPagingKeys,
+            ApprovalDetailsPagePosition,
+            ApprovalTerminalBoundaryDetails,
+            ApprovalPreviewBoundaryDetails,
+            ApprovalTurnScopeDetails,
+            ApprovalHelpBoundaryGroup,
+            ApprovalHelpTerminalLabel,
+            ApprovalHelpPreviewLabel,
+            ApprovalHelpTurnLabel,
+            ApprovalIrrecoverableWarningCompact,
+            ApprovalHookNoticeSummary,
+            ApprovalHookNoticeCompact,
+        );
+    };
+}

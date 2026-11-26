@@ -7,6 +7,8 @@ use super::command_risk_build::{basename, high_risk_program};
 use super::command_risk_carried::classify_carried_command;
 use super::command_risk_parser::is_env_assignment;
 
+pub(super) mod output;
+
 /// Table-driven launcher-chain walker (#2064 review circuit-breaker:
 /// two point-fix rounds kept leaking new wrapper forms — first the bare
 /// launchers, then their option-value forms — so the design is rebuilt

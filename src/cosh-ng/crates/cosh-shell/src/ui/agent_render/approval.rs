@@ -6,7 +6,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols::border::ROUNDED,
     text::{Line, Span, Text},
-    widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
+    widgets::{block::Padding, Block, Paragraph, Widget},
 };
 
 use super::actions::{ApprovalActionSet, ApprovalPanelAction};
@@ -18,7 +18,10 @@ use super::approval_actions::{
 use super::approval_reason::{
     approval_reason_line, approval_reason_rows, approval_reason_styled_lines,
 };
-use super::approval_warning::{approval_warning_rows, render_approval_warnings};
+use super::approval_warning::{
+    approval_hook_warning_lines, approval_preview_limit, approval_queue_details_visible,
+    approval_warning_rows, render_approval_warnings,
+};
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, char_width, display_width, RatatuiInlineRenderer,
@@ -34,6 +37,7 @@ pub struct ApprovalPanelModel<'a> {
     pub subject: &'a str,
     pub preview_label: &'a str,
     pub preview: &'a str,
+    pub output_command: Option<&'a str>,
     pub queue_position: usize,
     pub queue_total: usize,
     pub next_label: Option<&'a str>,
@@ -61,6 +65,42 @@ pub struct HookWarningView<'a> {
 }
 
 impl RatatuiInlineRenderer {
+    pub fn for_terminal() -> Self {
+        let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout())
+            && !super::running_under_cargo_test();
+        let terminal_size = if stdout_is_tty {
+            ratatui::crossterm::terminal::size()
+                .ok()
+                .filter(|(cols, rows)| *cols > 0 && *rows > 0)
+        } else {
+            None
+        };
+        let columns = match (
+            super::configured_terminal_width(),
+            terminal_size.map(|size| size.0),
+        ) {
+            (Some(configured), Some(actual)) => Some(configured.min(actual)),
+            (configured, actual) => configured.or(actual),
+        };
+        Self {
+            width: columns
+                .unwrap_or(super::DEFAULT_WIDTH)
+                .clamp(super::MIN_WIDTH, 200),
+            column_limit: columns,
+            row_limit: terminal_size.map(|size| size.1),
+            plain: super::plain_output_requested()
+                || columns.is_some_and(|columns| columns < super::MIN_WIDTH),
+            styled: stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
+            language: crate::Language::EnUs,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn within_rows(mut self, rows: u16) -> Self {
+        self.row_limit = Some(rows);
+        self
+    }
+
     pub fn write_approval_panel<W: Write>(
         &self,
         output: &mut W,
@@ -73,29 +113,57 @@ impl RatatuiInlineRenderer {
         Ok(lines.len())
     }
 
-    pub fn approval_panel_lines(&self, model: ApprovalPanelModel<'_>) -> Vec<String> {
+    pub fn approval_panel_lines(&self, mut model: ApprovalPanelModel<'_>) -> Vec<String> {
+        if model.irrecoverable {
+            model.reason = None;
+        }
+        if model.expanded && !is_hook_approval_request(&model) {
+            return self.approval_details_view_lines(&model, 0);
+        }
+        if !approval_queue_details_visible(
+            &model,
+            self.panel_standard_width(),
+            self.i18n(),
+            self.row_limit.map(|rows| rows.saturating_sub(1) as usize),
+        ) {
+            model.next_label = None;
+        }
         if self.plain {
             return self.plain_approval_panel_lines(model);
         }
 
         let width = self.panel_standard_width();
-        let height = approval_panel_height(&model, width, self.i18n());
+        let height = approval_panel_height(&model, width, self.i18n(), self.row_limit);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_panel(model, self.i18n(), area, &mut buffer);
+        render_approval_panel(model, self.i18n(), area, &mut buffer, self.row_limit);
         buffer_to_lines(&buffer, area)
     }
 
-    fn approval_panel_write_lines(&self, model: ApprovalPanelModel<'_>) -> Vec<String> {
+    fn approval_panel_write_lines(&self, mut model: ApprovalPanelModel<'_>) -> Vec<String> {
+        if model.irrecoverable {
+            model.reason = None;
+        }
+        if model.expanded && !is_hook_approval_request(&model) {
+            return self.approval_details_view_lines(&model, 0);
+        }
+        if !approval_queue_details_visible(
+            &model,
+            self.panel_standard_width(),
+            self.i18n(),
+            self.row_limit.map(|rows| rows.saturating_sub(1) as usize),
+        ) {
+            model.next_label = None;
+        }
         if self.plain {
             return self.plain_approval_panel_lines(model);
         }
 
         let width = self.panel_standard_width();
-        let height = approval_panel_height(&model, width, self.i18n());
+        let height = approval_panel_height(&model, width, self.i18n(), self.row_limit);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_approval_panel(model, self.i18n(), area, &mut buffer);
+        render_approval_panel(model, self.i18n(), area, &mut buffer, self.row_limit);
         if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -105,23 +173,44 @@ impl RatatuiInlineRenderer {
 
     fn plain_approval_panel_lines(&self, model: ApprovalPanelModel<'_>) -> Vec<String> {
         let i18n = self.i18n();
+        let queue_details = approval_queue_details_visible(
+            &model,
+            self.panel_standard_width(),
+            i18n,
+            self.row_limit.map(|rows| rows.saturating_sub(1) as usize),
+        );
         if is_command_approval_request(&model) {
             let command_rows = command_preview_rows(
                 model.preview,
-                self.content_width(),
-                max_preview_rows(model.expanded),
+                approval_content_width(self.panel_standard_width()),
+                approval_preview_limit(
+                    &model,
+                    self.panel_standard_width(),
+                    i18n,
+                    self.row_limit.map(|rows| rows.saturating_sub(1) as usize),
+                ),
             );
             let mut lines = vec![
-                CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalRequiredTitle)),
-                command_request_heading(model.subject, i18n).to_string(),
+                CardKind::Permission.title(i18n.t(if model.expanded {
+                    crate::MessageId::ApprovalDetailsTitle
+                } else {
+                    crate::MessageId::ApprovalRequiredTitle
+                })),
+                format!(
+                    "{}{}",
+                    command_request_heading(model.subject, i18n),
+                    if !queue_details {
+                        queue_meta_suffix(&model, i18n)
+                    } else {
+                        String::new()
+                    }
+                ),
             ];
-            for warning in &model.hook_warnings {
-                let icon = hook_warning_icon(warning.decision);
-                lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
-                for msg_line in warning.message.lines() {
-                    lines.push(format!("\u{2502}   {msg_line}"));
-                }
-            }
+            lines.extend(
+                approval_hook_warning_lines(&model, self.content_width(), i18n)
+                    .iter()
+                    .map(super::line_to_string),
+            );
             if let Some(reason) = model.reason {
                 lines.push(approval_reason_line(reason, i18n));
             }
@@ -131,7 +220,7 @@ impl RatatuiInlineRenderer {
                     .map(|(row, _)| row),
             );
             lines.extend(command_rows);
-            if model.queue_total > 1 {
+            if model.queue_total > 1 && queue_details {
                 let position = model.queue_position.to_string();
                 let total = model.queue_total.to_string();
                 let mut queue = i18n.format(
@@ -151,17 +240,6 @@ impl RatatuiInlineRenderer {
                 i18n,
                 self.content_width(),
             ));
-            if model.expanded {
-                lines.push(
-                    i18n.t(crate::MessageId::ApprovalCommandDefaultPolicy)
-                        .to_string(),
-                );
-                lines.push(format!(
-                    "{}{}",
-                    i18n.t(crate::MessageId::ApprovalKeysPrefix),
-                    i18n.t(crate::MessageId::ApprovalKeysText)
-                ));
-            }
             return lines;
         }
 
@@ -200,7 +278,11 @@ impl RatatuiInlineRenderer {
             &queue_suffix,
         );
         let mut lines = vec![
-            CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalRequiredTitle)),
+            CardKind::Permission.title(i18n.t(if model.expanded {
+                crate::MessageId::ApprovalDetailsTitle
+            } else {
+                crate::MessageId::ApprovalRequiredTitle
+            })),
             format!("{subject} · {risk_label}{queue_suffix}"),
         ];
         if let Some(reason) = model.reason {
@@ -211,14 +293,21 @@ impl RatatuiInlineRenderer {
                 .into_iter()
                 .map(|(row, _)| row),
         );
-        for warning in &model.hook_warnings {
-            let icon = hook_warning_icon(warning.decision);
-            lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
-            for msg_line in warning.message.lines() {
-                lines.push(format!("\u{2502}   {msg_line}"));
-            }
-        }
-        lines.push(model.preview.to_string());
+        lines.extend(
+            approval_hook_warning_lines(&model, self.content_width(), i18n)
+                .iter()
+                .map(super::line_to_string),
+        );
+        lines.extend(wrapped_preview_rows(
+            model.preview,
+            approval_content_width(self.panel_standard_width()),
+            approval_preview_limit(
+                &model,
+                self.panel_standard_width(),
+                i18n,
+                self.row_limit.map(|rows| rows.saturating_sub(1) as usize),
+            ),
+        ));
         if let Some(next) = model.next_label {
             lines.push(format!(
                 "{}{next}",
@@ -231,22 +320,16 @@ impl RatatuiInlineRenderer {
             i18n,
             self.content_width(),
         ));
-        if model.expanded {
-            lines.push(
-                i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)
-                    .to_string(),
-            );
-            lines.push(format!(
-                "{}{}",
-                i18n.t(crate::MessageId::ApprovalKeysPrefix),
-                i18n.t(crate::MessageId::ApprovalKeysText)
-            ));
-        }
         lines
     }
 }
 
-fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16, i18n: crate::I18n) -> u16 {
+fn approval_panel_height(
+    model: &ApprovalPanelModel<'_>,
+    width: u16,
+    i18n: crate::I18n,
+    rows: Option<u16>,
+) -> u16 {
     let content_width = approval_content_width(width);
     let action_rows =
         approval_action_row_count(model_action_set(model), i18n, content_width) as u16;
@@ -260,27 +343,33 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16, i18n: crate
         let queue_rows = u16::from(model.queue_total > 1);
         return 3 + action_rows + hook_warning_rows + queue_rows;
     }
+    let hook_warning_rows = approval_hook_warning_lines(model, content_width, i18n).len() as u16;
     if is_command_approval_request(model) {
         let command_rows = command_preview_rows(
             model.preview,
             content_width,
-            max_preview_rows(model.expanded),
+            approval_preview_limit(
+                model,
+                width,
+                i18n,
+                rows.map(|rows| rows.saturating_sub(1) as usize),
+            ),
         )
         .len()
         .max(1) as u16;
-        let queue_rows = u16::from(model.queue_total > 1);
+        let queue_rows = u16::from(
+            model.queue_total > 1
+                && approval_queue_details_visible(
+                    model,
+                    width,
+                    i18n,
+                    rows.map(|rows| rows.saturating_sub(1) as usize),
+                ),
+        );
         let reason_rows = model
             .reason
-            .map(|reason| {
-                approval_reason_rows(
-                    reason,
-                    content_width,
-                    crate::I18n::new(crate::Language::EnUs),
-                )
-                .len() as u16
-            })
+            .map(|reason| approval_reason_rows(reason, content_width, i18n).len() as u16)
             .unwrap_or(0);
-        let expanded_rows = if model.expanded { 2 } else { 0 };
         let warning_rows = approval_warning_rows(model, content_width, i18n).len() as u16;
         return 3
             + action_rows
@@ -288,40 +377,30 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16, i18n: crate
             + queue_rows
             + reason_rows
             + warning_rows
-            + expanded_rows
             + hook_warning_rows;
     }
 
     let preview_rows = wrapped_preview_rows(
         model.preview,
         content_width,
-        max_preview_rows(model.expanded),
+        approval_preview_limit(
+            model,
+            width,
+            i18n,
+            rows.map(|rows| rows.saturating_sub(1) as usize),
+        ),
     )
     .len()
     .max(1) as u16;
     let next_rows = u16::from(model.next_label.is_some());
     let reason_rows = model
         .reason
-        .map(|reason| {
-            approval_reason_rows(
-                reason,
-                content_width,
-                crate::I18n::new(crate::Language::EnUs),
-            )
-            .len() as u16
-        })
+        .map(|reason| approval_reason_rows(reason, content_width, i18n).len() as u16)
         .unwrap_or(0);
     // V6a slim generic card: border(2) + metadata(1) + actions(N) + content;
     // keys(1) + policy(2) only when expanded (ARP-R8).
-    let expanded_rows = if model.expanded { 3 } else { 0 };
     let warning_rows = approval_warning_rows(model, content_width, i18n).len() as u16;
-    3 + action_rows
-        + preview_rows
-        + next_rows
-        + reason_rows
-        + warning_rows
-        + expanded_rows
-        + hook_warning_rows
+    3 + action_rows + preview_rows + next_rows + reason_rows + warning_rows + hook_warning_rows
 }
 
 fn render_approval_panel(
@@ -329,9 +408,10 @@ fn render_approval_panel(
     i18n: crate::I18n,
     area: Rect,
     buffer: &mut Buffer,
+    rows: Option<u16>,
 ) {
     if is_command_approval_request(&model) {
-        render_command_tool_approval_panel(model, i18n, area, buffer);
+        render_command_tool_approval_panel(model, i18n, area, buffer, rows);
         return;
     }
     if is_hook_approval_request(&model) {
@@ -350,7 +430,11 @@ fn render_approval_panel(
             Span::styled(
                 format!(
                     " {} ",
-                    CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalTitle))
+                    CardKind::Permission.title(i18n.t(if model.expanded {
+                        crate::MessageId::ApprovalDetailsTitle
+                    } else {
+                        crate::MessageId::ApprovalTitle
+                    }))
                 ),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
@@ -363,21 +447,24 @@ fn render_approval_panel(
 
     let preview_rows = wrapped_preview_rows(
         model.preview,
-        inner.width.saturating_sub(2) as usize,
-        max_preview_rows(model.expanded),
+        approval_content_width(area.width),
+        approval_preview_limit(
+            &model,
+            area.width,
+            i18n,
+            rows.map(|rows| rows.saturating_sub(1) as usize),
+        ),
     );
     let preview_height = preview_rows.len().max(1) as u16;
     let next_height = u16::from(model.next_label.is_some());
     let reason_rows = model
         .reason
-        .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
+        .map(|reason| approval_reason_rows(reason, approval_content_width(area.width), i18n))
         .unwrap_or_default();
     let reason_height = reason_rows.len() as u16;
-    let hook_warning_height = model
-        .hook_warnings
-        .iter()
-        .map(|w| 1 + w.message.lines().count())
-        .sum::<usize>() as u16;
+    let hook_warning_lines =
+        approval_hook_warning_lines(&model, approval_content_width(area.width), i18n);
+    let hook_warning_height = hook_warning_lines.len() as u16;
     // V6a slim generic card: metadata row, optional continuation line,
     // irrecoverable warning (#2064), hook warnings, preview, optional
     // next, actions; keys + policy only when expanded (ARP-R8).
@@ -389,7 +476,7 @@ fn render_approval_panel(
     );
     let warning_rows = approval_warning_rows(&model, approval_content_width(area.width), i18n);
     let warning_height = warning_rows.len() as u16;
-    let mut constraints = vec![
+    let constraints = vec![
         Constraint::Length(1),
         Constraint::Length(reason_height),
         Constraint::Length(warning_height),
@@ -398,10 +485,6 @@ fn render_approval_panel(
         Constraint::Length(next_height),
         Constraint::Length(action_lines.len() as u16),
     ];
-    if model.expanded {
-        constraints.push(Constraint::Length(1));
-        constraints.push(Constraint::Length(2));
-    }
     let chunks = Layout::vertical(constraints).split(inner);
 
     // Metadata row: `{subject} · {risk badge}[ · queue N/M]` — the badge is
@@ -439,31 +522,9 @@ fn render_approval_panel(
         .render(chunks[1], buffer);
     }
 
-    render_approval_warnings(warning_rows, chunks[2], buffer);
+    render_approval_warnings(warning_rows, chunks[2], buffer, i18n);
 
-    if !model.hook_warnings.is_empty() {
-        let mut warning_lines: Vec<Line<'_>> = Vec::new();
-        for w in &model.hook_warnings {
-            let color = hook_warning_color(w.decision);
-            let icon = hook_warning_icon(w.decision);
-            // Line 1: colored left bar + icon + bold hookName
-            warning_lines.push(Line::from(vec![
-                Span::styled(format!("\u{2502} {icon} "), Style::default().fg(color)),
-                Span::styled(
-                    w.hook_name.to_string(),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            // Message lines: colored left bar + indented text, split on newlines
-            for msg_line in w.message.lines() {
-                warning_lines.push(Line::from(vec![
-                    Span::styled("\u{2502}   ", Style::default().fg(color)),
-                    Span::raw(msg_line.to_string()),
-                ]));
-            }
-        }
-        Paragraph::new(Text::from(warning_lines)).render(chunks[3], buffer);
-    }
+    Paragraph::new(Text::from(hook_warning_lines)).render(chunks[3], buffer);
 
     let preview_lines = preview_rows
         .into_iter()
@@ -483,23 +544,6 @@ fn render_approval_panel(
     }
 
     Paragraph::new(Text::from(action_lines)).render(chunks[6], buffer);
-
-    if model.expanded {
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                i18n.t(crate::MessageId::ApprovalKeysPrefix),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
-        ]))
-        .render(chunks[7], buffer);
-        Paragraph::new(Text::from(vec![
-            Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)),
-            Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicyExtra)),
-        ]))
-        .wrap(Wrap { trim: true })
-        .render(chunks[8], buffer);
-    }
 }
 
 fn render_command_tool_approval_panel(
@@ -507,6 +551,7 @@ fn render_command_tool_approval_panel(
     i18n: crate::I18n,
     area: Rect,
     buffer: &mut Buffer,
+    rows: Option<u16>,
 ) {
     let border = if model.risk == "high" {
         Color::Red
@@ -519,7 +564,11 @@ fn render_command_tool_approval_panel(
             Span::styled(
                 format!(
                     " {} ",
-                    CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalTitle))
+                    CardKind::Permission.title(i18n.t(if model.expanded {
+                        crate::MessageId::ApprovalDetailsTitle
+                    } else {
+                        crate::MessageId::ApprovalTitle
+                    }))
                 ),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
@@ -531,19 +580,28 @@ fn render_command_tool_approval_panel(
     block.render(area, buffer);
     let command_rows = command_preview_rows(
         model.preview,
-        inner.width.saturating_sub(2) as usize,
-        max_preview_rows(model.expanded),
+        approval_content_width(area.width),
+        approval_preview_limit(
+            &model,
+            area.width,
+            i18n,
+            rows.map(|rows| rows.saturating_sub(1) as usize),
+        ),
     );
     let reason_rows = model
         .reason
-        .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
+        .map(|reason| approval_reason_rows(reason, approval_content_width(area.width), i18n))
         .unwrap_or_default();
-    let hook_warning_height = model
-        .hook_warnings
-        .iter()
-        .map(|w| 1 + w.message.lines().count())
-        .sum::<usize>() as u16;
-    let queue_height = u16::from(model.queue_total > 1);
+    let hook_warning_lines =
+        approval_hook_warning_lines(&model, approval_content_width(area.width), i18n);
+    let hook_warning_height = hook_warning_lines.len() as u16;
+    let queue_details = approval_queue_details_visible(
+        &model,
+        area.width,
+        i18n,
+        rows.map(|rows| rows.saturating_sub(1) as usize),
+    );
+    let queue_height = u16::from(model.queue_total > 1 && queue_details);
     let warning_rows = approval_warning_rows(&model, approval_content_width(area.width), i18n);
     let warning_height = warning_rows.len() as u16;
     let action_lines = approval_action_styled_rows(
@@ -552,7 +610,7 @@ fn render_command_tool_approval_panel(
         i18n,
         inner.width as usize,
     );
-    let mut constraints = vec![
+    let constraints = vec![
         Constraint::Length(1),
         Constraint::Length(hook_warning_height),
         Constraint::Length(reason_rows.len() as u16),
@@ -561,44 +619,26 @@ fn render_command_tool_approval_panel(
         Constraint::Length(queue_height),
         Constraint::Length(action_lines.len() as u16),
     ];
-    if model.expanded {
-        constraints.push(Constraint::Length(1));
-        constraints.push(Constraint::Length(1));
-    }
     let chunks = Layout::vertical(constraints).split(inner);
     let action_index = 6;
-    let keys_index = 7;
-    let policy_index = 8;
 
     Paragraph::new(Line::from(Span::styled(
-        command_request_heading(model.subject, i18n),
+        format!(
+            "{}{}",
+            command_request_heading(model.subject, i18n),
+            if !queue_details {
+                queue_meta_suffix(&model, i18n)
+            } else {
+                String::new()
+            }
+        ),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )))
     .render(chunks[0], buffer);
 
-    if !model.hook_warnings.is_empty() {
-        let mut warning_lines: Vec<Line<'_>> = Vec::new();
-        for w in &model.hook_warnings {
-            let color = hook_warning_color(w.decision);
-            let icon = hook_warning_icon(w.decision);
-            warning_lines.push(Line::from(vec![
-                Span::styled(format!("\u{2502} {icon} "), Style::default().fg(color)),
-                Span::styled(
-                    w.hook_name.to_string(),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            for msg_line in w.message.lines() {
-                warning_lines.push(Line::from(vec![
-                    Span::styled("\u{2502}   ", Style::default().fg(color)),
-                    Span::raw(msg_line.to_string()),
-                ]));
-            }
-        }
-        Paragraph::new(Text::from(warning_lines)).render(chunks[1], buffer);
-    }
+    Paragraph::new(Text::from(hook_warning_lines)).render(chunks[1], buffer);
 
     if !reason_rows.is_empty() {
         Paragraph::new(Text::from(approval_reason_styled_lines(
@@ -609,7 +649,7 @@ fn render_command_tool_approval_panel(
         .render(chunks[2], buffer);
     }
 
-    render_approval_warnings(warning_rows, chunks[3], buffer);
+    render_approval_warnings(warning_rows, chunks[3], buffer, i18n);
 
     let command_lines = command_rows
         .into_iter()
@@ -617,7 +657,7 @@ fn render_command_tool_approval_panel(
         .collect::<Vec<_>>();
     Paragraph::new(Text::from(command_lines)).render(chunks[4], buffer);
 
-    if model.queue_total > 1 {
+    if model.queue_total > 1 && queue_details {
         let position = model.queue_position.to_string();
         let total = model.queue_total.to_string();
         let mut queue = i18n.format(
@@ -637,20 +677,6 @@ fn render_command_tool_approval_panel(
     }
 
     Paragraph::new(Text::from(action_lines)).render(chunks[action_index], buffer);
-
-    if model.expanded {
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                i18n.t(crate::MessageId::ApprovalKeysPrefix),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
-        ]))
-        .render(chunks[keys_index], buffer);
-        Paragraph::new(i18n.t(crate::MessageId::ApprovalCommandDefaultPolicy))
-            .wrap(Wrap { trim: true })
-            .render(chunks[policy_index], buffer);
-    }
 }
 
 // ─── Hook Approval Panel ─────────────────────────────────────────────
@@ -747,7 +773,7 @@ fn render_hook_approval_panel(
 /// Action set offered by this card (single source of truth mirrors
 /// `approval_action_set_for` on the request side, issue #1773; the
 /// high-risk variants drop AlwaysTrust, issue #2064).
-fn model_action_set(model: &ApprovalPanelModel<'_>) -> ApprovalActionSet {
+pub(super) fn model_action_set(model: &ApprovalPanelModel<'_>) -> ApprovalActionSet {
     if is_hook_approval_request(model) {
         ApprovalActionSet::Hook
     } else if model.turn_extension {
@@ -768,7 +794,7 @@ fn model_action_set(model: &ApprovalPanelModel<'_>) -> ApprovalActionSet {
 /// Localized risk badge value (ARP-R7): high/medium/low map to i18n labels;
 /// values outside the closed `legacy_risk()` domain fall back to a neutral
 /// localized label so the badge never mixes languages (review follow-up).
-fn risk_level_label(risk: &str, i18n: crate::I18n) -> String {
+pub(super) fn risk_level_label(risk: &str, i18n: crate::I18n) -> String {
     let id = match risk {
         "high" => crate::MessageId::ApprovalRiskLevelHigh,
         "medium" => crate::MessageId::ApprovalRiskLevelMedium,
@@ -795,7 +821,7 @@ fn queue_meta_suffix(model: &ApprovalPanelModel<'_>, i18n: crate::I18n) -> Strin
 /// Ellipsize the metadata-row subject so the risk badge and queue suffix
 /// always fit: unbounded custom/MCP tool names must never push the risk
 /// signal past the row end (review follow-up on #1786).
-fn metadata_subject(
+pub(super) fn metadata_subject(
     subject: &str,
     content_width: usize,
     risk_label: &str,
@@ -853,15 +879,7 @@ pub(super) fn audit_ref_line(audit_ref: &str) -> String {
     format!("audit_ref: {audit_ref}")
 }
 
-fn max_preview_rows(expanded: bool) -> usize {
-    if expanded {
-        6
-    } else {
-        3
-    }
-}
-
-fn is_command_approval_request(model: &ApprovalPanelModel<'_>) -> bool {
+pub(super) fn is_command_approval_request(model: &ApprovalPanelModel<'_>) -> bool {
     (model.kind == "tool request"
         && (model.subject.eq_ignore_ascii_case("tool Bash")
             || model.subject.eq_ignore_ascii_case("tool shell")))
@@ -945,7 +963,7 @@ fn ellipsize_last_row(mut rows: Vec<String>, width: usize) -> Vec<String> {
 // ─── Hook warning decision-based styling ────────────────────────────
 
 /// Color for hook warnings in ratatui rendering, selected by decision.
-fn hook_warning_color(decision: Option<&str>) -> Color {
+pub(super) fn hook_warning_color(decision: Option<&str>) -> Color {
     match decision {
         Some("allow") | Some("approve") => Color::Green,
         Some("ask") => Color::Yellow,

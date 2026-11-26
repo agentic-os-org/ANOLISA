@@ -55,13 +55,31 @@ readonly_disabled = ["git status", "pwd"]"#,
     )
 }
 
+#[cfg(target_os = "linux")]
+#[path = "approval/binding_recordings.rs"]
+mod binding_recordings;
 #[path = "approval/details.rs"]
 mod details;
 #[path = "approval/foreground.rs"]
 mod foreground;
 #[path = "approval/input.rs"]
 mod input;
+#[cfg(target_os = "linux")]
+#[path = "approval/mode_recordings.rs"]
+mod mode_recordings;
+#[cfg(target_os = "linux")]
+#[path = "approval/preview_recordings.rs"]
+mod preview_recordings;
+#[cfg(target_os = "linux")]
+#[path = "approval/recordings.rs"]
+mod recordings;
+#[cfg(target_os = "linux")]
+#[path = "approval/scope_recordings.rs"]
+mod scope_recordings;
 #[path = "approval/slash_removed.rs"]
 mod slash_removed;
 #[path = "approval/status.rs"]
 mod status;
+#[cfg(target_os = "linux")]
+#[path = "approval/viewport_recordings.rs"]
+mod viewport_recordings;

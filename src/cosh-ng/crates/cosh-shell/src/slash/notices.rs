@@ -103,6 +103,26 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
         });
     }
 
+    groups.push(HelpPanelGroup {
+        label: i18n.t(MessageId::ApprovalHelpBoundaryGroup),
+        entries: vec![
+            HelpPanelEntry {
+                usage: i18n.t(MessageId::ApprovalHelpTerminalLabel),
+                summary: i18n.t(MessageId::ApprovalTerminalBoundaryDetails),
+                scope: "shell",
+            },
+            HelpPanelEntry {
+                usage: i18n.t(MessageId::ApprovalHelpPreviewLabel),
+                summary: i18n.t(MessageId::ApprovalPreviewBoundaryDetails),
+                scope: "shell",
+            },
+            HelpPanelEntry {
+                usage: i18n.t(MessageId::ApprovalHelpTurnLabel),
+                summary: i18n.t(MessageId::ApprovalTurnScopeDetails),
+                scope: "shell",
+            },
+        ],
+    });
     RatatuiInlineRenderer::for_terminal().write_help_panel(
         output,
         HelpPanelModel {

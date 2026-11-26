@@ -126,14 +126,24 @@ impl CardInputState {
             }
             RawInputCapture::TextQuestion { .. } => None,
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                let max_idx = capture_action_set(capture).max_index();
+                let actions = capture_action_set(capture);
+                let details_focused = actions.action_at(self.selected)
+                    == Some(crate::ui::ApprovalPanelAction::Details);
+                if details_focused && matches!(code, b'A' | b'B') {
+                    self.approval_details_open = true;
+                    return Some(RawInputEvent::CardDetailsScroll(id.clone(), code == b'B'));
+                }
                 let previous = self.selected;
                 match code {
                     b'D' => self.selected = self.selected.saturating_sub(1),
-                    b'C' => self.selected = (self.selected + 1).min(max_idx),
+                    b'C' if details_focused && self.approval_details_open => {
+                        self.selected = self.selected.saturating_sub(1);
+                    }
+                    b'C' => self.selected = (self.selected + 1).min(actions.max_index()),
                     _ => {}
                 }
                 if self.selected != previous {
+                    self.approval_details_open = false;
                     Some(RawInputEvent::CardFocus(id.clone(), self.selected))
                 } else {
                     None

@@ -519,6 +519,13 @@ pub(crate) fn refresh_shell_request_assessment(
     Some(assessment)
 }
 
+pub(crate) fn request_shell_output_command(request: &RuntimeApprovalRequest) -> Option<String> {
+    if request.kind != ApprovalRequestKind::ShellCommand && !is_shell_tool_name(&request.subject) {
+        return None;
+    }
+    shell_handoff_command_from_request(request).ok()
+}
+
 fn next_approval_id(state: &InlineState) -> String {
     state.approvals.next_request_id()
 }

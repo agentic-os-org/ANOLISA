@@ -464,7 +464,19 @@ mod tests {
             MessageId::GuideAuthPending as usize
         );
         assert_eq!(
-            MessageId::GuideAuthValidationUsage as usize,
+            MessageId::GuideAuthValidationUsage as usize + 1,
+            MessageId::ApprovalOutputEnvironment as usize
+        );
+        assert_eq!(
+            MessageId::ApprovalIrrecoverableWarningCompact as usize + 1,
+            MessageId::ApprovalHookNoticeSummary as usize
+        );
+        assert_eq!(
+            MessageId::ApprovalHookNoticeSummary as usize + 1,
+            MessageId::ApprovalHookNoticeCompact as usize
+        );
+        assert_eq!(
+            MessageId::ApprovalHookNoticeCompact as usize,
             MessageId::ALL.len() - 1
         );
     }

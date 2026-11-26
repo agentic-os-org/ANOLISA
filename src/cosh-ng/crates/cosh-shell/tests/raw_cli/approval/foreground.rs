@@ -58,11 +58,7 @@ fn raw_cli_approved_bash_tool_prints_native_command_and_stdout() {
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(output.contains("sent to shell"), "{output}");
     assert!(!output.contains("Tool result for request req-1"));
-    assert_inline_before_followup(
-        &output,
-        "Terminal output is not redacted.",
-        "Approved req-1",
-    );
+    assert_inline_before_followup(&output, "Unpredictable output;", "Approved req-1");
     assert_inline_before_followup(&output, "$ pwd", expected_cwd);
     assert!(!output.contains("Tool called: Bash called"), "{output}");
     assert!(!output.contains("stdout captured; [Details]"), "{output}");
