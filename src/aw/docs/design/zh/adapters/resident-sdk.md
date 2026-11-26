@@ -43,6 +43,10 @@ AW 保留原始工具载荷；此比较规则保持 AW 元数据的独立整数�
 Pi 使用公开模型 stream 及其产生的工具对象。Claude 使用私有 loopback Anthropic Messages
 转发层和原生 SDK 传输的回调调度上下文。MCP `_meta.claudecode/toolUseId` 在 SDK 移除
 handler 参数中的元数据前，将原生帧关联到同一个身份。
+转发层支持 SSE 流中的 CRLF、LF 和 CR 行尾，跳过注释和空白数据，仅在收到
+`message_stop` 后丢弃尾随的 `[DONE]`。丢弃尾随标记、跳过空白数据或因工具输入增量全为空白而
+回退到初始输入时，stderr 对每种情况每个请求最多告警一次。失败时记录解码或协议处理阶段及结构信息，
+不记录消息正文、工具输入和凭据。
 Qoder 使用 Worker 私有 partial 输出中的完整模型工具块，并按原生 control 调度上下文
 核验每个 Hook。子工具的私有 stream-start 帧在活动且已授权的父 Agent 下预留原生 ID。
 PreTool 或权限回调可能早于完整 assistant 帧到达；回调在原生取消边界内等待该帧及其登记

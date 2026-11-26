@@ -462,7 +462,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             "index": 0,
             "content_block": {"type": "tool_use", "name": "tool", "id": "native", "input": {}},
         }
-        transformed = await stream.event(start)
+        (transformed,) = await stream.event(start)
         self.assertNotEqual(transformed["content_block"]["id"], "native")
         self.assertEqual(self.scope.registered, 0)
         await stream.event(

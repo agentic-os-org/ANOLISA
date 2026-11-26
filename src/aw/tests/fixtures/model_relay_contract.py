@@ -1,6 +1,8 @@
 """Exercise the real HTTP relay with bounded loopback peers and no model secrets."""
 
 import asyncio
+from contextlib import redirect_stderr
+import io
 import json
 import os
 import unittest
@@ -10,10 +12,25 @@ import sys
 from identity_contract import AW, Scope
 sys.path.insert(0, str(AW / "sdk/python/src/aw_sdk"))
 from types import SimpleNamespace
-from aw_invocations import Invocations
+from aw_invocations import Invocations, digest
 import aw_model
-from aw_model import ModelRelay, MAX_REQUEST
+from aw_model import MAX_FRAME, ModelRelay, MAX_REQUEST
 import httpx
+
+
+START = b'data: {"type":"message_start","message":{"content":[]}}\n\n'
+STOP = b'data: {"type":"message_stop"}\n\n'
+
+
+def tool_frames(partial, index=0):
+    events = [
+        {"type": "content_block_start", "index": index, "content_block": {
+            "type": "tool_use", "id": "native", "name": "tool", "input": {"initial": 1}}},
+        {"type": "content_block_delta", "index": index, "delta": {
+            "type": "input_json_delta", "partial_json": partial}},
+        {"type": "content_block_stop", "index": index},
+    ]
+    return [b"data: " + json.dumps(event).encode() for event in events]
 
 
 class RelayTests(unittest.IsolatedAsyncioTestCase):
@@ -100,10 +117,10 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OSError):
                 await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 1)
 
-    async def post(self):
+    async def post(self, content=b'{"messages":[]}'):
         return await self.http.post(
             self.endpoint + "/v1/messages",
-            content=b'{"messages":[]}',
+            content=content,
             headers={"x-api-key": "fixture-only", "content-type": "application/json"},
         )
 
@@ -407,6 +424,177 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         await self.post()
         await asyncio.wait_for(self.stopped.wait(), 1)
         self.assertFalse(self.bridge.invocations.active)
+
+    async def test_mixed_sse_line_endings_register_tool_with_split_crlf(self):
+        start, delta, stop = tool_frames('{"value":1}')
+        chunks = [
+            b'\xef\xbb\xbfdata: {"type":"message_start",\r', b'\ndata: "message":{"content":[]}}\r',
+            b'\n\n: heartbeat\r\rdata:\ndata:\n\ndata\r\r',
+            start + b"\n\r", b"\n" + delta + b"\r\r" + stop + b"\r\n\n" + STOP,
+        ]
+
+        class Chunks(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for chunk in chunks:
+                    yield chunk
+
+        await self.relay.http.aclose()
+        self.relay.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, headers={"content-type": " Text/Event-Stream ; charset=utf-8"},
+                                     stream=Chunks())))
+        response = await self.post()
+        events = [json.loads(line[6:]) for line in response.content.splitlines()
+                  if line.startswith(b"data: ")]
+        self.assertEqual([event["type"] for event in events], [
+            "message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_stop"])
+        entry = self.bridge.invocations.active[events[1]["content_block"]["id"]]
+        self.assertNotEqual(entry.call_id, "native")
+        self.assertEqual((entry.phase, entry.arguments), ("issued", digest({"value": 1})))
+        self.assertIsNone(self.bridge.failure)
+
+    async def test_post_stop_marker_and_heartbeats_are_discarded(self):
+        self.content_type = "Text/Event-Stream ; charset=utf-8"
+        for tail in (b"data: [DONE]\n\n", b"data: [DONE]", b": heartbeat", b"data: [DONE]\r\r: heartbeat\n\n"):
+            with self.subTest(tail=tail):
+                self.body = b": heartbeat\n\ndata:\n\ndata:   \ndata:\n\n" + START + STOP + tail
+                response = await self.post()
+                self.assertEqual(response.content.count(b"event: "), 2)
+                self.assertNotIn(b"[DONE]", response.content)
+                self.assertNotIn(b"heartbeat", response.content)
+                self.assertIsNone(self.bridge.failure)
+
+    async def test_compatibility_warnings_are_content_free_and_per_request(self):
+        self.content_type = "text/event-stream; token=private-header"
+        blank = b"event: private-model\ndata:  \ndata:\n\n"
+        done = b": private-prompt\ndata: [DONE]\n\n"
+        tools = [line.replace(b'"initial": 1', b'"initial": "private-tool"')
+                 for index in range(2) for line in tool_frames("   ", index)]
+        self.body = START + blank * 2 + b"".join(line + b"\n\n" for line in tools) + STOP + done * 2
+        for has_tools in (True, False):
+            log = io.StringIO()
+            with redirect_stderr(log):
+                await self.post(b'{"messages":[{"role":"user","content":"private-prompt"}]}')
+            expected = [
+                "AW managed model response warning: reason=blank_data data_bytes=2 data_lines=2",
+            ]
+            if has_tools:
+                expected.append("AW managed model response warning: reason=blank_tool_input partial_bytes=3")
+            expected.append(f"AW managed model response warning: reason=trailing_done frame_bytes={len(done)-1}")
+            self.assertEqual(log.getvalue().splitlines(), expected)
+            self.assertIsNone(self.bridge.failure)
+            self.body = START + blank + STOP + done
+
+    async def test_standard_stream_is_quiet(self):
+        self.content_type = "text/event-stream"
+        self.body = b": keep-alive\r\n\r\n" + START + b"".join(
+            line + b"\r\n\r\n" for line in tool_frames("")) + STOP + b": heartbeat"
+        log = io.StringIO()
+        with redirect_stderr(log):
+            await self.post()
+        self.assertEqual(log.getvalue(), "")
+        self.assertIsNone(self.bridge.failure)
+
+    async def test_blank_tool_input_uses_initial_object(self):
+        self.content_type = "text/event-stream"
+        self.body = START + b"".join(line + b"\n\n" for line in tool_frames(" \t\r\n")) + STOP
+        response = await self.post()
+        events = [json.loads(line[6:]) for line in response.content.splitlines()
+                  if line.startswith(b"data: ")]
+        start, *deltas, stop = events[1:-1]
+        self.assertEqual(start["content_block"]["input"], {})
+        self.assertEqual(stop["type"], "content_block_stop")
+        self.assertEqual(events[-1]["type"], "message_stop")
+        arguments = json.loads("".join(event["delta"]["partial_json"] for event in deltas))
+        self.assertEqual(arguments, {"initial": 1})
+        entry = self.bridge.invocations.active[start["content_block"]["id"]]
+        self.assertEqual((entry.phase, entry.arguments), ("issued", digest(arguments)))
+        self.assertEqual(self.bridge.scope.registered, 1)
+
+    async def failed_request(self, *fields, content=b'{"messages":[]}', before_headers=False):
+        log = io.StringIO()
+        with redirect_stderr(log):
+            if before_headers:
+                with self.assertRaises(httpx.RemoteProtocolError):
+                    await self.post(content)
+                body = b""
+            else:
+                body = (await self.post(content)).content
+            await asyncio.wait_for(self.stopped.wait(), 1)
+        line = log.getvalue()
+        self.assertIn("AW managed model response failed: ", line)
+        for field in fields:
+            self.assertIn(field, line)
+        for private in ("fixture-only", "private-prompt", "private-model", "private-tool",
+                        "private-header", self.relay.upstream, self.endpoint, self.relay.secret):
+            self.assertNotIn(private, line)
+        self.assertIsNotNone(self.bridge.failure)
+        self.assertEqual(self.bridge.scope.registered, 0)
+        return body
+
+    async def test_request_json_diagnostics(self):
+        await self.failed_request("JSONDecodeError", "stage=request_json", "json_err=Extra data",
+                                  "json_pos=3", content=b'{} private-prompt', before_headers=True)
+        self.assertFalse(self.requests)
+
+    async def test_response_json_diagnostics(self):
+        self.body = b'{"private-model":'
+        self.content_type = "application/x-private-header; token=fixture-only"
+        body = await self.failed_request("JSONDecodeError", "stage=response_json", "status=200",
+                                         "content_type=other", "json_err=Expecting value", "json_pos=17")
+        self.assertEqual(body, b"")
+
+    async def test_sse_frame_diagnostics(self):
+        self.content_type = "text/event-stream; token=fixture-only"
+        self.body = START + b"event: private-header\ndata:   {}\ndata: private-model\n\n" + STOP
+        body = await self.failed_request("JSONDecodeError", "stage=sse_frame", "sse_event=other",
+                                         "status=200", "content_type=text/event-stream", "data_lines=2",
+                                         "data_bytes=18", "frame_bytes=", "json_err=Extra data", "json_pos=5",
+                                         "payload_kind=non_json", "stream_started=1", "stream_stopped=0")
+        self.assertNotIn(b"private-model", body)
+        self.assertNotIn(b"message_stop", body)
+
+    async def test_vertical_tab_is_invalid_sse_data(self):
+        self.content_type = "text/event-stream"
+        self.body = START + b"data: \x0b\n\n" + STOP
+        body = await self.failed_request("JSONDecodeError", "stage=sse_frame", "payload_kind=non_json")
+        self.assertNotIn(b"message_stop", body)
+
+    async def test_nonbreaking_space_is_invalid_tool_input(self):
+        self.content_type = "text/event-stream"
+        self.body = START + b"".join(line + b"\n\n" for line in tool_frames("\u00a0")) + STOP
+        body = await self.failed_request("JSONDecodeError", "stage=tool_input_json")
+        self.assertNotIn(b"content_block_stop", body)
+        self.assertNotIn(b"message_stop", body)
+
+    async def test_premature_done_fails_closed(self):
+        self.content_type, self.body = "text/event-stream", START + b"data: [DONE]\n\n" + STOP
+        body = await self.failed_request("stage=sse_frame", "payload_kind=done")
+        self.assertNotIn(b"[DONE]", body)
+        self.assertNotIn(b"message_stop", body)
+
+    async def test_event_after_stop_fails_closed(self):
+        self.content_type, self.body = "text/event-stream", START + STOP + b'data: {"type":"ping"}\n\n'
+        body = await self.failed_request("stage=stream_event", "sse_event=ping", "stream_stopped=1")
+        self.assertNotIn(b"ping", body)
+
+    async def test_malformed_eof_after_stop_fails_closed(self):
+        self.content_type, self.body = "text/event-stream", START + STOP + b"data: private-model"
+        body = await self.failed_request("stage=sse_frame", "payload_kind=non_json", "stream_stopped=1")
+        self.assertNotIn(b"private-model", body)
+
+    async def test_tool_input_json_diagnostics(self):
+        self.content_type = "text/event-stream"
+        self.body = START + b"".join(line + b"\n\n" for line in tool_frames('{"private-tool":')) + STOP
+        body = await self.failed_request("JSONDecodeError", "stage=tool_input_json", "blocks_open=1",
+                                         "sse_event=content_block_stop", "partial_bytes=16",
+                                         "json_err=Expecting value", "json_pos=16")
+        self.assertNotIn(b"content_block_stop", body)
+        self.assertNotIn(b"message_stop", body)
+
+    async def test_unterminated_oversized_line_fails_closed(self):
+        self.content_type, self.body = "text/event-stream", START + b"x" * (MAX_FRAME + 1)
+        body = await self.failed_request("stage=sse_frame", "frame_bytes=")
+        self.assertNotIn(b"xxxx", body)
 
     async def test_upstream_http_error_preserves_native_error_response(self):
         self.status, self.body = 429, b'{"type":"error"}'

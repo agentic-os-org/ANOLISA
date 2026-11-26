@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import ssl
-import sys
 from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import proxy_bypass_environment
@@ -16,11 +16,15 @@ import httpx
 if __package__:
     from aw_sdk.aw_http_hosts import allows_http
     from .aw_claude import CallbackFailure
-    from .aw_model_stream import MAX_FRAME, MessageStream, rewrite_message
+    from .aw_model_stream import (
+        MAX_FRAME, MessageStream, event_name, relay_log, rewrite_message, sse_fields, sse_frames,
+    )
 else:
     from aw_http_hosts import allows_http
     from aw_claude import CallbackFailure
-    from aw_model_stream import MAX_FRAME, MessageStream, rewrite_message
+    from aw_model_stream import (
+        MAX_FRAME, MessageStream, event_name, relay_log, rewrite_message, sse_fields, sse_frames,
+    )
 
 MAX_REQUEST = 32 * 1024 * 1024
 MAX_HANDSHAKES = 32
@@ -40,6 +44,26 @@ HOP_HEADERS = {
     "trailer",
     "upgrade",
 }
+
+# Some Python decoders include the offending character in escape errors.
+_JSON_ERRORS = {
+    "Expecting value", "Extra data", "Expecting property name enclosed in double quotes",
+    "Expecting ':' delimiter", "Expecting ',' delimiter", "Unterminated string starting at",
+    r"Invalid \escape", r"Invalid \uXXXX escape", "Invalid control character at",
+    "Illegal trailing comma before end of object", "Illegal trailing comma before end of array",
+    "Unexpected UTF-8 BOM (decode using utf-8-sig)",
+}
+
+
+def media_label(media_type: str) -> str:
+    # Even a syntactically valid vendor subtype can contain private text.
+    if media_type in {"text/event-stream", "application/json", "application/problem+json",
+                      "application/octet-stream", "text/plain", "text/html"}:
+        return media_type
+    token = r"[a-z0-9!#$%&'*+.^_`|~-]+"
+    if len(media_type) <= 127 and re.fullmatch(f"{token}/{token}", media_type):
+        return "other"
+    return "invalid"
 
 
 class DownstreamClosed(Exception):
@@ -147,12 +171,13 @@ class ModelRelay:
     async def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         self.tasks.add(task)
+        details = {"stage": "request_http"}
         try:
             if self.closing or len(self.handshakes) >= MAX_HANDSHAKES:
                 return
             self.handshakes.add(task)
             async with asyncio.timeout(600):
-                await self.request(reader, writer)
+                await self.request(reader, writer, details)
         except asyncio.CancelledError:
             raise
         except DownstreamClosed:
@@ -160,11 +185,12 @@ class ModelRelay:
             # failures still propagate separately and poison the task below.
             pass
         except Exception as error:
-            print(
-                f"AW managed model response failed: {type(error).__name__}",
-                file=sys.stderr,
-                flush=True,
-            )
+            if isinstance(error, json.JSONDecodeError) and details["stage"] in {
+                "request_json", "response_json", "sse_frame", "tool_input_json"
+            }:
+                details.update(json_err=error.msg if error.msg in _JSON_ERRORS else "Invalid JSON",
+                               json_pos=error.pos)
+            relay_log(f"failed: {type(error).__name__}", details)
             # Partial responses cannot be turned into an error response. Close
             # the stream and latch the client before any later model request.
             self.bridge.failure_reply("tool.after", {})
@@ -179,7 +205,9 @@ class ModelRelay:
             finally:
                 self.tasks.discard(task)
 
-    async def request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def request(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, details: dict,
+    ) -> None:
         try:
             header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEADER_TIMEOUT)
             lines = header.decode("latin-1").split("\r\n")
@@ -199,13 +227,13 @@ class ModelRelay:
             raise CallbackFailure("AW active model request limit exceeded")
         self.exchanges.add(task)
         try:
-            await self.authenticated(reader, writer, target, lines)
+            await self.authenticated(reader, writer, target, lines, details)
         finally:
             self.exchanges.discard(task)
 
     async def authenticated(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-        target: str, lines: list[str],
+        target: str, lines: list[str], details: dict,
     ) -> None:
         path = target[len(self.secret) + 1 :]
         if urlsplit(path).path not in {"/v1/messages", "/v1/messages/count_tokens"}:
@@ -241,7 +269,7 @@ class ModelRelay:
             if extra:
                 raise CallbackFailure("AW model connection does not support pipelining")
 
-        forwarding = asyncio.create_task(self.forward(path, headers, data, writer))
+        forwarding = asyncio.create_task(self.forward(path, headers, data, writer, details))
         closed = asyncio.create_task(disconnected())
         try:
             done, _ = await asyncio.wait((forwarding, closed), return_when=asyncio.FIRST_COMPLETED)
@@ -261,17 +289,22 @@ class ModelRelay:
                     raise result
 
     async def forward(
-        self, path: str, headers: dict[str, str], data: bytes, writer: asyncio.StreamWriter,
+        self, path: str, headers: dict[str, str], data: bytes, writer: asyncio.StreamWriter, details: dict,
     ) -> None:
+        details["stage"] = "request_json"
         body = json.loads(data)
+        details["stage"] = "request_check"
         await self.bridge.invocations.check_model_request(body)
         forwarded = {key: value for key, value in headers.items() if key not in HOP_HEADERS}
         forwarded["accept-encoding"] = "identity"
         url = self.upstream + path
         extensions = {"target": str(httpx.URL(url)).encode("ascii")} if self._ipv6_forward_proxy else None
+        details["stage"] = "upstream_http"
         async with self.http.stream(
             "POST", url, headers=forwarded, content=data, extensions=extensions
         ) as response:
+            media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            details.update(status=response.status_code, content_type=media_label(media_type))
             if 300 <= response.status_code < 400:
                 raise CallbackFailure("AW model redirects are unsupported")
             out = {key: value for key, value in response.headers.items() if key not in HOP_HEADERS}
@@ -287,52 +320,57 @@ class ModelRelay:
                     if size > MAX_FRAME:
                         raise CallbackFailure("AW model auxiliary response exceeds one MiB")
                     await send(writer, chunk)
-            elif response.headers.get("content-type", "").split(";")[0] == "text/event-stream":
-                await self.stream(response, writer)
+            elif media_type == "text/event-stream":
+                await self.stream(response, writer, details)
             else:
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     data.extend(chunk)
                     if len(data) > MAX_REQUEST:
                         raise CallbackFailure("AW model response exceeds 32 MiB")
-                value = await rewrite_message(json.loads(data), self.bridge.invocations)
+                details["stage"] = "response_json"
+                value = json.loads(data)
+                details["stage"] = "response_message"
+                value = await rewrite_message(value, self.bridge.invocations)
                 await send(writer, json.dumps(value, ensure_ascii=False).encode())
 
-    async def stream(self, response: httpx.Response, writer: asyncio.StreamWriter) -> None:
-        stream = MessageStream(self.bridge.invocations)
-        pending = bytearray()
-        async for chunk in response.aiter_bytes():
-            pending.extend(chunk)
-            while True:
-                separators = [
-                    (pending.find(separator), len(separator))
-                    for separator in (b"\n\n", b"\r\n\r\n")
-                    if separator in pending
-                ]
-                if not separators:
-                    break
-                position, length = min(separators)
-                frame = pending[:position]
-                pending = pending[position + length :]
-                if len(frame) > MAX_FRAME:
-                    raise CallbackFailure("AW model SSE frame exceeds one MiB")
-                data = b"\n".join(
-                    line[5:].lstrip(b" ")
-                    for line in frame.splitlines()
-                    if line.startswith(b"data:")
-                )
-                if data:
-                    value = await stream.event(json.loads(data))
-                    frame = (
-                        b"event: "
-                        + value["type"].encode()
-                        + b"\ndata: "
-                        + json.dumps(value, ensure_ascii=False).encode()
-                    )
-                await send(writer, frame + b"\n\n")
-            if len(pending) > MAX_FRAME:
-                raise CallbackFailure("AW model SSE frame exceeds one MiB")
-        if pending.strip() or not stream.stopped:
+    async def stream(
+        self, response: httpx.Response, writer: asyncio.StreamWriter, details: dict,
+    ) -> None:
+        stream = MessageStream(self.bridge.invocations, details)
+        http_details = details.copy()
+        first = True
+        async for frame, complete in sse_frames(response.aiter_bytes(), details):
+            data, count, event = sse_fields(frame.removeprefix(b"\xef\xbb\xbf") if first else frame)
+            first = False
+            if not count:
+                continue
+            if not data.strip(b" \t\r\n"):
+                stream.warn_once("blank_data", data_bytes=len(data), data_lines=count)
+                continue
+            if stream.stopped and data == b"[DONE]":
+                stream.warn_once("trailing_done", frame_bytes=len(frame))
+                continue
+            details.update(stage="sse_frame", sse_event=event, frame_bytes=len(frame),
+                           data_bytes=len(data), data_lines=count, blocks_open=len(stream.blocks),
+                           stream_started=int(stream.started), stream_stopped=int(stream.stopped))
+            try:
+                value = json.loads(data.decode("utf-8"))
+            except ValueError:
+                details["payload_kind"] = "done" if data == b"[DONE]" else "non_json"
+                raise
+            if not complete:
+                raise CallbackFailure("AW model stream ended inside an event")
+            details.update(stage="stream_event",
+                           sse_event=event_name(value.get("type") if isinstance(value, dict) else None))
+            for outgoing in await stream.event(value):
+                await send(writer, b"event: " + outgoing["type"].encode() + b"\ndata: "
+                           + json.dumps(outgoing, ensure_ascii=False).encode() + b"\n\n")
+            details.clear()
+            details.update(http_details)
+        if not stream.stopped:
+            details.update(stage="stream_event", blocks_open=len(stream.blocks),
+                           stream_started=int(stream.started), stream_stopped=0)
             raise CallbackFailure("AW model stream ended before message_stop")
 
     async def drain(self) -> None:
