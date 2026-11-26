@@ -68,6 +68,14 @@ const PROFILES: &[ProfileDefinition] = &[
             }
         },
     },
+    ProfileDefinition {
+        name: "hermes-installed-native-hooks",
+        build: || DeploymentProfile {
+            capabilities: hermes_gateway_sdk(),
+            requires_service: true,
+            session_start_hint: false,
+        },
+    },
     // Cooperative resident workers reuse the managed bridges and their fail-closed
     // cleanup, so AW must be available for every admitted Task.
     ProfileDefinition {
@@ -95,6 +103,18 @@ const PROFILES: &[ProfileDefinition] = &[
         },
     },
 ];
+
+pub(crate) fn hermes_gateway_sdk() -> AdapterCapabilities {
+    let mut capabilities = catalog::HERMES.capabilities("installed-native-hooks/v1", "sdk-worker");
+    capabilities
+        .events
+        .retain(|event, _| matches!(event.as_str(), "tool.before" | "tool.after"));
+    observe_or_block_before(&mut capabilities);
+    capabilities
+        .failure_actions
+        .insert("tool.after".into(), vec!["withhold_result".into()]);
+    capabilities
+}
 
 /// Returns whether any deployment profile for `adapter` requests the `observe_session_start` hint.
 pub fn emits_session_start_hint(adapter: &str) -> bool {
@@ -171,7 +191,13 @@ mod tests {
         }
         for name in profile_names() {
             let enabled = profile(name, true).unwrap().capabilities;
-            assert_eq!(enabled.events["input.submit"], ["observe", "block"]);
+            if enabled.adapter == "hermes" {
+                assert!(!enabled.events.contains_key("input.submit"));
+                assert_eq!(enabled.events.len(), 2);
+                assert_eq!(enabled.failure_actions["tool.after"], ["withhold_result"]);
+            } else {
+                assert_eq!(enabled.events["input.submit"], ["observe", "block"]);
+            }
             assert!(!profile(name, false)
                 .unwrap()
                 .capabilities

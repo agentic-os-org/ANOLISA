@@ -20,7 +20,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--aw", type=Path, required=True)
 parser.add_argument("--hermes", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
-parser.add_argument("--attach", action="store_true")
+mode = parser.add_mutually_exclusive_group()
+mode.add_argument("--attach", action="store_true")
+mode.add_argument("--sdk", action="store_true", help="use a frozen application-owned Gateway")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 requests = []
@@ -51,6 +53,8 @@ class Model(BaseHTTPRequestHandler):
                          for message in request.get("messages", []) if message.get("role") == "user")
             command = (f"printf AW_DENY_TEST > {shlex.quote(str(deny_marker))}" if denied
                        else "printf HERMES_TOOL_OK")
+            if args.sdk:
+                command += f" | tee -a {shlex.quote(str(deny_marker))}"
             delta = {"role": "assistant", "tool_calls": [{
                 "index": 0, "id": "call-gateway-fixture", "type": "function",
                 "function": {"name": "terminal", "arguments": json.dumps({"command": command})},
@@ -246,6 +250,9 @@ def main() -> None:
                                   "id": "record", "provider": "policy", "operation": "record",
                                   "effects": ["observe", "replace_result"], "on_error": "report"}]},
                           }}}
+            if args.sdk:
+                config["spec"]["daemon"]["startup"] = "on_demand"
+                config["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = "withhold_result"
             config_path = root / "aw.json"
             config_path.write_text(json.dumps(config))
             env = {key: value for key, value in os.environ.items()
@@ -257,6 +264,8 @@ def main() -> None:
                        PYTHONDONTWRITEBYTECODE="1",
                        NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost",
                        GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+            if args.sdk:
+                env["AW_HERMES_PYTHON"] = sys.executable
             env["PATH"] = "/usr/bin:/bin"
             def stop_gateway() -> None:
                 try:
@@ -276,6 +285,15 @@ def main() -> None:
                                        (args.output / f"{name}.log").read_text()[-1200:])
 
             checked([base[0], "connect", *base[1:]], "connect")
+            if args.sdk:
+                from sdk_gateway_live import test_gateway
+                try:
+                    test_gateway(args.aw, env, root, work, config_path, args.output, requests,
+                                 f"http://127.0.0.1:{server.server_port}/v1")
+                finally:
+                    if (state / "aw.sock").is_socket():
+                        checked([str(args.aw), "service", "stop", "--config", str(config_path)], "aw-stop")
+                return
             with (args.output / "daemon.log").open("w") as stream:
                 daemon = subprocess.Popen([str(args.aw), "service", "serve", "--config", str(config_path),
                                            "--state-dir", str(state)], cwd=work, env=env,

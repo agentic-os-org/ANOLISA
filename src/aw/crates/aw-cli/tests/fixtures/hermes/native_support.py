@@ -54,6 +54,8 @@ class NativeFixture(unittest.TestCase):
             "aw_hermes_plugin", self.plugin_path / "__init__.py"
         )
         self.plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = self.plugin
+        self.addCleanup(sys.modules.pop, spec.name, None)
         spec.loader.exec_module(self.plugin)
 
     def launch(self, steps: list[tuple[str, str]]) -> Path:

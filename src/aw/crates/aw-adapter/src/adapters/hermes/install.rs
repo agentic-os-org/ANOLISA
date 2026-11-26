@@ -183,10 +183,22 @@ pub(super) fn installed(profile: &Path) -> Result<Value> {
     Ok(config)
 }
 
-fn files() -> [(&'static str, &'static [u8]); 7] {
+fn files() -> [(&'static str, &'static [u8]); 10] {
     [
         ("plugin.yaml", MANIFEST),
         ("__init__.py", CODE),
+        (
+            "aw_sdk_attach.py",
+            include_bytes!("../../../native/hermes/aw_sdk_attach.py"),
+        ),
+        (
+            "aw_result.py",
+            include_bytes!("../../../native/hermes/aw_result.py"),
+        ),
+        (
+            "aw_identity.py",
+            include_bytes!("../../../native/hermes/aw_identity.py"),
+        ),
         ("aw_gateway.py", GATEWAY),
         ("aw_gateway_attach.py", GATEWAY_ATTACH),
         ("aw_gateway_lifecycle.py", GATEWAY_LIFECYCLE),

@@ -43,8 +43,7 @@ Gateway 在认领已准入轮次时建立绑定，原生执行返回后释放，
 对于 `0.23.1`，连接或升级插件后重启已运行的 Gateway；Gateway 未确认 AW 会话绑定时，
 CLI 会拒绝提交轮次。`transform_tool_result` 在模型收到工具结果前执行替换。
 Gateway 确认绑定前会检查原生 Hook 注册表中的四个桥接回调；空策略也执行此检查。
-该回调失败或超时后，Hermes 会保留原始结果；必须阻止内容进入模型时，在
-`tool.before` 拒绝工具调用。
+固定的 0.23.1 修订支持在 `tool.after` 配置 `on_error: withhold_result`。AW 在 Hermes 写入工具历史前检查最终结果，严格检查失败时模型只会收到 `AW result withheld`。 应用自行启动 API 时可按 PID 挂接，见[Hermes SDK 挂接](../deployment/python-sdk.md#hermes-gateway-工作进程)。
 
 ## 原生 Gateway 启动与后台挂接
 

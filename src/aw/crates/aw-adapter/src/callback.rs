@@ -123,6 +123,14 @@ pub fn stops_before(adapter: &str, output: Option<&HookOutput>, on_error: &str) 
     }
 }
 
+fn withheld_result() -> HookOutput {
+    HookOutput {
+        exit: Exit::Code(0),
+        stdout: br#"{"aw_withheld":true}"#.to_vec(),
+        stderr: Vec::new(),
+    }
+}
+
 /// Adopt a native or Provider response using the selected Agent dialect.
 pub fn response(
     adapter: &dyn Adapter,
@@ -166,17 +174,13 @@ pub fn response(
                 Some("exit" | "incomplete_input" | "provider" | "protocol")
             ) || (output["failure"] == "transport"
                 && output["failure_detail"] == "deadline_exceeded"));
-        if matches!(adapter_id, "pi" | "deepseek-harness" | "sdk")
+        if matches!(adapter_id, "pi" | "deepseek-harness" | "hermes" | "sdk")
             && provider_fault
             && event == "tool.after"
             && on_error == "withhold_result"
             && output["failure_action"] == on_error
         {
-            return Ok(HookOutput {
-                exit: Exit::Code(0),
-                stdout: serde_json::to_vec(&serde_json::json!({"aw_withheld": true}))?,
-                stderr: Vec::new(),
-            });
+            return Ok(withheld_result());
         }
         if lifecycle(event) && provider_fault && output["failure_action"] == on_error {
             writeln!(
@@ -210,6 +214,15 @@ pub fn response(
         }
         return Err("step execution failed; query the instance audit for metadata".into());
     }
+    if adapter_id == "hermes"
+        && event == "tool.after"
+        && on_error == "withhold_result"
+        && native["tool_name"] == "tool_call"
+    {
+        // Hermes unwraps individual calls. A remaining connector batch exposes
+        // one history entry and cannot prove per-tool result selection.
+        return Ok(withheld_result());
+    }
     if output["kind"] == "skipped" {
         if output["effects"] != serde_json::json!([])
             || output.get("native").is_some()
@@ -237,6 +250,19 @@ pub fn response(
             })
         {
             return Err("native callback cannot attest checked input".into());
+        }
+        if adapter_id == "hermes" && event == "tool.after" {
+            if serde_json::from_slice::<Value>(&stdout).is_ok_and(|value| {
+                value.get("aw_replacement").is_some() || value.get("aw_withheld").is_some()
+            }) {
+                return Err("native callback cannot attest a Hermes result directive".into());
+            }
+            // Hermes post observers have no native result mutation contract.
+            return Ok(HookOutput {
+                exit,
+                stdout: b"{}".to_vec(),
+                stderr,
+            });
         }
         let sdk_before = matches!(adapter_id, "claude-sdk" | "qoder-sdk") && event == "tool.before";
         // Validate before success so fail-closed vetoes use the existing event closure.

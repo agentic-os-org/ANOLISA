@@ -16,6 +16,8 @@ script 以非阻塞方式打开，再通过描述符核验类型并限量读取 
 替换为 FIFO，也不会阻塞 shebang 解析。执行探测前，AW 要求脚本、解释器及路径
 组成项属于调用者或 root，除 sticky 目录外均不可被组或其他用户写入；符号链接
 目标也会校验。AW 固定解析后的脚本路径，保留 venv 解释器路径，不修改原生文件权限。
+冻结安装的 0.23.1 使用官方启动脚本，通过 `AW_HERMES_PYTHON` 指定独立依赖 venv。隔离探测在导入框架前核对官方完整源码树摘要。摘要按目录逐层以文件名的字节序遍历，每个普通文件依次计入相对路径、NUL、表示所有者可执行位的 `x` 或 `-`，以及内容的二进制 SHA-256。如果镜像记录了打包修订，该值须与固定提交一致。应用自行启动 Gateway 时，插件在 API 开放前安装轮次守卫，控制端连接时确认运行代码和原生回调。见[SDK 部署](../../../../../../docs/developer-guide/zh/aw/deployment/python-sdk.md#hermes-gateway-工作进程)。
+
 来源发现使用 console script 的 venv 解释器，以 `-I -S` 和标准库发行包元数据
 读取本地 editable `hermes-agent` 安装的 `direct_url.json`。venv 和 editable
 checkout 路径须为 UTF-8；不支持非 UTF-8 安装路径，发现阶段会在原生导入或发布
@@ -256,8 +258,8 @@ before 回调停止执行。原生 `action: approve` 表示请求人工确认，
 都会在工具执行处再次比较参数，原生 Hook 或 middleware 后续改写时返回工具错误。
 Gateway 的 registry 和 inline 工具在 schema 参数转换后也会检查受检输入。
 原生阻断继续生效。空策略和仅 after 路由保留原生改写
-行为。Post 回调不能撤销工具；`transform_tool_result` 可替换模型接收的结果，
-回调失败时 Hermes 保留原始结果。
+行为。固定的 0.23.1 修订支持在 `tool.after` 配置 `on_error: withhold_result`。AW 在 Hermes 写入工具历史前检查最终结果，严格检查失败时模型只会收到 `AW result withheld`。
+若 Hermes 将多个连接器结果收进同一个 `tool_call`，该历史条目缺少独立工具身份，严格策略会暂扣整个聚合结果。
 
 AW 事件期限与 Hermes 回调期限共同生效。原生命令期限及清理余量超过
 `plugins.hook_callback_timeout` 时，启动会拒绝该配置。自动补入的纯观测回调与配置中的
@@ -325,6 +327,15 @@ before+after 和仅 after 路由均不能进入最终 handler，空路由保持�
 python src/aw/crates/aw-cli/tests/fixtures/hermes/native_contract.py \
   --source /absolute/hermes-agent \
   --plugin /absolute/anolisa/src/aw/crates/aw-adapter/native/hermes
+```
+
+SDK 原生验收覆盖服务启动前的 Gateway 引导、首个工具等待超时、PID 挂接、结果替换和 Provider 故障。使用 Gateway venv 的 Python、可导入的匹配版本 AW SDK，以及通过权限检查的冻结源码树执行。
+
+```bash
+cd /absolute/anolisa/src/aw
+PYTHONPATH=/opt/hermes-agent PYTHONDONTWRITEBYTECODE=1 /opt/hermes-venv/bin/python \
+  crates/aw-cli/tests/fixtures/hermes/gateway_live.py --sdk \
+  --aw "$PWD/target/debug/aw" --hermes /opt/hermes-agent/hermes --output /tmp/hermes-sdk-results
 ```
 
 `live_cli.py` 使用确定性的本地 OpenAI 兼容服务、真实 AW daemon 与示例

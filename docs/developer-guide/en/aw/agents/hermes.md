@@ -48,9 +48,7 @@ For `0.23.1`, restart an already running Gateway after connecting or upgrading t
 The CLI refuses to submit a turn if its Gateway cannot confirm the AW session binding.
 The Gateway checks that its four bridge callbacks are active in the native Hook registry
 before confirming, including when the policy has zero tool steps.
-`transform_tool_result` replaces a tool result before the model receives it. Hermes
-retains the original result if that callback fails or times out; policies that must
-withhold content should deny the tool in `tool.before`.
+For the pinned 0.23.1 revision, `tool.after` with `on_error: withhold_result` checks the final result before Hermes commits it to history. A failed strict check supplies `AW result withheld` to the model. The application-owned API also supports [Hermes SDK attachment](../deployment/python-sdk.md#hermes-gateway-workers).
 
 ## Run a native Gateway with background attachment
 

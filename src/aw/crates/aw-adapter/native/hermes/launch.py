@@ -313,7 +313,10 @@ def main() -> None:
             )
         key, plugin = loaded[0]
         events = {"tool.before": "pre_tool_call", "tool.after": "post_tool_call"}
-        expected_hooks = Counter("transform_tool_result" if hook.get("replace_result") else events[hook["event"]] for hook in launch["hooks"])
+        expected_hooks = Counter(
+            "transform_tool_result" if hook.get("replace_result") and not launch.get("final_result")
+            else events[hook["event"]] for hook in launch["hooks"]
+        )
         active_hooks = Counter(registration.key
                                for registration in manager._ownership_ledger.get(key, [])
                                if registration.kind == "hook" and registration.active)

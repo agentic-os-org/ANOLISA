@@ -175,7 +175,12 @@ fn sdk_pid_connect_bounds_connection_lock_wait_by_caller_deadline() {
         command
     };
     // An unregistered PID still records the service before SDK discovery.
-    assert!(!fixture.run(connect()).status.success());
+    let missing = fixture.run(connect());
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("sdk_control_application_not_found"),
+        "{missing:?}"
+    );
     let record = fixture
         .root
         .join("aw/connections")

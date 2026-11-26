@@ -5,7 +5,7 @@ mod preflight;
 
 #[cfg(test)]
 use preflight::python_entrypoint;
-use preflight::{checked_profile_command, python_args};
+use preflight::{callback_timeout, checked_profile_command, python_args};
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +23,28 @@ use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
 
 pub(crate) struct Hermes;
 
+const VERIFIED_GATEWAY: &str = "3b421578588243f920886e6fe79a6faa87ea026e";
+
+pub(super) fn sdk_routes(source: &str) -> aw_core::routes::RouteOptions<'_> {
+    use aw_core::routes::{RouteOptions, SkillCheck, OBSERVED_TOOL_EVENTS};
+    RouteOptions {
+        events: OBSERVED_TOOL_EVENTS,
+        skill_check: SkillCheck::Unsupported,
+        ..super::sdk_tools::sdk_worker_observed(source)
+    }
+}
+
+pub(super) fn validate_sdk(capabilities: &Capabilities) -> Result<()> {
+    let allowed = crate::deployment::hermes_gateway_sdk();
+    if capabilities.version != allowed.version
+        || capabilities.events != allowed.events
+        || capabilities.failure_actions != allowed.failure_actions
+    {
+        return Err("unsupported Hermes Gateway SDK capabilities".into());
+    }
+    Ok(())
+}
+
 struct Prepared {
     input: LaunchInput,
     profile: PathBuf,
@@ -39,7 +61,6 @@ pub fn prepare_gateway(
     revision: &str,
     callback_timeout: f64,
 ) -> Result<Box<dyn PreparedLaunch>> {
-    const VERIFIED_GATEWAY: &str = "3b421578588243f920886e6fe79a6faa87ea026e";
     if revision != VERIFIED_GATEWAY || !callback_timeout.is_finite() || callback_timeout < 0.0 {
         return Err("unsupported Hermes Gateway revision or callback timeout".into());
     }
@@ -333,6 +354,11 @@ impl PreparedLaunch for Prepared {
         let entrypoint = if self.gateway { "gateway" } else { "chat" };
         let mut capabilities =
             super::super::adapter::catalog::HERMES.capabilities(&self.revision, entrypoint);
+        if self.revision == VERIFIED_GATEWAY {
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+        }
         if self.gateway {
             capabilities.events.remove("input.submit");
         }
@@ -429,6 +455,11 @@ impl PreparedLaunch for Prepared {
                 },
             );
         }
+        let final_result = self.revision == VERIFIED_GATEWAY
+            && (self.input.options.reloadable
+                || hooks
+                    .iter()
+                    .any(|hook| hook["on_error"] == "withhold_result"));
         if self.input.options.reloadable {
             events = crate::reload::routes();
             for event in events.values_mut() {
@@ -452,7 +483,7 @@ impl PreparedLaunch for Prepared {
                 json!({"event":"tool.before", "step":crate::reload::DISPATCH,
                     "on_error":"block", "timeout":59, "replace_result":false}),
                 json!({"event":"tool.after", "step":crate::reload::DISPATCH,
-                    "on_error":"report", "timeout":59, "replace_result":true}),
+                    "on_error":if final_result { "withhold_result" } else { "report" }, "timeout":59, "replace_result":true}),
             ];
         }
         let ready = context.files.directory().join("hermes-ready.json");
@@ -463,7 +494,7 @@ impl PreparedLaunch for Prepared {
             "binding":context.binding_path.to_str().ok_or("Hermes binding path must be UTF-8")?,
             "profile":self.profile.to_str().ok_or("Hermes profile path must be UTF-8")?,
             "cwd":self.input.command.cwd.to_str().ok_or("Hermes working directory must be UTF-8")?,
-            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "submissions":submissions, "revision":self.revision, "reloadable":self.input.options.reloadable});
+            "ready_path":ready.to_str().ok_or("Hermes launch directory must be UTF-8")?, "token":token, "hooks":hooks, "submissions":submissions, "revision":self.revision, "final_result":final_result, "reloadable":self.input.options.reloadable});
         let path = context
             .files
             .write("hermes-launch.json", &serde_json::to_vec(&launch)?)?;
@@ -648,42 +679,4 @@ fn check_args(args: &[OsString]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn callback_timeout(
-    command: &aw_exec::CommandSpec,
-    python: &std::path::Path,
-    selector: &std::ffi::OsStr,
-    cache: &std::path::Path,
-    cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<f64> {
-    let mut probe = command.clone();
-    probe.program = python.into();
-    // Importing the native CLI selects the profile and loads its dotenv before
-    // the native resolver applies YAML 1.1, environment expansion and limits.
-    let script = r#"import json, sys
-result = sys.argv[-1]
-sys.argv = [sys.argv[1], '--profile', sys.argv[2], 'config', 'get', 'plugins.hook_callback_timeout']
-from hermes_cli import main
-from hermes_cli.plugins import _resolve_hook_callback_timeout
-with open(result, 'w', encoding='utf-8') as stream:
-    json.dump(_resolve_hook_callback_timeout(), stream, allow_nan=False)
-"#;
-    probe.args = python_args(
-        cache,
-        &[
-            "-P".into(),
-            "-c".into(),
-            script.into(),
-            command.program.as_os_str().into(),
-            selector.into(),
-        ],
-    );
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let value = adapter::Probe(cancelled).python_text(probe, deadline)?;
-    let timeout: f64 = serde_json::from_str(&value)?;
-    if !timeout.is_finite() || timeout < 0.0 {
-        return Err("Hermes hook_callback_timeout must be nonnegative and finite".into());
-    }
-    Ok(timeout)
 }

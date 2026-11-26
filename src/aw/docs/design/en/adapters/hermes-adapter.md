@@ -21,6 +21,8 @@ script, interpreter and their path components to be owned by the caller or root,
 with no group/other writes except sticky directories. Symlink targets are checked
 too. AW pins the resolved script path while retaining the venv interpreter path;
 it never changes native file permissions.
+Frozen 0.23.1 installations select the stock launcher and an explicit dependency-only venv through `AW_HERMES_PYTHON`. An isolated probe hashes the complete official tree before native imports. The digest traverses each directory in byte-sorted name order. Each regular file contributes its relative path, a NUL byte, `x` or `-` for its owner-executable bit and the binary SHA-256 of its contents. A packaging revision, when present, must name the same pinned commit. For an application-owned Gateway the plugin installs its turn guards before API publication, then confirms the loaded code and native callbacks when the controller connects. See [SDK deployment](../../../../../../docs/developer-guide/en/aw/deployment/python-sdk.md#hermes-gateway-workers).
+
 Source discovery uses the console script's venv interpreter with `-I -S` and
 standard-library distribution metadata. The venv and editable-checkout paths
 require UTF-8; non-UTF-8 installation paths are unsupported and fail discovery
@@ -344,8 +346,8 @@ execution, returning a tool error if a later native Hook or middleware changes
 them. The Gateway also checks schema coercion at registry and inline dispatch.
 Existing native vetoes remain effective. Empty and after-only AW routes
 retain native rewrite behavior.
-Post callbacks cannot undo the tool. A `transform_tool_result` callback can
-replace the model-bound result; Hermes retains the original on callback failure.
+For the pinned 0.23.1 revision, `tool.after` with `on_error: withhold_result` checks the final result before Hermes commits it to history. A failed strict check supplies `AW result withheld` to the model.
+If Hermes combines multiple connector results in a single `tool_call`, a strict route withholds the aggregate because the history entry has no per-tool identity.
 
 Both the AW event deadline and Hermes' callback timeout apply. Launch refuses
 event budgets whose native command timeout and cleanup allowance exceed
@@ -438,6 +440,15 @@ Only the final registry handler is replaced by a recorder.
 python src/aw/crates/aw-cli/tests/fixtures/hermes/native_contract.py \
   --source /absolute/hermes-agent \
   --plugin /absolute/anolisa/src/aw/crates/aw-adapter/native/hermes
+```
+
+The live SDK fixture exercises a worker booted before the Service, a missed first-tool deadline, PID attachment, result replacement and a failed Provider. Run it with the Gateway venv Python, the matching AW SDK on the import path, and a protected frozen source tree.
+
+```bash
+cd /absolute/anolisa/src/aw
+PYTHONPATH=/opt/hermes-agent PYTHONDONTWRITEBYTECODE=1 /opt/hermes-venv/bin/python \
+  crates/aw-cli/tests/fixtures/hermes/gateway_live.py --sdk \
+  --aw "$PWD/target/debug/aw" --hermes /opt/hermes-agent/hermes --output /tmp/hermes-sdk-results
 ```
 
 `live_cli.py` exercises official `chat --oneshot` with a deterministic local

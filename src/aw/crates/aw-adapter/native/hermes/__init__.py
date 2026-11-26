@@ -74,15 +74,16 @@ def register(ctx: Any) -> None:
             config = os.environ.get("AW_HERMES_GATEWAY_CONFIG")
             if config is not None and not _gateway_run(sys.argv[1:]):
                 config = None
-            aw_gateway.register(ctx, _read_launch, gateway_config=config)
+            global start_sdk
+            start_sdk = aw_gateway.register(ctx, _read_launch, gateway_config=config)
         return
 
     from agent.shell_hooks import ShellHookSpec, _make_callback
-    from hermes_cli.version_info import get_version_info
+    from .aw_identity import runtime_revision
     from hermes_constants import get_hermes_home
 
     launch = _read_launch(session.launch_path)
-    if get_version_info().commit != launch["revision"]:
+    if runtime_revision() != launch["revision"]:
         raise ValueError("AW Hermes checkout changed after launch preparation")
     if get_hermes_home().resolve() != Path(launch["profile"]):
         raise ValueError("AW Hermes launch profile changed")
@@ -97,11 +98,17 @@ def register(ctx: Any) -> None:
         action = hook.get("on_error")
         timeout = hook.get("timeout")
         if (event not in EVENTS or not isinstance(step, str) or not step
-                or action not in ("report", "block")
+                or (action not in ("report", "block") and not (event == "tool.after" and action == "withhold_result" and launch.get("final_result")))
                 or isinstance(timeout, bool) or not isinstance(timeout, int)
                 or not 1 <= timeout <= 300 or (event, step) in seen):
             raise ValueError("invalid AW Hermes callback registration")
         seen.add((event, step))
+        if event == "tool.after" and launch.get("final_result"):
+            # Receipt and discovery still attest the registered Hook. Evaluation occurs
+            # after other plugins' transforms at the verified model-history boundary.
+            from .aw_result import remember_post
+            callbacks.append((EVENTS[event], remember_post))
+            continue
         command_args = [
             launch["binary"], "hook", "--binding", launch["binding"],
             "--adapter", "hermes", "--event", event, "--step", step, "--on-error", action,
@@ -131,6 +138,21 @@ def register(ctx: Any) -> None:
     # interpretation of stdout/exit 2. AW does not introduce another scheduler.
     for event, callback in callbacks:
         ctx.register_hook(event, callback)
+    if launch.get("final_result"):
+        from . import aw_result
+
+        def final(ids, name, args, result, outcome):
+            payload = aw_result.payload(launch["cwd"], ids, name, args, result, outcome)
+            return aw_result.evaluate(launch, launch["binding"], payload)
+
+        restores = aw_result.install(final)
+
+        def restore():
+            for module, name, original, installed in reversed(restores):
+                if getattr(module, name) is installed:
+                    setattr(module, name, original)
+
+        ctx.on_unload(restore)
     receipt = {"version": 1, "adapter": "hermes", "token": launch["token"],
                "pid": os.getpid(), "hooks": len(callbacks)}
     with tempfile.NamedTemporaryFile(mode="w", dir=Path(launch["ready_path"]).parent) as handle:

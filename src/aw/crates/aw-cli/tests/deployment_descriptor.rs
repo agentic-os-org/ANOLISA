@@ -160,6 +160,39 @@ fn descriptor_availability_uses_target_requirements_and_profile_minimum() {
 }
 
 #[test]
+fn hermes_frozen_gateway_admits_strict_tools_offline() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut document = configuration(directory.path(), "hermes");
+    document["spec"]["providers"]["policy"] = json!({
+        "protocol":"aw-provider/v1alpha1","config":{},
+        "transport":{"type":"stdio","location":"agent","argv":["/absent/provider"]},
+        "timeout_ms":1000,"max_output_bytes":4096
+    });
+    document["spec"]["events"]["tool.after"] = json!({
+        "enabled":true,"required":true,"steps":[{
+            "id":"mask","provider":"policy","operation":"scan",
+            "effects":["observe","replace_result"],"on_error":"withhold_result"
+        }]
+    });
+    let profile = "hermes-installed-native-hooks";
+    let output = invoke(directory.path(), &document, profile);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let descriptor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["profile"]["entrypoint"], "sdk-worker");
+    assert_eq!(descriptor["availability"], "required");
+    document["spec"]["events"]["input.submit"] = json!({"enabled":true,"required":true,"steps":[]});
+    assert!(!invoke(directory.path(), &document, profile)
+        .status
+        .success());
+    assert!(!directory.path().join("state").exists());
+}
+
+#[test]
 fn qoder_public_descriptor_admits_replacement_with_report_in_both_availability_modes() {
     let directory = tempfile::tempdir().unwrap();
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();

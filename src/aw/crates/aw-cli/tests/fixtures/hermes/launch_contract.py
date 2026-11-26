@@ -28,6 +28,8 @@ class LaunchTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[5] / "crates/aw-adapter/native/hermes/__init__.py"
         spec = importlib.util.spec_from_file_location("aw_hermes_launch", source)
         self.plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = self.plugin
+        self.addCleanup(sys.modules.pop, spec.name, None)
         spec.loader.exec_module(self.plugin)
         self.version = SimpleNamespace(commit=None)
         shell = ModuleType("agent.shell_hooks")
@@ -37,7 +39,11 @@ class LaunchTests(unittest.TestCase):
         version.get_version_info = lambda: self.version
         constants = ModuleType("hermes_constants")
         constants.get_hermes_home = lambda: self.root
-        modules = patch.dict(sys.modules, {
+        version.__file__ = str(self.root / "checkout/hermes_cli/version_info.py")
+        (self.root / "checkout/.git").mkdir(parents=True)
+        cli = ModuleType("hermes_cli")
+        cli.version_info = version
+        modules = patch.dict(sys.modules, {"hermes_cli": cli,
             "agent.shell_hooks": shell, "hermes_cli.version_info": version,
             "hermes_constants": constants,
             "_aw_hermes_session": SimpleNamespace(launch_path=str(self.path)),
@@ -51,6 +57,67 @@ class LaunchTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.data))
         self.path.chmod(0o600)
         self.plugin.register(self.context)
+
+    def test_frozen_source_requires_checked_contents_and_permissions(self):
+        from aw_hermes_launch import aw_identity
+
+        # A private tmp directory under /tmp also works on shared checkout hosts.
+        with tempfile.TemporaryDirectory(dir="/tmp") as temp:
+            source = Path(temp)
+            file = source / "entry.py"
+            file.write_text("print(1)")
+            file.chmod(0o644)
+            stamp = source / ".packaged-revision"
+            digest = aw_identity.source_digest(source)
+            with patch.object(aw_identity, "SOURCE_DIGEST", digest):
+                self.assertEqual(aw_identity.verified_revision(source), aw_identity.REVISION)
+                stamp.write_text(aw_identity.REVISION + "\n")
+                stamp.chmod(0o644)
+                self.assertEqual(aw_identity.verified_revision(source), aw_identity.REVISION)
+                duplicate = source / ".other-revision"
+                duplicate.write_bytes(stamp.read_bytes())
+                duplicate.chmod(0o644)
+                with self.assertRaisesRegex(ValueError, "multiple Hermes packaged revision stamps"):
+                    aw_identity.verified_revision(source)
+                duplicate.unlink()
+                file.write_text("print(2)")
+                with self.assertRaises(ValueError):
+                    aw_identity.verified_revision(source)
+                file.write_text("print(1)")
+                file.chmod(0o755)
+                with self.assertRaises(ValueError):
+                    aw_identity.verified_revision(source)
+                file.chmod(0o666)
+                with self.assertRaises(ValueError):
+                    aw_identity.source_digest(source)
+                file.chmod(0o644)
+                stamp.write_text(aw_identity.REVISION)
+                with self.assertRaisesRegex(ValueError, "invalid Hermes packaged revision stamp"):
+                    aw_identity.verified_revision(source)
+                stamp.write_text("a" * 40 + "\n")
+                with self.assertRaisesRegex(ValueError, "Hermes packaged revision differs"):
+                    aw_identity.source_digest(source)
+                stamp.unlink()
+                (source / "alias.py").symlink_to(file)
+                with self.assertRaises(ValueError):
+                    aw_identity.source_digest(source)
+
+    def test_result_commit_keeps_withholding_across_later_steps(self):
+        from aw_hermes_launch import aw_result
+
+        payload = {"tool_name": "terminal", "extra": {"result": "original"}}
+        steps = [{"event": "tool.after", "on_error": "withhold_result"},
+                 {"event": "tool.after", "on_error": "report"}]
+        for failed in ({}, b"", b"[]", b"invalid", b'{"aw_withheld": true}', TimeoutError()):
+            def invoke(hook):
+                if hook is steps[1]:
+                    return b'{"aw_replacement":"later"}'
+                if isinstance(failed, Exception):
+                    raise failed
+                return failed
+            self.assertEqual(aw_result.select_result(steps, payload, invoke), aw_result.WITHHELD)
+        self.assertEqual(aw_result.select_result(steps[1:], payload, lambda _: b"invalid"), "original")
+        self.assertEqual(aw_result.select_result(steps, payload, lambda _: b'{"aw_replacement":"safe"}'), "safe")
 
     def test_missing_or_malformed_revision_never_publishes_readiness(self) -> None:
         del self.data["revision"]

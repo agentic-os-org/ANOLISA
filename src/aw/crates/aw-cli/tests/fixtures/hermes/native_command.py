@@ -28,7 +28,12 @@ if args.close_event:
     raise SystemExit(0)
 if args.step == "error":
     raise SystemExit(7)
-if args.step == "compress":
+if args.step == "ask-rule":
+    print('{"action":"approve","message":" native human approval ","rule_key":"fixture-rule "}')
+    raise SystemExit(0)
+if args.step == "strict" and payload["extra"]["tool_call_id"] == "withhold":
+    raise SystemExit(7)
+if args.step in ("compress", "strict"):
     print(json.dumps({"aw_replacement": "compact"}))
     raise SystemExit(0)
 elif args.step == "deny":

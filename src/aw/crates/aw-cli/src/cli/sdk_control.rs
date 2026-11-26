@@ -83,8 +83,20 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
     };
     let application_id = if let Some(process) = &process {
         loop {
+            if Instant::now() >= deadline {
+                return Err("sdk_control_application_not_found".into());
+            }
             process.check()?;
-            let listing = call(SdkControl::List)?;
+            let listing = match call(SdkControl::List) {
+                Err(error)
+                    if Instant::now() >= deadline
+                        && (matches!(&error, aw_service::Error::Rejected(code) if code == "deadline_range")
+                            || matches!(&error, aw_service::Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut)) =>
+                {
+                    return Err("sdk_control_application_not_found".into())
+                }
+                result => result?,
+            };
             let matches = listing["applications"]
                 .as_array()
                 .ok_or("sdk_control_invalid_list")?
@@ -99,9 +111,6 @@ pub(super) fn run(args: &Arguments) -> Result<Exit> {
                     .as_str()
                     .ok_or("sdk_control_invalid_application")?
                     .to_owned();
-            }
-            if Instant::now() >= deadline {
-                return Err("sdk_control_application_not_found".into());
             }
             thread::sleep(
                 Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),

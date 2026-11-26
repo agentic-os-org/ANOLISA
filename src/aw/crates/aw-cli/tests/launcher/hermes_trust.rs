@@ -24,7 +24,7 @@ fn hermes_plugin_checks_launch_revision_before_readiness() {
     let output = fixture.run(command);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && stderr.contains("Ran 3 tests") && stderr.contains("\nOK\n"),
+        output.status.success() && stderr.contains("Ran 5 tests") && stderr.contains("\nOK\n"),
         "{stderr}"
     );
 }
@@ -181,6 +181,9 @@ fn installed_hermes_fixture() -> (Fixture, PathBuf) {
         "aw_gateway.py",
         "aw_gateway_attach.py",
         "aw_gateway_lifecycle.py",
+        "aw_identity.py",
+        "aw_result.py",
+        "aw_sdk_attach.py",
         "aw_skill.py",
     ] {
         fs::copy(source.join(name), plugin.join(name)).unwrap();
@@ -449,6 +452,9 @@ fn hermes_rejects_writable_native_paths_before_any_probe() {
         "aw_gateway.py",
         "aw_gateway_attach.py",
         "aw_gateway_lifecycle.py",
+        "aw_identity.py",
+        "aw_result.py",
+        "aw_sdk_attach.py",
         "aw_skill.py",
     ] {
         fs::copy(source.join(name), plugin.join(name)).unwrap();
@@ -495,6 +501,8 @@ fn hermes_rejects_writable_native_paths_before_any_probe() {
 #[test]
 fn hermes_rejects_writable_git_helpers_before_execution() {
     let (fixture, profile) = hermes_fixture();
+    // Select the checkout inspection path so this case reaches Git helper validation.
+    fs::create_dir(profile.parent().unwrap().join("source/.git")).unwrap();
     let bin = profile.parent().unwrap().join("helper-bin");
     fs::create_dir(&bin).unwrap();
     let git = bin.join("git");
