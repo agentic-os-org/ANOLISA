@@ -439,7 +439,7 @@ fn verify_guide_exit(signal: Option<i32>) {
     );
 }
 
-// POSIX-only PTY driving with no /proc or vt100 dependency, so these cases also run on macOS.
+// POSIX PTY driving so these cases also run on macOS.
 struct GuidePty {
     master: fs::File,
     child: std::process::Child,
@@ -450,8 +450,6 @@ struct GuidePty {
 
 impl GuidePty {
     fn spawn() -> Self {
-        use std::os::fd::AsRawFd;
-
         // Guide admits only native executables; run-test-gates.sh builds this sibling before raw_cli.
         let core = Path::new(env!("CARGO_BIN_EXE_cosh-shell"))
             .parent()
@@ -462,6 +460,16 @@ impl GuidePty {
             "build the core first: cargo build -p cosh-core --bin cosh-core ({})",
             core.display()
         );
+        Self::spawn_with_core(&core)
+    }
+
+    fn spawn_with_core(core: &Path) -> Self {
+        Self::spawn_with_core_env(core, &[])
+    }
+
+    fn spawn_with_core_env(core: &Path, env: &[(&str, &str)]) -> Self {
+        use std::os::fd::AsRawFd;
+
         let root = tempfile::tempdir().unwrap();
         let size = nix::libc::winsize {
             ws_row: 24,
@@ -492,7 +500,8 @@ impl GuidePty {
             .env("HOME", root.path())
             .env("TERM", "xterm-256color")
             .env("COSH_SHELL_LANG", "en-US")
-            .env("COSH_CORE_PATH", &core)
+            .env("COSH_CORE_PATH", core)
+            .envs(env.iter().copied())
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()));
@@ -568,16 +577,56 @@ impl GuidePty {
         );
         self.send(b"\x1b[B\x1b[B\r");
         assert!(
-            self.pump("See how to ask"),
+            self.wait_screen("Current AI service:"),
             "AI page did not render: {}",
             String::from_utf8_lossy(&self.raw)
         );
-        self.send(b"\x1b[B\r");
+        self.drain(400);
+        let contents = self.guide_screen();
+        if !contents.lines().any(|line| {
+            line.trim_start().starts_with("> Manage AI services")
+                || line.trim_start().starts_with("> Configure an AI service")
+        }) {
+            self.send(b"\x1b[B");
+        }
+        self.send(b"\r");
         assert!(
             self.pump("Provider Management"),
             "AI management did not open: {}",
             String::from_utf8_lossy(&self.raw)
         );
+    }
+
+    fn guide_screen(&self) -> String {
+        let mut screen = vt100::Parser::new(24, 80, 0);
+        screen.process(&self.raw);
+        screen.screen().contents()
+    }
+
+    fn wait_screen(&mut self, marker: &str) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            self.drain(40);
+            if self.guide_screen().contains(marker) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn focus_auth_option(&mut self, label: &str) {
+        for _ in 0..12 {
+            self.drain(300);
+            if self
+                .guide_screen()
+                .lines()
+                .any(|line| line.contains("> [") && line.contains(label))
+            {
+                return;
+            }
+            self.send(b"\x1b[B");
+        }
+        panic!("did not focus {label}: {}", self.guide_screen());
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
@@ -654,6 +703,31 @@ impl Drop for GuidePty {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn review_initial_state_failure_returns_to_overview_and_preserves_the_error() {
+    let mut pty = GuidePty::spawn_with_core(Path::new("/usr/bin/false"));
+    assert!(pty.wait_screen("Cosh setup and getting started"));
+    pty.send(b"\x1b[B\x1b[B\r");
+    assert!(pty.wait_screen("Current AI service:"));
+    pty.send(b"\x1b[B\r");
+    assert!(pty.pump("Auth unavailable"));
+    assert!(
+        pty.wait_screen("Not completed:"),
+        "management initialization failed without returning its result: {}",
+        pty.guide_screen()
+    );
+    assert!(pty.guide_screen().contains("Current AI service:"));
+    pty.send(b"q");
+    assert!(pty.wait_exit(10).is_some_and(|status| status.success()));
+    let output = String::from_utf8_lossy(&pty.raw);
+    let receipt = output.rsplit_once("\x1b[?1049l").unwrap().1;
+    assert_eq!(receipt.matches("Not completed:").count(), 1);
+    assert!(receipt.contains("Not completed:"), "{receipt}");
+    assert!(!receipt.contains("No configuration changed"), "{receipt}");
+    assert!(!receipt.contains("Cancelled"), "{receipt}");
+}
+
 #[test]
 fn guide_ai_management_keeps_a_single_alternate_screen_session() {
     let mut pty = GuidePty::spawn();
@@ -669,6 +743,244 @@ fn guide_ai_management_keeps_a_single_alternate_screen_session() {
         1,
         "AI management handed the alternate screen back to Bash: {output}"
     );
+}
+
+#[test]
+fn navigation_review_quick_guide_prints_the_example_once_after_leaving_the_screen() {
+    let mut pty = GuidePty::spawn();
+    assert!(pty.pump("Cosh setup and getting started"));
+    pty.send(b"\r");
+    assert!(pty.pump("Ask from Bash or zsh"));
+    pty.send(b"\r");
+    assert!(pty.wait_exit(10).is_some_and(|status| status.success()));
+    let output = String::from_utf8_lossy(&pty.raw);
+    let (_, receipt) = output
+        .rsplit_once("\x1b[?1049l")
+        .expect("terminal restored");
+    assert_eq!(
+        receipt.matches("cosh --ask 'Why is my disk full?'").count(),
+        1,
+        "{receipt}"
+    );
+    assert!(receipt.contains("Already in Cosh? Type:"), "{receipt}");
+    assert!(!receipt.contains("Agent reply"), "{receipt}");
+}
+
+#[test]
+fn navigation_review_hosted_home_preserves_ai_focus_and_quiet_exit() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    pty.send(b"\x1bOQ");
+    assert!(pty.wait_screen("Cosh setup and getting started"));
+    pty.drain(200);
+    assert!(pty
+        .guide_screen()
+        .lines()
+        .any(|line| line.trim_start().starts_with("> AI service")));
+    pty.send(b"q");
+    assert!(pty.wait_exit(10).is_some_and(|status| status.success()));
+    let output = String::from_utf8_lossy(&pty.raw);
+    let (_, receipt) = output
+        .rsplit_once("\x1b[?1049l")
+        .expect("terminal restored");
+    assert!(
+        !receipt.contains("Cancelled") && !receipt.contains("No configuration changed"),
+        "{receipt}"
+    );
+}
+
+#[test]
+fn navigation_review_hosted_first_field_uses_one_discard_gate_for_all_destinations() {
+    let mut pty = GuidePty::spawn();
+    pty.open_ai_management();
+    pty.focus_auth_option("Add AI service");
+    pty.send(b"\r");
+    assert!(pty.pump("Choose an AI service to add"));
+    pty.focus_auth_option("OpenAI Compatible");
+    let before = pty.raw.len();
+    pty.send(b"\r");
+    assert!(pty.pump_from(before, "OpenAI Compatible"));
+    pty.send(b"hq");
+    assert!(pty.pump_from(before, "> hq"));
+    for (bytes, destination) in [
+        (b"\x1b".as_slice(), "service template list"),
+        (b"\x1b[12~".as_slice(), "guide home"),
+        (b"\x04".as_slice(), "AI service overview"),
+    ] {
+        pty.send(bytes);
+        assert!(pty.wait_screen("Discard unsaved changes?"));
+        pty.drain(200);
+        let view = pty.guide_screen();
+        let compact = |text: &str| {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>()
+        };
+        assert!(compact(&view).contains(&compact(destination)), "{view}");
+        assert!(view.contains("> Continue editing"), "{view}");
+        pty.send(b"\x1b");
+        assert!(pty.wait_screen("> hq"), "draft was lost");
+    }
+    pty.send(b"\x04");
+    pty.drain(300);
+    pty.send(b"\x1b[A\r");
+    assert!(pty.wait_screen("Current AI service:"));
+    let output = pty.finish();
+    assert!(
+        !output.contains("Checking the result"),
+        "draft was submitted"
+    );
+}
+
+#[test]
+fn guide_ecs_authorization_wait_honors_navigation_shortcuts() {
+    let fixture = tempfile::tempdir().unwrap();
+    let core = fixture.path().join("core");
+    write_executable(&core.with_extension("sh"), super::auth_ecs::CORE);
+    // Guide admits native executables, so launch the registry fixture through one.
+    let mut compiler = Command::new("rustc")
+        .args(["--crate-name", "guide_ecs_core_fixture", "-o"])
+        .arg(&core)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    compiler
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"
+use std::{env, os::unix::process::CommandExt, process::Command};
+
+fn main() -> std::io::Result<()> {
+    let script = env::current_exe()?.with_extension("sh");
+    Err(Command::new(script).args(env::args_os().skip(1)).exec())
+}
+"#,
+        )
+        .unwrap();
+    assert!(compiler.wait().unwrap().success());
+    fs::set_permissions(&core, fs::Permissions::from_mode(0o755)).unwrap();
+    for (key, bytes, destination) in [
+        (
+            "F2",
+            b"\x1bOQ".as_slice(),
+            Some("Cosh setup and getting started"),
+        ),
+        ("h", b"h".as_slice(), Some("Cosh setup and getting started")),
+        ("Ctrl-D", b"\x04".as_slice(), Some("Current AI service:")),
+        ("q", b"q".as_slice(), None),
+    ] {
+        let log = fixture.path().join(key);
+        let mut pty = GuidePty::spawn_with_core_env(
+            &core,
+            &[
+                ("AUTH_REGISTRY_LOG", log.to_str().unwrap()),
+                ("AUTH_WAIT_ONCE", "always"),
+            ],
+        );
+        pty.open_ai_management();
+        pty.focus_auth_option("Add AI service");
+        pty.send(b"\r");
+        assert!(pty.wait_screen("Choose an AI service to add"));
+        pty.focus_auth_option("Aliyun Authentication");
+        pty.send(b"\r");
+        assert!(
+            pty.wait_screen("Waiting for ECS RAM Role authorization"),
+            "{key} never reached the authorization wait: {}",
+            pty.guide_screen()
+        );
+        pty.send(bytes);
+        if let Some(destination) = destination {
+            assert!(
+                pty.wait_screen(destination),
+                "{key} did not return to {destination}: {}",
+                pty.guide_screen()
+            );
+            pty.send(b"q");
+        }
+        assert!(
+            pty.wait_exit(10).is_some_and(|status| status.success()),
+            "{key} did not restore the terminal: {}",
+            pty.guide_screen()
+        );
+        assert!(String::from_utf8_lossy(&pty.raw).contains("\x1b[?1049l"));
+        let requests = fs::read_to_string(log).unwrap();
+        assert!(requests.contains(r#""action":"verify""#), "{requests}");
+        assert!(!requests.contains(r#""action":"configure""#), "{requests}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn goal_compatibility_guide_returns_to_the_existing_cosh_session() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let quoted_binary = format!("'{}'", binary.replace('\'', "'\\''"));
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+    };
+    for shell in ["bash", "zsh"] {
+        for (language, title, quick) in [
+            (
+                "en-US",
+                "Cosh setup and getting started",
+                "Ask from Bash or zsh",
+            ),
+            ("zh-CN", "Cosh 配置与入门", "在 Bash 或 zsh 提问"),
+        ] {
+            for (cols, rows) in [(40, 16), (80, 24)] {
+                let mut terminal = TerminalSession::spawn_for_shell_with_env(
+                    shell,
+                    "enhanced",
+                    cols,
+                    &[("COSH_SHELL_LANG", language)],
+                );
+                terminal.resize_to(rows, cols);
+                terminal.send(
+                    format!("COSH_SHELL_LANG={language} {quoted_binary} guide; printf 'GUIDE_%s\\n' COSH_RETURNED\n").as_bytes(),
+                );
+                terminal.wait_screen("Guide opened inside Cosh", |screen| {
+                    compact(&screen.contents()).contains(&compact(title))
+                });
+                terminal.send(b"\r");
+                terminal.wait_screen("Quick guide inside Cosh", |screen| {
+                    compact(&screen.contents()).contains(&compact(quick))
+                });
+                terminal.send(b"\x1bOQ");
+                terminal.wait_screen("F2 home inside Cosh", |screen| {
+                    compact(&screen.contents()).contains(&compact(title))
+                });
+                terminal.send(b"q");
+                terminal.wait_screen("Guide returns to the caller", |screen| {
+                    screen
+                        .contents()
+                        .lines()
+                        .any(|line| line.trim() == "GUIDE_COSH_RETURNED")
+                        && screen.contents().trim_end().ends_with("screen$")
+                });
+                terminal.send(b"printf 'COSH_SESSION_%s\\n' CONTINUES\n");
+                terminal.wait_screen("Original Cosh still accepts input", |screen| {
+                    screen
+                        .contents()
+                        .lines()
+                        .any(|line| line.trim() == "COSH_SESSION_CONTINUES")
+                        && screen.contents().trim_end().ends_with("screen$")
+                });
+                let output = terminal.raw_output();
+                assert_eq!(output.matches("\x1b[?1049h").count(), 1, "{output}");
+                assert_eq!(output.matches("\x1b[?1049l").count(), 1, "{output}");
+                let receipt = output.rsplit_once("\x1b[?1049l").unwrap().1;
+                assert!(!receipt.contains("No configuration changed"), "{receipt}");
+                assert!(!receipt.contains("Cancelled"), "{receipt}");
+                assert!(!receipt.contains("未更改配置"), "{receipt}");
+                assert!(!receipt.contains("已取消"), "{receipt}");
+                terminal.finish();
+            }
+        }
+    }
 }
 
 #[test]
@@ -826,7 +1138,7 @@ fn guide_add_service_template_list_fits_a_16_row_window() {
     let before = pty.raw.len();
     pty.send(b"\r");
     assert!(
-        pty.pump_from(before, "Authentication Required"),
+        pty.pump_from(before, "Choose an AI service to add"),
         "Add AI service did not open the template list: {}",
         String::from_utf8_lossy(&pty.raw[before..])
     );

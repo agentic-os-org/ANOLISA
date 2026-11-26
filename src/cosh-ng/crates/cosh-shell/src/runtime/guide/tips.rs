@@ -60,7 +60,10 @@ impl Session {
                 WizardRow::Text(self.i18n.t(MessageId::GuideWizardImportConsent).to_string()),
                 WizardRow::Blank,
                 WizardRow::Choice {
-                    label: self.i18n.t(MessageId::GuideWizardConfirm).to_string(),
+                    label: self
+                        .i18n
+                        .t(MessageId::GuideWizardDataAllowImport)
+                        .to_string(),
                     value: String::new(),
                 },
                 WizardRow::Choice {
@@ -191,7 +194,7 @@ impl Session {
         }
         rows.push(WizardRow::Blank);
         rows.push(WizardRow::Text(
-            i18n.t(MessageId::GuideWizardNewSessionNote).to_string(),
+            i18n.t(MessageId::GuideWizardAnalysisChoiceHelp).to_string(),
         ));
         rows
     }
@@ -233,7 +236,13 @@ impl Session {
         };
         for enabled in [true, false] {
             rows.push(WizardRow::Choice {
-                label: bool_label(i18n, enabled).to_string(),
+                label: i18n
+                    .t(if enabled {
+                        MessageId::GuideWizardPersonalEnable
+                    } else {
+                        MessageId::GuideWizardPersonalDisable
+                    })
+                    .to_string(),
                 value: if current == Some(enabled) {
                     i18n.t(MessageId::GuideWizardCurrent).to_string()
                 } else {
@@ -320,9 +329,10 @@ impl Session {
                 value: String::new(),
             });
             if overridden {
-                rows.push(WizardRow::Text(
-                    i18n.t(MessageId::GuideWizardDataEnvNote).to_string(),
-                ));
+                rows.push(WizardRow::Text(i18n.format(
+                    MessageId::GuideWizardDataImportOverride,
+                    &[("effective", &import_value)],
+                )));
             }
         }
         rows.push(WizardRow::Blank);
@@ -356,7 +366,7 @@ impl Session {
             WizardRow::Text(i18n.t(MessageId::GuideWizardDataResetScope).to_string()),
             WizardRow::Blank,
             WizardRow::Choice {
-                label: i18n.t(MessageId::GuideWizardConfirm).to_string(),
+                label: i18n.t(MessageId::GuideWizardDataReset).to_string(),
                 value: String::new(),
             },
             WizardRow::Choice {
@@ -373,7 +383,7 @@ impl Session {
             WizardRow::Text(i18n.t(MessageId::GuideWizardDataClearScope).to_string()),
             WizardRow::Blank,
             WizardRow::Choice {
-                label: i18n.t(MessageId::GuideWizardConfirm).to_string(),
+                label: i18n.t(MessageId::GuideWizardDataClear).to_string(),
                 value: String::new(),
             },
             WizardRow::Choice {
@@ -390,7 +400,7 @@ impl Session {
             WizardRow::Text(i18n.t(MessageId::GuideWizardPersonalOffScope).to_string()),
             WizardRow::Blank,
             WizardRow::Choice {
-                label: i18n.t(MessageId::GuideWizardConfirm).to_string(),
+                label: i18n.t(MessageId::GuideWizardPersonalDisable).to_string(),
                 value: String::new(),
             },
             WizardRow::Choice {
@@ -408,11 +418,20 @@ impl Session {
                     MessageId::GuideWizardSavedLine,
                     &[("value", analysis_label(self.i18n, mode))],
                 );
-                message.push(' ');
-                message.push_str(self.i18n.t(MessageId::GuideWizardNewSessionNote));
                 if self.analysis.source == "env" {
+                    message = self.i18n.format(
+                        MessageId::GuideWizardAnalysisOverride,
+                        &[
+                            ("saved", analysis_label(self.i18n, mode)),
+                            (
+                                "effective",
+                                analysis_label(self.i18n, &self.analysis.effective),
+                            ),
+                        ],
+                    );
+                } else {
                     message.push(' ');
-                    message.push_str(self.i18n.t(MessageId::GuideWizardOverriddenNote));
+                    message.push_str(self.i18n.t(MessageId::GuideWizardNewSessionNote));
                 }
                 self.message = Some(message);
             }
@@ -448,7 +467,16 @@ impl Session {
                     &[("value", bool_label(self.i18n, enabled))],
                 );
                 message.push(' ');
-                message.push_str(self.i18n.t(MessageId::GuideWizardNewSessionNote));
+                if !enabled {
+                    message = self
+                        .i18n
+                        .t(MessageId::GuideWizardPersonalDisabled)
+                        .to_string();
+                } else if self.analysis.effective == "manual" {
+                    message.push_str(self.i18n.t(MessageId::GuideWizardManualPausedNote));
+                } else {
+                    message.push_str(self.i18n.t(MessageId::GuideWizardNewSessionNote));
+                }
                 self.message = Some(message);
             }
             Err(error) => {
@@ -480,11 +508,14 @@ impl Session {
                     &[("value", bool_label(self.i18n, target))],
                 );
                 message.push(' ');
-                message.push_str(self.i18n.t(if self.bash.source == "env" {
-                    MessageId::GuideWizardDataEnvNote
+                if self.bash.source == "env" {
+                    message.push_str(&self.i18n.format(
+                        MessageId::GuideWizardDataImportOverride,
+                        &[("effective", bool_label(self.i18n, self.bash.effective))],
+                    ));
                 } else {
-                    MessageId::GuideWizardImportScope
-                }));
+                    message.push_str(self.i18n.t(MessageId::GuideWizardImportScope));
+                }
                 self.message = Some(message);
                 true
             }

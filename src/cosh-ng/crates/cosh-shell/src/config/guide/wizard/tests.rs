@@ -80,7 +80,7 @@ fn static_output_is_plain_bilingual_and_within_the_content_width() {
     let english = plain_text(I18n::new(Language::EnUs));
     let chinese = plain_text(I18n::new(Language::ZhCn));
     assert!(english.contains("cosh --ask 'Why is my disk full?'"));
-    assert!(chinese.contains("cosh --ask '磁盘不足时先检查什么？'"));
+    assert!(chinese.contains("cosh --ask '磁盘满了怎么查？'"));
     assert_ne!(english, chinese);
 }
 
@@ -90,7 +90,7 @@ fn usage_text_keeps_the_synopsis_ahead_of_the_shared_body() {
     let usage = usage_text(i18n);
     assert!(usage.starts_with(i18n.t(MessageId::GuideUsage)));
     assert!(usage.contains("cosh guide --plain"));
-    assert!(plain_text(i18n).contains("Ask from Bash when you need it"));
+    assert!(plain_text(i18n).contains("Ask from Bash or zsh"));
 }
 
 #[test]

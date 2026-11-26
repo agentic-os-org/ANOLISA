@@ -18,6 +18,14 @@ impl CardInputState {
         let params = &input[idx + 2..final_idx];
         let final_byte = input[final_idx];
 
+        if self.guide {
+            match (params, final_byte) {
+                (b"200", b'~') => self.draft_paste = true,
+                (b"201", b'~') => self.draft_paste = false,
+                _ if !self.draft_paste => {}
+                _ => return Some(final_idx + 1),
+            }
+        }
         match (params, final_byte) {
             (b"", b'A' | b'B' | b'C' | b'D') => {
                 if let Some(event) = self.apply_arrow(capture, final_byte) {

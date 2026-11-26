@@ -3,8 +3,48 @@ use crate::ui::guide::WizardRow;
 
 use super::session::Session;
 use super::status::Reading;
+use crate::adapter::GuideAuthSummary;
+
+fn explicit_service(summary: &GuideAuthSummary) -> bool {
+    summary.route.as_deref() == Some("existing")
+        || (summary.route.is_none() && summary.configured && !summary.legacy_ecs_identity)
+}
+
+fn automatic_access(summary: &GuideAuthSummary) -> MessageId {
+    if summary.preference_failed {
+        MessageId::GuideWizardAiUnknown
+    } else if summary.auto_use == Some(false) {
+        MessageId::GuideWizardAiDisabled
+    } else {
+        match summary.identity_status.as_deref() {
+            Some("unsupported") => MessageId::GuideWizardAiUnconfigured,
+            Some("failed") => MessageId::GuideWizardAiIdentityFailed,
+            _ => MessageId::GuideWizardAiPending,
+        }
+    }
+}
 
 impl Session {
+    pub(super) fn ai_home_value(&self) -> String {
+        match &self.ai {
+            Reading::Value(summary)
+                if explicit_service(summary) && summary.configured && !self.ai_loading =>
+            {
+                self.i18n
+                    .t(MessageId::GuideWizardAiConfiguredHome)
+                    .to_string()
+            }
+            Reading::Value(summary)
+                if !explicit_service(summary)
+                    && matches!(automatic_access(summary), MessageId::GuideWizardAiPending)
+                    && !self.ai_loading =>
+            {
+                self.i18n.t(MessageId::GuideWizardAiPendingHome).to_string()
+            }
+            _ => self.ai_value(),
+        }
+    }
+
     pub(super) fn ai_value(&self) -> String {
         if self.ai_loading {
             return self.i18n.t(MessageId::GuideWizardAiLoading).to_string();
@@ -12,9 +52,7 @@ impl Session {
         let Reading::Value(summary) = &self.ai else {
             return self.i18n.t(MessageId::GuideWizardAiUnknown).to_string();
         };
-        if summary.route.as_deref() == Some("existing")
-            || (summary.route.is_none() && summary.configured && !summary.legacy_ecs_identity)
-        {
+        if explicit_service(summary) {
             if !summary.configured && summary.service.is_none() {
                 return self.i18n.t(MessageId::GuideWizardAiIncomplete).to_string();
             }
@@ -29,19 +67,36 @@ impl Session {
             };
             return format!("{service} · {}", self.i18n.t(status));
         }
-        let label = if summary.preference_failed {
-            MessageId::GuideWizardAiUnknown
-        } else if summary.auto_use == Some(false) {
-            MessageId::GuideWizardAiDisabled
-        } else {
-            match summary.identity_status.as_deref() {
-                Some("supported") => MessageId::GuideWizardAiEcs,
-                Some("unsupported") => MessageId::GuideWizardAiUnconfigured,
-                Some("failed") => MessageId::GuideWizardAiIdentityFailed,
-                _ => MessageId::GuideWizardAiPending,
+        self.i18n.t(automatic_access(summary)).to_string()
+    }
+
+    pub(super) fn ai_can_ask(&self) -> bool {
+        match &self.ai {
+            Reading::Value(summary) if explicit_service(summary) => summary.configured,
+            Reading::Value(summary) => matches!(
+                automatic_access(summary),
+                MessageId::GuideWizardAiPending | MessageId::GuideWizardAiIdentityFailed
+            ),
+            Reading::Unknown => false,
+        }
+    }
+
+    pub(super) fn ai_manage_label(&self) -> MessageId {
+        match &self.ai {
+            Reading::Value(summary) if explicit_service(summary) && !summary.configured => {
+                MessageId::GuideWizardAiCheck
             }
-        };
-        self.i18n.t(label).to_string()
+            Reading::Value(summary)
+                if !explicit_service(summary)
+                    && matches!(
+                        automatic_access(summary),
+                        MessageId::GuideWizardAiUnconfigured
+                    ) =>
+            {
+                MessageId::GuideWizardAiConfigure
+            }
+            _ => MessageId::GuideWizardAiManage,
+        }
     }
 
     pub(super) fn ai_rows(&self) -> Vec<WizardRow> {
@@ -78,13 +133,26 @@ impl Session {
                 )));
             }
         }
-        rows.push(WizardRow::Text(
-            self.i18n.t(MessageId::GuideWizardAiReadonly).to_string(),
-        ));
+        if self.ai_can_ask() {
+            rows.push(WizardRow::Text(
+                self.i18n.t(MessageId::GuideWizardAiReadonly).to_string(),
+            ));
+        } else if matches!(&self.ai, Reading::Value(summary) if !explicit_service(summary) && matches!(automatic_access(summary), MessageId::GuideWizardAiDisabled))
+        {
+            rows.push(WizardRow::Text(
+                self.i18n
+                    .t(MessageId::GuideWizardAiDisabledNext)
+                    .to_string(),
+            ));
+        }
         rows.push(WizardRow::Blank);
         for label in [
-            MessageId::GuideWizardAiHowTo,
-            MessageId::GuideWizardAiManage,
+            if self.ai_can_ask() {
+                MessageId::GuideWizardAiAsk
+            } else {
+                MessageId::GuideWizardAiHowTo
+            },
+            self.ai_manage_label(),
         ] {
             rows.push(WizardRow::Choice {
                 label: self.i18n.t(label).to_string(),

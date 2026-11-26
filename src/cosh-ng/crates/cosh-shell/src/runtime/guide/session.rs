@@ -4,10 +4,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::{Language, LanguageSetting};
 use crate::i18n::{I18n, MessageId};
-use crate::ui::guide::{WizardRow, WizardView};
+use crate::ui::guide::{ConfirmationReview, DrawnView, WizardRow, WizardView};
 
 use crate::config::guide::cli::UserPaths;
-use crate::config::guide::wizard::content;
 
 use super::status::{self, Reading, Snapshot, Source};
 use crate::adapter::GuideAuthSummary;
@@ -19,6 +18,7 @@ mod presentation;
 pub(crate) enum Flow {
     Continue,
     Exit,
+    Ask,
     /// Suspend the wizard and run the finite, in-process auth management task.
     AiManage,
     LoginSet,
@@ -70,6 +70,8 @@ pub(crate) struct Session {
     pub(crate) message_fresh: bool,
     pub(crate) manual_scroll: bool,
     pub(crate) cleanup_unconfirmed: bool,
+    pub(crate) ai_results: Vec<super::result::TaskOutcome>,
+    review: Option<ConfirmationReview>,
 }
 
 impl Session {
@@ -98,6 +100,8 @@ impl Session {
             message_fresh: false,
             manual_scroll: false,
             cleanup_unconfirmed: false,
+            ai_results: Vec::new(),
+            review: None,
         }
     }
 
@@ -187,8 +191,10 @@ impl Session {
         if outcome.reason == super::result::EndReason::Failed {
             status::warn_failure("auth_task", "task_failed");
         }
-        let message = outcome.message(self.i18n);
-        self.set_message(message);
+        if !outcome.is_quiet() {
+            self.ai_results.push(outcome);
+            self.message_fresh = true;
+        }
     }
 
     /// Restores the page that opened the auth task, keeping its choice.
@@ -217,12 +223,44 @@ impl Session {
             cursor: self.cursor,
             rows,
             hint: self.hint(),
-            message: self.message.clone(),
+            message: self.message.clone().or_else(|| match self.page {
+                Page::Ai => self.ai_receipt(),
+                Page::Home => super::result::TaskOutcome::summary(&self.ai_results, self.i18n),
+                _ => None,
+            }),
             markdown: self.markdown(),
             scroll: self.scroll,
             language: self.i18n.language(),
             message_fresh: self.message_fresh,
             follow_cursor: !self.manual_scroll,
+            confirmation: self.is_confirmation(),
+            review: self.review,
+        }
+    }
+
+    pub(crate) fn ai_receipt(&self) -> Option<String> {
+        (!self.ai_results.is_empty()).then(|| {
+            let saved = self
+                .ai_results
+                .iter()
+                .any(super::result::TaskOutcome::saved_any);
+            self.ai_results
+                .iter()
+                .map(|result| result.message_with_saved_context(self.i18n, saved))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    pub(crate) fn apply_draw(&mut self, drawn: DrawnView) {
+        self.scroll = drawn.scroll;
+        self.review = drawn.review;
+    }
+
+    pub(crate) fn on_resize(&mut self) {
+        if self.is_confirmation() {
+            self.review = None;
+            self.select_choice(1);
         }
     }
 
@@ -233,6 +271,26 @@ impl Session {
         {
             return Flow::Exit;
         }
+        match key.code {
+            KeyCode::Char('q' | 'Q') => return Flow::Exit,
+            KeyCode::F(2) | KeyCode::Char('h') => {
+                self.go_home();
+                return Flow::Continue;
+            }
+            _ => {}
+        }
+        if self.is_confirmation() && !self.review.is_some_and(|review| review.ready) {
+            self.manual_scroll = true;
+            match key.code {
+                KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
+                KeyCode::Down => self.scroll += 1,
+                KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+                KeyCode::PageDown => self.scroll += 10,
+                KeyCode::Enter | KeyCode::Esc => return self.back(),
+                _ => {}
+            }
+            return Flow::Continue;
+        }
         if self.is_markdown_page() {
             match key.code {
                 KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
@@ -240,6 +298,7 @@ impl Session {
                 KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
                 KeyCode::PageDown => self.scroll += 10,
                 KeyCode::Esc => return self.back(),
+                KeyCode::Enter if self.page == Page::Start => return Flow::Ask,
                 _ => {}
             }
             return Flow::Continue;
@@ -257,106 +316,9 @@ impl Session {
             }
             KeyCode::Enter => return self.open(),
             KeyCode::Esc => return self.back(),
-            KeyCode::Char('q') | KeyCode::Char('Q') if self.page == Page::Home => {
-                return Flow::Exit;
-            }
             _ => {}
         }
         Flow::Continue
-    }
-
-    fn title(&self) -> String {
-        let id = match self.page {
-            Page::Home => MessageId::GuideWizardTitle,
-            Page::Language => MessageId::GuideWizardLanguageTitle,
-            Page::Tips => MessageId::GuideWizardEntryTips,
-            Page::Health => MessageId::GuideWizardEntryHealth,
-            Page::Ai => MessageId::GuideWizardEntryAi,
-            Page::Login | Page::LoginConfirm(_) => MessageId::GuideWizardEntryLogin,
-            Page::Start => MessageId::GuideWizardEntryStart,
-            Page::Analysis => MessageId::GuideWizardTipsAnalysis,
-            Page::Personal
-            | Page::PersonalOffConfirm
-            | Page::DataImportConfirm
-            | Page::DataPrivacy
-            | Page::DataResetConfirm
-            | Page::DataClearConfirm => MessageId::GuideWizardTipsPersonal,
-        };
-        self.i18n.t(id).to_string()
-    }
-
-    fn rows(&self) -> Vec<WizardRow> {
-        match self.page {
-            Page::Home => self.home_rows(),
-            Page::Language => self.language_rows(),
-            Page::Tips => self.tips_menu_rows(),
-            Page::Analysis
-            | Page::Personal
-            | Page::PersonalOffConfirm
-            | Page::DataImportConfirm
-            | Page::DataResetConfirm
-            | Page::DataClearConfirm => self.tips_rows(),
-            Page::DataPrivacy => Vec::new(),
-            Page::Health => {
-                self.toggle_rows(MessageId::GuideWizardHealthDetailBody, self.snapshot.health)
-            }
-            Page::Login => self.login_rows(),
-            Page::LoginConfirm(restore) => self.login_confirmation_rows(restore),
-            Page::Ai => self.ai_rows(),
-            Page::Start => Vec::new(),
-        }
-    }
-
-    fn home_rows(&self) -> Vec<WizardRow> {
-        let login = match &self.snapshot.login {
-            _ if self
-                .blocked_writes
-                .contains(&super::result::ActionKind::LoginShell) =>
-            {
-                self.i18n
-                    .t(MessageId::GuideWizardLoginSummaryPending)
-                    .to_string()
-            }
-            Ok(status) if status.conflict => self
-                .i18n
-                .t(MessageId::GuideWizardLoginSummaryConflict)
-                .to_string(),
-            Ok(status)
-                if status.current_shell == crate::runtime::login::COSH_PATH && !status.managed =>
-            {
-                self.i18n
-                    .t(MessageId::GuideWizardLoginSummaryRecoveryMissing)
-                    .to_string()
-            }
-            Ok(status) => self
-                .i18n
-                .t(
-                    if status.current_shell == crate::runtime::login::COSH_PATH {
-                        MessageId::GuideWizardLoginSummarySet
-                    } else {
-                        MessageId::GuideWizardLoginSummaryBenefit
-                    },
-                )
-                .to_string(),
-            Err(_) => self.i18n.t(MessageId::GuideWizardReadFailed).to_string(),
-        };
-        let values = [
-            self.i18n.t(MessageId::GuideWizardStartSummary).to_string(),
-            login,
-            self.ai_value(),
-            self.toggle_value(self.snapshot.health),
-            self.language_label(self.snapshot.language.effective)
-                .to_string(),
-            self.i18n.t(MessageId::GuideWizardTipsSummary).to_string(),
-        ];
-        content::ENTRIES
-            .iter()
-            .enumerate()
-            .map(|(index, _)| WizardRow::Choice {
-                label: content::entry_label(self.i18n, index).to_string(),
-                value: values[index].clone(),
-            })
-            .collect()
     }
 
     fn language_rows(&self) -> Vec<WizardRow> {
@@ -373,7 +335,7 @@ impl Session {
         let mut rows = vec![
             WizardRow::Text(
                 self.i18n
-                    .format(MessageId::GuideWizardSavedLine, &[("value", &saved)]),
+                    .format(MessageId::GuideWizardLanguagePrefLine, &[("value", &saved)]),
             ),
             WizardRow::Text(self.i18n.format(
                 MessageId::GuideWizardLanguageEffectiveLine,
@@ -404,7 +366,7 @@ impl Session {
             rows.push(WizardRow::Choice {
                 label: self.language_label_setting(setting).to_string(),
                 value: if current == Some(setting) {
-                    self.i18n.t(MessageId::GuideWizardCurrent).to_string()
+                    self.i18n.t(MessageId::GuideWizardSavedMarker).to_string()
                 } else {
                     String::new()
                 },
@@ -428,6 +390,16 @@ impl Session {
             WizardRow::Text(self.i18n.t(body).to_string()),
             WizardRow::Blank,
         ];
+        if current.is_none() {
+            rows.insert(
+                1,
+                WizardRow::Text(
+                    self.i18n
+                        .t(MessageId::GuideWizardHealthReadFailed)
+                        .to_string(),
+                ),
+            );
+        }
         for enabled in [true, false] {
             rows.push(WizardRow::Choice {
                 label: self.toggle_label(enabled).to_string(),
@@ -509,11 +481,21 @@ impl Session {
         self.page = frame.page;
         self.login_guidance = false;
         self.scroll = frame.scroll;
+        self.manual_scroll = true;
+        self.review = None;
         let ordinal = match (frame.page, frame.login) {
             (Page::Login, Some(choice)) => self
                 .login_choices()
                 .iter()
                 .position(|candidate| *candidate == choice)
+                .or_else(|| {
+                    self.login_choices().iter().position(|choice| {
+                        matches!(
+                            choice,
+                            super::login::LoginChoice::Reread | super::login::LoginChoice::Other
+                        )
+                    })
+                })
                 .unwrap_or(frame.choice),
             _ => frame.choice,
         };
@@ -585,6 +567,9 @@ impl Session {
             }
             Page::Ai => {
                 if self.choice_index() == 0 {
+                    if self.ai_can_ask() {
+                        return Flow::Ask;
+                    }
                     self.open_page(Page::Start);
                 } else {
                     return Flow::AiManage;
@@ -625,10 +610,20 @@ impl Session {
         self.page = page;
         self.cursor = 0;
         self.scroll = 0;
+        self.manual_scroll = false;
+        self.review = None;
         self.login_guidance = false;
         self.shift(0);
         self.tips_default_focus();
         if matches!(page, Page::LoginConfirm(_)) {
+            self.select_choice(1);
+        }
+        if page == Page::Ai
+            && matches!(
+                self.ai_manage_label(),
+                MessageId::GuideWizardAiConfigure | MessageId::GuideWizardAiCheck
+            )
+        {
             self.select_choice(1);
         }
         if page == Page::Language {
@@ -658,6 +653,14 @@ impl Session {
                 Flow::Continue
             }
             None => Flow::Exit,
+        }
+    }
+
+    pub(crate) fn go_home(&mut self) {
+        if let Some(frame) = self.navigation.take_home() {
+            self.message = None;
+            self.message_fresh = false;
+            self.restore(frame);
         }
     }
 

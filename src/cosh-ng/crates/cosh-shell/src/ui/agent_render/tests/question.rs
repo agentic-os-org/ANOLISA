@@ -2,6 +2,44 @@ use super::*;
 use crate::ui::display_width;
 use crate::ui::QuestionPanelPresentation;
 
+#[test]
+fn navigation_review_hosted_shortcut_rows_stay_separate() {
+    use crate::config::Language;
+    use crate::i18n::MessageId;
+
+    for (language, back, home) in [
+        (Language::EnUs, "Esc back", "F2 home"),
+        (Language::ZhCn, "Esc 返回", "F2 首页"),
+    ] {
+        for width in [40, 80] {
+            let renderer = RatatuiInlineRenderer::with_width(width).with_language(language);
+            let lines = renderer.question_panel_lines_with_presentation(
+                QuestionPanelModel {
+                    id: "guide-field",
+                    question: "Base URL",
+                    options: &[],
+                    selected_option: 0,
+                    selected_options: &[],
+                    custom_answer: "",
+                    allow_free_text: true,
+                    selection_mode: QuestionSelectionMode::Single,
+                    input_feedback: QuestionInputFeedback::Disabled,
+                },
+                QuestionPanelPresentation {
+                    instruction: Some(crate::I18n::new(language).t(MessageId::GuideAuthFieldKeys)),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                lines.windows(2).any(|rows| rows[0].contains(back)
+                    && !rows[0].contains("F2")
+                    && rows[1].contains(home)),
+                "{language:?} at {width}: {lines:?}"
+            );
+        }
+    }
+}
+
 /// Models the hosted panel write protocol on a rows x cols screen: full-width
 /// lines land at column 0, each trailing newline moves down one row, and a
 /// newline on the last row scrolls the top line away.

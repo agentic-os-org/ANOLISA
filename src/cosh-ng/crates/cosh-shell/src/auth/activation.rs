@@ -15,6 +15,7 @@ pub(super) fn activate_provider<W: Write>(
     existing: &ExistingProvider,
     output: &mut W,
 ) -> io::Result<()> {
+    super::standalone::show_pending_result(state, output)?;
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     if let Err(error) = core_auth_activate(adapter, &existing.name) {
         tracing::warn!(provider_id = %existing.name, error = ?error, "provider activation failed");

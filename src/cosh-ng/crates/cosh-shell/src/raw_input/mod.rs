@@ -7,7 +7,7 @@ mod draft_editor;
 mod event_parser;
 mod event_sender;
 
-pub(crate) use auth_capture::AuthCardInput;
+pub(crate) use auth_capture::{AuthCardInput, AuthNavigation};
 pub(crate) use draft_editor::PromptDraftEditor;
 mod generation;
 mod mode;
@@ -185,6 +185,7 @@ pub(crate) enum RawInputEvent {
     /// ESC step back while Ctrl+C keeps its usual meaning. Panels with a single step treat both
     /// identically.
     QuestionAbort(String),
+    GuideAuthNavigation(AuthNavigation),
     EvidenceSend(String),
     EvidenceIgnore(String),
     EvidenceCancel(String),

@@ -35,6 +35,20 @@ pub(crate) struct WizardView {
     /// A freshly produced result scrolls its full text into view once.
     pub(crate) message_fresh: bool,
     pub(crate) follow_cursor: bool,
+    pub(crate) confirmation: bool,
+    pub(crate) review: Option<ConfirmationReview>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ConfirmationReview {
+    width: usize,
+    seen: usize,
+    pub(crate) ready: bool,
+}
+
+pub(crate) struct DrawnView {
+    pub(crate) scroll: usize,
+    pub(crate) review: Option<ConfirmationReview>,
 }
 
 /// Rows a result may occupy before it moves into the scrollable body, where
@@ -43,11 +57,14 @@ const INLINE_MESSAGE_ROWS: usize = 2;
 
 /// Renders the wizard and returns the effective (clamped) scroll offset so the
 /// controller can store it back and keep Up/Down responsive at the boundaries.
-pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
+pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> DrawnView {
     let area = frame.area();
     if area.width < MIN_COLUMNS || area.height < MIN_ROWS {
         render_too_small(frame, area, view);
-        return view.scroll;
+        return DrawnView {
+            scroll: view.scroll,
+            review: view.review,
+        };
     }
     let width = area.width.saturating_sub(2).min(CONTENT_WIDTH);
     let column = Rect {
@@ -60,25 +77,28 @@ pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
         (lines.len() <= INLINE_MESSAGE_ROWS).then_some(lines)
     });
     let message_rows = inline_message.as_ref().map_or(0, |lines| lines.len()) as u16;
+    let title = wrap_text(&view.title, width as usize);
+    let hints = view.hint.lines().collect::<Vec<_>>();
     let chunks = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(title.len() as u16),
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(message_rows),
-        Constraint::Length(1),
+        Constraint::Length(hints.len() as u16),
     ])
     .split(column);
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            view.title.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
+        Paragraph::new(title.into_iter().map(Line::raw).collect::<Vec<_>>())
+            .style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[1],
     );
     let body = chunks[3];
-    let scroll = match &view.markdown {
-        Some(markdown) => render_markdown(frame, body, view, markdown),
+    let drawn = match &view.markdown {
+        Some(markdown) => DrawnView {
+            scroll: render_markdown(frame, body, view, markdown),
+            review: None,
+        },
         None => {
             let overflow_message = view.message.as_deref().filter(|_| inline_message.is_none());
             render_rows(frame, body, view, overflow_message)
@@ -98,13 +118,11 @@ pub(crate) fn render(frame: &mut Frame, view: &WizardView) -> usize {
         );
     }
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            view.hint.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
+        Paragraph::new(hints.into_iter().map(Line::raw).collect::<Vec<_>>())
+            .style(Style::default().add_modifier(Modifier::DIM)),
         chunks[5],
     );
-    scroll
+    drawn
 }
 
 fn render_rows(
@@ -112,10 +130,19 @@ fn render_rows(
     area: Rect,
     view: &WizardView,
     overflow_message: Option<&str>,
-) -> usize {
+) -> DrawnView {
     let width = area.width as usize;
     let height = area.height as usize;
+    let previous_review = view.review.filter(|review| review.width == width);
+    let reviewing = view.confirmation && !previous_review.is_some_and(|review| review.ready);
+    let seen = previous_review.map_or(0, |review| review.seen);
+    let cursor = if reviewing {
+        view.rows.len().saturating_sub(1)
+    } else {
+        view.cursor
+    };
     let mut lines: Vec<(usize, Line<'static>)> = Vec::new();
+    let mut disclosure_end = None;
     for (index, row) in view.rows.iter().enumerate() {
         match row {
             WizardRow::Blank => lines.push((index, Line::raw(""))),
@@ -124,10 +151,10 @@ fn render_rows(
                     lines.push((index, Line::raw(segment)));
                 }
             }
-            WizardRow::Choice { label, value } => lines.push((
-                index,
-                choice_line(label, value, width, index == view.cursor),
-            )),
+            WizardRow::Choice { label, value } => {
+                disclosure_end.get_or_insert(lines.len());
+                lines.push((index, choice_line(label, value, width, index == cursor)));
+            }
         }
     }
     let message_owner = view.rows.len();
@@ -149,14 +176,16 @@ fn render_rows(
     let max_scroll = total.saturating_sub(content_rows);
     let focus_start = lines
         .iter()
-        .position(|(owner, _)| *owner == view.cursor)
+        .position(|(owner, _)| *owner == cursor)
         .unwrap_or(0);
     let focus_end = lines
         .iter()
-        .rposition(|(owner, _)| *owner == view.cursor)
+        .rposition(|(owner, _)| *owner == cursor)
         .unwrap_or(focus_start);
     let mut scroll = view.scroll.min(max_scroll);
-    if view.message_fresh && overflow_message.is_some() {
+    if reviewing {
+        scroll = scroll.min(seen);
+    } else if view.message_fresh && overflow_message.is_some() {
         // A fresh result owns the view: show its tail rather than snapping back
         // to the focused choice, which the next keypress brings back anyway.
         scroll = max_scroll;
@@ -168,6 +197,14 @@ fn render_rows(
             scroll = focus_start.min(max_scroll);
         }
     }
+    let review = view.confirmation.then(|| {
+        let seen = seen.max(scroll + content_rows);
+        ConfirmationReview {
+            width,
+            seen,
+            ready: !reviewing || seen >= disclosure_end.unwrap_or(total),
+        }
+    });
     let visible = lines
         .into_iter()
         .skip(scroll)
@@ -182,8 +219,15 @@ fn render_rows(
         },
     );
     if total > height {
+        let location = if review.is_some_and(|review| !review.ready) {
+            crate::I18n::new(view.language)
+                .t(crate::MessageId::GuideWizardReviewHint)
+                .to_string()
+        } else {
+            format!("{}/{}", (scroll + content_rows).min(total), total)
+        };
         let indicator = Paragraph::new(Line::styled(
-            format!("{}/{}", (scroll + content_rows).min(total), total),
+            location,
             Style::default().add_modifier(Modifier::DIM),
         ));
         frame.render_widget(
@@ -191,7 +235,7 @@ fn render_rows(
             Rect::new(area.x, area.y + content_rows as u16, area.width, 1),
         );
     }
-    scroll
+    DrawnView { scroll, review }
 }
 
 fn choice_line(label: &str, value: &str, width: usize, selected: bool) -> Line<'static> {

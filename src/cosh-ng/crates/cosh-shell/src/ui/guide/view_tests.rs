@@ -27,6 +27,8 @@ fn view() -> WizardView {
         language: Language::EnUs,
         message_fresh: false,
         follow_cursor: true,
+        confirmation: false,
+        review: None,
     }
 }
 
@@ -218,7 +220,7 @@ fn markdown_render_clamps_oversized_scroll() {
     let mut returned = usize::MAX;
     terminal
         .draw(|frame| {
-            returned = super::render(frame, &page);
+            returned = super::render(frame, &page).scroll;
         })
         .unwrap();
     assert!(returned < 999, "scroll must be clamped: {returned}");
@@ -236,12 +238,12 @@ fn quick_guide_separates_sections_and_isolates_the_copyable_command() {
     for (language, heading, command) in [
         (
             Language::ZhCn,
-            "在 Bash 中按需提问",
-            "cosh --ask '磁盘不足时先检查什么？'",
+            "在 Bash 或 zsh 提问",
+            "cosh --ask '磁盘满了怎么查？'",
         ),
         (
             Language::EnUs,
-            "Ask from Bash when you need it",
+            "Ask from Bash or zsh",
             "cosh --ask 'Why is my disk full?'",
         ),
     ] {
@@ -442,7 +444,7 @@ fn long_result_moves_into_the_body_and_scrolls_to_its_tail() {
     let mut returned = usize::MAX;
     terminal
         .draw(|frame| {
-            returned = super::render(frame, &page);
+            returned = super::render(frame, &page).scroll;
         })
         .unwrap();
     let buffer = terminal.backend().buffer();

@@ -126,4 +126,22 @@ impl RatatuiInlineRenderer {
         };
         Some(available.saturating_sub(focus_rows.min(available)) as usize)
     }
+
+    pub(crate) fn question_with_required_tail(
+        &self,
+        model: &QuestionPanelModel<'_>,
+        presentation: super::QuestionPanelPresentation<'_>,
+        tail_start: usize,
+    ) -> Option<String> {
+        let width = self.question_body_width();
+        let (details, required) = model.question.split_at(tail_start);
+        let required = super::wrap_plain_line(required.trim_start_matches('\n'), width);
+        let detail_rows = self
+            .question_body_budget(model, self.i18n(), presentation)?
+            .checked_sub(required.len())?;
+        let mut rows = super::wrap_plain_line(details, width);
+        rows.truncate(detail_rows);
+        rows.extend(required);
+        Some(rows.join("\n"))
+    }
 }

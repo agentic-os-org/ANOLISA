@@ -375,17 +375,20 @@ fn render_question_panel(
 
     let instruction =
         presented_instruction_text(&model, i18n, selected_option, presentation, false);
-    Paragraph::new(Line::from(vec![
+    let mut instruction_lines = instruction.split('\n');
+    let mut footer = vec![Line::from(vec![
         Span::styled(
             presentation
                 .keys_prefix
                 .unwrap_or_else(|| i18n.t(crate::MessageId::QuestionKeysPrefix)),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw(instruction),
-    ]))
-    .wrap(Wrap { trim: true })
-    .render(chunks[2], buffer);
+        Span::raw(instruction_lines.next().unwrap_or_default()),
+    ])];
+    footer.extend(instruction_lines.map(Line::raw));
+    Paragraph::new(Text::from(footer))
+        .wrap(Wrap { trim: true })
+        .render(chunks[2], buffer);
 }
 
 fn selected_option(model: &QuestionPanelModel<'_>) -> usize {

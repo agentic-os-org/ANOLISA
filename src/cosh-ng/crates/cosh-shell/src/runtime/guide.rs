@@ -7,7 +7,7 @@
 use crate::config::guide::UserPaths;
 use crate::config::{detect_language_from_env, read_guidance_language};
 use crate::i18n::I18n;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::io::Write;
 
 mod ai;
@@ -27,6 +27,7 @@ use input::{GuideInput, Input};
 
 enum LoopExit {
     Status(i32),
+    Ask,
     Signal(i32),
     InputLost,
 }
@@ -34,11 +35,6 @@ enum LoopExit {
 fn too_small_flow(key: KeyEvent) -> session::Flow {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => session::Flow::Exit,
-        KeyCode::Char('c') | KeyCode::Char('d')
-            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            session::Flow::Exit
-        }
         _ => session::Flow::Continue,
     }
 }
@@ -65,12 +61,34 @@ pub(crate) fn run_interactive() -> i32 {
     session.settle_ai_load();
     crate::runtime::terminal::guide_loop_end();
     match outcome {
-        Ok(LoopExit::Status(status)) => {
+        Ok(exit @ (LoopExit::Status(_) | LoopExit::Ask)) => {
             // A termination request that arrived with the last keypress still
             // decides how this process ends.
             match crate::runtime::terminal::take_guide_signal() {
                 Some(signal) => crate::runtime::terminal::exit_with_signal(signal),
-                None => status,
+                None => {
+                    let status = match exit {
+                        LoopExit::Status(status) => status,
+                        _ => 0,
+                    };
+                    if status == 0 {
+                        if let Some(receipt) = session.ai_receipt() {
+                            for line in receipt.lines() {
+                                println!(
+                                    "{}",
+                                    line.chars()
+                                        .filter(|ch| !ch.is_control())
+                                        .collect::<String>()
+                                );
+                            }
+                        }
+                        if matches!(exit, LoopExit::Ask) {
+                            let i18n = I18n::new(session.language());
+                            println!("{}", i18n.t(crate::MessageId::GuideWizardAskReceipt));
+                        }
+                    }
+                    status
+                }
             }
         }
         Ok(LoopExit::Signal(signal)) => crate::runtime::terminal::exit_with_signal(signal),
@@ -105,8 +123,8 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
         if dirty {
             let view = session.view();
             match screen.draw(&view) {
-                Ok(scroll) => {
-                    session.scroll = scroll;
+                Ok(drawn) => {
+                    session.apply_draw(drawn);
                 }
                 Err(error) => {
                     tracing::warn!(operation = "terminal", stage = "draw", kind = ?error.kind(), "guide operation failed");
@@ -127,11 +145,12 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                 };
                 match flow {
                     session::Flow::Exit => return LoopExit::Status(0),
+                    session::Flow::Ask => return LoopExit::Ask,
                     session::Flow::AiManage => {
                         let frame = session.current_frame();
                         session.settle_ai_load();
                         guide_input.discard_pending();
-                        let exit = run_auth_task(session, guide_input);
+                        let exit = run_auth_task(session, guide_input, &mut screen);
                         guide_input.discard_pending();
                         if exit.terminal_lost {
                             session.finish_ai_task(exit.outcome);
@@ -146,6 +165,11 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                         }
                         session.restore_frame(frame);
                         session.finish_ai_task(exit.outcome);
+                        match exit.destination {
+                            crate::raw_input::AuthNavigation::Overview => {}
+                            crate::raw_input::AuthNavigation::Home => session.go_home(),
+                            crate::raw_input::AuthNavigation::Quit => return LoopExit::Status(0),
+                        }
                     }
                     session::Flow::LoginOther | session::Flow::LoginReread => {
                         session.run_login(login_action(&flow));
@@ -176,7 +200,10 @@ fn run_loop(session: &mut session::Session, guide_input: &mut GuideInput) -> Loo
                 session.refresh_message_focus(&previous);
                 dirty = true;
             }
-            Input::Resize => dirty = true,
+            Input::Resize => {
+                session.on_resize();
+                dirty = true;
+            }
             Input::Tick => {
                 if session.tick() {
                     dirty = true;
@@ -200,6 +227,7 @@ fn login_action(flow: &session::Flow) -> &'static str {
 fn run_auth_task(
     session: &session::Session,
     guide_input: &mut GuideInput,
+    screen: &mut crate::ui::guide::Screen,
 ) -> crate::auth::standalone::TaskExit {
     let i18n = I18n::new(session.language());
     let program = match core::admit() {
@@ -221,6 +249,7 @@ fn run_auth_task(
                 outcome,
                 terminal_lost: false,
                 terminate: None,
+                destination: crate::raw_input::AuthNavigation::Overview,
             };
         }
     };
@@ -229,6 +258,7 @@ fn run_auth_task(
     );
     crate::auth::standalone::run(
         guide_input,
+        screen,
         &adapter,
         session.language(),
         session.blocked_writes.clone(),

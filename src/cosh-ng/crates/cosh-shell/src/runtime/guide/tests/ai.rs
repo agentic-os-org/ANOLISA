@@ -30,7 +30,7 @@ fn guide_ai_late_summary_preserves_the_selected_action() {
         let expected = if management {
             "Manage AI services"
         } else {
-            "See how to ask"
+            "Return to terminal to ask"
         };
         assert!(
             matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == expected)
@@ -39,11 +39,8 @@ fn guide_ai_late_summary_preserves_the_selected_action() {
         assert!(if management {
             matches!(flow, Flow::AiManage)
         } else {
-            matches!(flow, Flow::Continue)
+            matches!(flow, Flow::Ask)
         });
-        if !management {
-            assert_eq!(session.view().title, "Quick start guide");
-        }
     }
 }
 
@@ -52,7 +49,7 @@ fn guide_ai_legacy_identity_keeps_preference_failures_and_disabled_use_visible()
     let (_guard, _temp, paths) = isolated_fixture();
     let mut session = Session::new(paths, I18n::new(Language::ZhCn));
     for (auto_use, preference_failed, expected) in [
-        (None, true, "暂时无法确认"),
+        (None, true, "暂无法读取"),
         (Some(false), false, "已关闭"),
         (Some(true), false, "免配置自动接入，可直接提问"),
     ] {
@@ -78,7 +75,7 @@ fn guide_ai_incomplete_route_without_service_never_claims_configured() {
         ..Default::default()
     });
     let value = session.ai_value();
-    assert!(value.contains("配置需检查"), "{value}");
+    assert!(value.contains("配置不完整"), "{value}");
     assert!(!value.contains("已配置"), "{value}");
 }
 
@@ -157,7 +154,7 @@ fn guide_ai_states_preserve_route_and_verification_boundaries() {
             Some(true),
             false,
             "supported",
-            "首次提问时验证",
+            "免配置自动接入，可直接提问",
         ),
         (
             "ecs_identity",
@@ -189,10 +186,10 @@ fn guide_ai_states_preserve_route_and_verification_boundaries() {
             Some(true),
             false,
             "failed",
-            "身份检测失败",
+            "暂无法确认 ECS 接入",
         ),
         ("disabled", false, Some(false), false, "supported", "已关闭"),
-        ("disabled", false, None, true, "not_checked", "暂时无法确认"),
+        ("disabled", false, None, true, "not_checked", "暂无法读取"),
         (
             "existing",
             true,
@@ -208,7 +205,7 @@ fn guide_ai_states_preserve_route_and_verification_boundaries() {
             Some(true),
             false,
             "supported",
-            "配置需检查",
+            "配置不完整",
         ),
     ] {
         session.ai = Reading::Value(GuideAuthSummary {
@@ -224,7 +221,7 @@ fn guide_ai_states_preserve_route_and_verification_boundaries() {
         assert!(!value.contains("已验证"), "{value}");
     }
     session.ai = Reading::Unknown;
-    assert!(session.ai_value().contains("暂时无法确认"));
+    assert!(session.ai_value().contains("暂无法读取"));
 }
 
 #[test]

@@ -198,6 +198,14 @@ pub(super) fn handle_delete_confirmation<W: Write>(
     provider_idx: usize,
     output: &mut W,
 ) -> io::Result<bool> {
+    if state
+        .auth
+        .state
+        .as_ref()
+        .is_some_and(|auth| auth.selected_provider == DELETE_OPTION_INDEX)
+    {
+        super::standalone::show_pending_result(state, output)?;
+    }
     let Some(auth) = state.auth.state.as_mut() else {
         return Ok(false);
     };
@@ -216,6 +224,11 @@ pub(super) fn handle_delete_confirmation<W: Write>(
         Ok(outcome) => outcome,
         Err(error) => {
             super::standalone::record_write_result(state, ActionKind::Delete, &Err(error.clone()));
+            if state.auth.host.is_guide() {
+                if let Some(auth) = state.auth.state.as_mut() {
+                    super::navigation::return_from_delete(auth, provider_idx);
+                }
+            }
             super::prompt::clear_active_auth_panel(state, output)?;
             renderer.write_notice_panel(
                 output,

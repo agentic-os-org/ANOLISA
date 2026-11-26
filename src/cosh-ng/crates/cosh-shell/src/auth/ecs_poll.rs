@@ -70,6 +70,13 @@ impl EcsFlow {
         matches!(self.operation, Some(Operation::Configure(_))) || self.stage == Stage::Submitting
     }
 
+    pub(super) fn can_cancel(&self) -> bool {
+        matches!(
+            self.stage,
+            Stage::Preparing | Stage::Checking | Stage::Waiting
+        )
+    }
+
     fn new(auth: &RuntimeAuthState, now: Instant) -> Self {
         let challenge = match &auth.phase {
             AuthPhase::AliyunEcsChallenge {
@@ -145,6 +152,7 @@ pub(super) fn question(state: &InlineState) -> (String, Vec<String>, bool) {
             MessageId::AuthEcsRefreshing
         }
         Stage::Waiting => MessageId::AuthEcsWaiting,
+        Stage::Submitting if state.auth.host.is_guide() => MessageId::GuideAuthPending,
         Stage::Submitting => MessageId::AuthEcsSaving,
         Stage::Cancelling if flow.is_some_and(|flow| flow.cleanup_reported) => {
             MessageId::AuthEcsCleanupFailed
@@ -420,18 +428,12 @@ pub(crate) fn poll<W: Write>(
         {
             flow.stop(Stage::Cancelling, now);
         }
-    } else if matches!(
-        flow.stage,
-        Stage::Preparing | Stage::Checking | Stage::Waiting
-    ) && flow.deadline.is_some_and(|deadline| now >= deadline)
-    {
+    } else if flow.can_cancel() && flow.deadline.is_some_and(|deadline| now >= deadline) {
         flow.stop(Stage::TimedOut, now);
-    } else if matches!(
-        flow.stage,
-        Stage::Preparing | Stage::Checking | Stage::Waiting
-    ) && flow
-        .operation_deadline
-        .is_some_and(|deadline| now >= deadline)
+    } else if flow.can_cancel()
+        && flow
+            .operation_deadline
+            .is_some_and(|deadline| now >= deadline)
     {
         flow.error = Some("ECS credential check timed out".into());
         flow.stop(Stage::Failed, now);

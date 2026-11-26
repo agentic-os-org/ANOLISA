@@ -4,26 +4,30 @@
 mod default_name_tests;
 
 use super::{
-    apply_aliyun_prepare, auth_validation_body, begin_sysom_shortcut,
-    clear_ecs_auth_source_for_manual_aliyun_edit, clear_observed_model_after_provider_change,
-    clear_observed_model_after_provider_delete, ecs_ram_role_prepare, handle_auth_answer,
-    restore_after_configure_failure, should_apply_aliyun_prepare_after_field,
-    should_apply_aliyun_prepare_for_edit, should_apply_aliyun_prepare_on_provider_selection,
-    AuthBackend, AuthFieldInfo, AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare,
-    DeleteConfirmationOutcome, EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState,
-    ShellEvent, SysomMenu,
+    apply_aliyun_prepare, begin_sysom_shortcut, clear_ecs_auth_source_for_manual_aliyun_edit,
+    clear_observed_model_after_provider_change, clear_observed_model_after_provider_delete,
+    ecs_ram_role_prepare, handle_auth_answer, restore_after_configure_failure,
+    should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
+    should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
+    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, DeleteConfirmationOutcome,
+    EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
 };
 use crate::adapter::{AdapterInstance, FakeAgentAdapter};
 use crate::auth::capture::auth_capture_id;
 use crate::auth::menu::management_entry;
+use crate::auth::prompt::auth_validation_body;
 use crate::auth::render_auth_card_actions;
 use std::collections::HashMap;
 
 fn trial_state_adapter(state: serde_json::Value) -> (tempfile::TempDir, AdapterInstance) {
+    registry_reply_adapter(serde_json::json!({"success": true, "data": state}))
+}
+
+fn registry_reply_adapter(reply: serde_json::Value) -> (tempfile::TempDir, AdapterInstance) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("registry.sh");
-    let reply = serde_json::json!({"success": true, "data": state}).to_string();
+    let reply = reply.to_string();
     std::fs::write(
         &script,
         format!(
@@ -38,6 +42,74 @@ fn trial_state_adapter(state: serde_json::Value) -> (tempfile::TempDir, AdapterI
         false,
     ));
     (dir, adapter)
+}
+
+#[test]
+fn review_initial_state_failure_finishes_only_guide_management_without_writes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for response in [
+        "",
+        "printf '%s\\n' '{\"success\":false,\"error\":\"fixture initial state unavailable\"}'\n",
+        "printf '%s\\n' '{'\n",
+    ] {
+        for host in [
+            crate::auth::host::AuthHost::Guide,
+            crate::auth::host::AuthHost::Shell,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let script = dir.path().join("registry.sh");
+            std::fs::write(
+                &script,
+                format!("#!/bin/sh\nread -r request\nprintf '%s\\n' \"$request\" >> \"$0.requests\"\n{response}"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let adapter = AdapterInstance::CoshCore(crate::adapter::CoshCoreAdapter::new(
+                script.to_string_lossy(),
+                false,
+            ));
+            let mut state = InlineState::default();
+            state.auth.host = host;
+            let mut output = Vec::new();
+            super::trigger_auth_from_slash(&adapter, &mut state, &mut output).unwrap();
+            let request: serde_json::Value = serde_json::from_str(
+                std::fs::read_to_string(script.with_extension("sh.requests"))
+                    .unwrap()
+                    .trim(),
+            )
+            .unwrap();
+            assert_eq!(request["action"], "state");
+            assert!(state.auth.state.is_none());
+            assert!(state.auth.ecs.is_none());
+            assert!(state.auth.ecs_trial.preference_job.is_none());
+            assert!(!state.auth.guide_submitted);
+            assert!(String::from_utf8(output)
+                .unwrap()
+                .contains("Auth unavailable"));
+            if host.is_guide() {
+                assert!(
+                    state.auth.exit_requested,
+                    "failed initialization kept Guide running"
+                );
+                assert_eq!(
+                    state.auth.outcome.reason,
+                    crate::runtime::guide::result::EndReason::Failed
+                );
+                assert!(state
+                    .auth
+                    .outcome
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| !error.is_empty()));
+                assert!(!state.auth.outcome.committed_any());
+                assert!(!state.auth.outcome.unconfirmed_any());
+            } else {
+                assert!(!state.auth.exit_requested);
+                assert!(state.auth.outcome.is_quiet());
+            }
+        }
+    }
 }
 
 #[test]
@@ -1415,6 +1487,174 @@ fn guide_management_list_shows_the_held_writes_before_any_action() {
     crate::auth::prompt::render_current_auth_panel(&mut state, &mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("on hold"), "{text}");
+}
+
+fn submit_guide_configuration(reply: serde_json::Value) -> InlineState {
+    let (dir, adapter) = registry_reply_adapter(reply);
+    let mut state = guide_management_state(false);
+    let mut auth = slash_auth_state(&["openai_compat"], SysomMenu::default());
+    auth.phase = AuthPhase::FillingField;
+    auth.providers[0].fields = vec![
+        field("base_url", "Base URL", false),
+        field("api_key", "API key", true),
+    ];
+    state.auth.state = Some(auth);
+    for value in ["https://example.invalid/v1", "synthetic-key"] {
+        let id = auth_capture_id(state.auth.state.as_ref().unwrap());
+        assert!(super::handle_auth_input(&mut state, &id, value, &mut Vec::new()).unwrap());
+        assert!(state.auth.guide_edited);
+        assert!(handle_auth_answer(&adapter, &mut state, &id, value, &mut Vec::new()).unwrap());
+    }
+    let request = std::fs::read_to_string(dir.path().join("registry.sh.requests")).unwrap();
+    let mut lines = request.lines();
+    let sent: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(
+        sent["params"]["values"]["base_url"],
+        "https://example.invalid/v1"
+    );
+    assert!(lines.next().is_none());
+    state
+}
+
+#[test]
+fn coordinator_review_rejected_configuration_keeps_the_retry_draft_protected() {
+    use crate::runtime::guide::result::ActionKind;
+
+    for (code, held) in [("invalid_base_url", false), ("trial_preferences_io", true)] {
+        let state = submit_guide_configuration(serde_json::json!({
+            "success": false, "error": "synthetic rejection",
+            "data": {"error_code": code, "provider_updated": false}
+        }));
+        let auth = state.auth.state.as_ref().unwrap();
+        assert_eq!(auth.phase, AuthPhase::FillingField);
+        assert_eq!(auth.current_field, auth.first_editable_field());
+        assert_eq!(auth.field_input, "https://example.invalid/v1");
+        assert!(!auth.collected_values.contains_key("api_key"));
+        assert_eq!(state.auth.write_blocked(ActionKind::Configure), held);
+        assert!(
+            state.auth.guide_edited,
+            "leaving the retry needs discard consent: {code}"
+        );
+    }
+}
+
+#[test]
+fn coordinator_review_saved_configuration_ends_draft_even_if_session_save_failed() {
+    use crate::runtime::guide::result::ActionKind;
+
+    for partial in [false, true] {
+        let state = submit_guide_configuration(if partial {
+            serde_json::json!({"success": false, "error": "session save rejected",
+                "data": {"error_code": "io_error", "provider_updated": true}})
+        } else {
+            serde_json::json!({"success": true, "data": {}})
+        });
+        assert!(state.auth.state.is_none());
+        assert!(!state.auth.guide_edited && state.auth.guide_drafts.is_empty());
+        assert!(!state.auth.write_blocked(ActionKind::Configure));
+        let facts = state.auth.outcome.facts(ActionKind::Configure);
+        assert_eq!(facts.committed, !partial);
+        assert_eq!(facts.partial, partial);
+    }
+}
+
+#[test]
+fn coordinator_review_last_model_field_fits_with_usage_warning_at_40x16() {
+    use crate::config::Language;
+    use crate::runtime::prelude::RatatuiInlineRenderer;
+
+    for (language, back, home, usage, cost) in [
+        (
+            Language::EnUs,
+            "Esc back",
+            "F2 home",
+            "minimal chat request",
+            "incur a charge",
+        ),
+        (
+            Language::ZhCn,
+            "Esc 返回",
+            "F2 首页",
+            "最小聊天请求",
+            "产生费用",
+        ),
+    ] {
+        let mut state = guide_management_state(false);
+        state.language = language;
+        let mut auth = slash_auth_state(&["openai_compat"], SysomMenu::default());
+        auth.providers[0].label = "OpenAI Compatible".into();
+        auth.providers[0].fields = vec![field("model", "Model", false)];
+        auth.phase = AuthPhase::FillingField;
+        auth.editing_provider_name = Some("existing".into());
+        auth.field_input = "existing-model".into();
+        auth.field_error = Some("A long validation detail needs space. ".repeat(12));
+        state.auth.state = Some(auth);
+
+        let renderer = RatatuiInlineRenderer::with_width(40).with_language(language);
+        let mut output = Vec::new();
+        crate::auth::prompt::render_auth_panel(&mut state, &mut output, &renderer, Some(16))
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.lines().count() <= 15, "{language:?}: {text}");
+        let compact = |text: &str| {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace() && *ch != '│')
+                .collect::<String>()
+        };
+        for marker in [
+            "OpenAI Compatible",
+            "> existing-model",
+            back,
+            home,
+            "Ctrl-D",
+            usage,
+            cost,
+        ] {
+            assert!(
+                compact(&text).contains(&compact(marker)),
+                "{language:?} missed {marker:?}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn goal_acceptance_last_model_field_keeps_its_validation_error_visible() {
+    use crate::config::Language;
+    use crate::runtime::prelude::RatatuiInlineRenderer;
+
+    for language in [Language::EnUs, Language::ZhCn] {
+        for editing in [false, true] {
+            let mut state = guide_management_state(false);
+            state.language = language;
+            let mut auth = slash_auth_state(&["openai_compat"], SysomMenu::default());
+            auth.providers[0].label = "OpenAI Compatible".into();
+            auth.providers[0].fields = vec![field("model", "Model", false)];
+            auth.phase = AuthPhase::FillingField;
+            auth.editing_provider_name = editing.then(|| "existing".into());
+            auth.field_error = Some("MODEL_REQUIRED".into());
+            state.auth.state = Some(auth);
+
+            let renderer = RatatuiInlineRenderer::with_width(40).with_language(language);
+            let mut output = Vec::new();
+            crate::auth::prompt::render_auth_panel(&mut state, &mut output, &renderer, Some(16))
+                .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.lines().count() <= 15, "{language:?}: {text}");
+            assert!(text.contains("MODEL_REQUIRED"), "{language:?}: {text}");
+            assert!(text.contains("Esc") && text.contains("F2"), "{text}");
+            let compact: String = text
+                .chars()
+                .filter(|character| !character.is_whitespace() && *character != '│')
+                .collect();
+            let warning = if language == Language::EnUs {
+                "incuracharge"
+            } else {
+                "产生费用"
+            };
+            assert!(compact.contains(warning), "{text}");
+        }
+    }
 }
 
 #[test]

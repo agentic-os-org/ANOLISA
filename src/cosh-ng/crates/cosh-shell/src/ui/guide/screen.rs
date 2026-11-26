@@ -12,7 +12,7 @@ use ratatui::{
     Terminal,
 };
 
-use super::view::{self, WizardView};
+use super::view::{self, DrawnView, WizardView};
 use super::ScreenEvent;
 
 pub(crate) struct Screen {
@@ -59,19 +59,22 @@ impl Screen {
         })
     }
 
-    pub(crate) fn draw(&mut self, view: &WizardView) -> io::Result<usize> {
+    pub(crate) fn draw(&mut self, view: &WizardView) -> io::Result<DrawnView> {
         if !(self.lifecycle)(ScreenEvent::Drawing) {
             return Err(io::ErrorKind::Interrupted.into());
         }
-        let mut scroll = view.scroll;
+        let mut drawn = DrawnView {
+            scroll: view.scroll,
+            review: view.review,
+        };
         let result = self.terminal.draw(|frame| {
-            scroll = view::render(frame, view);
+            drawn = view::render(frame, view);
         });
         if !(self.lifecycle)(ScreenEvent::Active) {
             return Err(io::ErrorKind::Interrupted.into());
         }
         result?;
-        Ok(scroll)
+        Ok(drawn)
     }
 
     /// A hosted task drew straight to this screen, so the cached buffer no longer describes it.

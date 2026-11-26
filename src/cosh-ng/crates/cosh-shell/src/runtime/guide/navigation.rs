@@ -32,6 +32,10 @@ impl Navigation {
         self.frames.pop()
     }
 
+    pub(crate) fn take_home(&mut self) -> Option<Frame> {
+        self.frames.drain(..).next()
+    }
+
     #[cfg(test)]
     pub(crate) fn depth(&self) -> usize {
         self.frames.len()

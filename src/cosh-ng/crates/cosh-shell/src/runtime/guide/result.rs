@@ -89,6 +89,46 @@ impl Default for TaskOutcome {
 }
 
 impl TaskOutcome {
+    pub(crate) fn is_quiet(&self) -> bool {
+        self.reason == EndReason::Done
+            && self.error.is_none()
+            && self.failures.is_empty()
+            && !self
+                .actions
+                .values()
+                .any(|facts| facts.committed || facts.partial || facts.unknown)
+            && self.unconfirmed.is_empty()
+    }
+
+    pub(crate) fn summary(history: &[Self], i18n: I18n) -> Option<String> {
+        let latest = history.last()?;
+        let id = if history.iter().any(Self::unconfirmed_any) {
+            MessageId::GuideWizardAiSummaryUnconfirmed
+        } else if history
+            .iter()
+            .any(|outcome| outcome.actions.values().any(|facts| facts.partial))
+        {
+            MessageId::GuideWizardAiSummaryPartial
+        } else if history.iter().any(|outcome| {
+            outcome.reason == EndReason::Failed
+                || outcome.error.is_some()
+                || !outcome.failures.is_empty()
+        }) {
+            MessageId::GuideWizardAiSummaryFailed
+        } else if history.iter().any(Self::committed_any) {
+            if latest.reason == EndReason::Cancelled {
+                MessageId::GuideWizardResultCancelled
+            } else {
+                MessageId::GuideWizardAiSummarySaved
+            }
+        } else if latest.reason == EndReason::Interrupted {
+            MessageId::GuideWizardResultInterrupted
+        } else {
+            MessageId::GuideWizardResultCancelledNone
+        };
+        Some(i18n.t(id).to_string())
+    }
+
     pub(crate) fn record(
         &mut self,
         kind: ActionKind,
@@ -131,6 +171,12 @@ impl TaskOutcome {
         self.actions.values().any(|facts| facts.committed)
     }
 
+    pub(crate) fn saved_any(&self) -> bool {
+        self.actions
+            .values()
+            .any(|facts| facts.committed || facts.partial)
+    }
+
     pub(crate) fn unconfirmed_any(&self) -> bool {
         !self.unconfirmed.is_empty() || self.actions.values().any(|facts| facts.unknown)
     }
@@ -157,6 +203,10 @@ impl TaskOutcome {
 
     /// Full result text: saved facts, unconfirmed facts, and the scope note.
     pub(crate) fn message(&self, i18n: I18n) -> String {
+        self.message_with_saved_context(i18n, false)
+    }
+
+    pub(crate) fn message_with_saved_context(&self, i18n: I18n, saved: bool) -> String {
         let mut parts = Vec::new();
         let committed = self.kinds(|facts| facts.committed);
         if !committed.is_empty() {
@@ -189,9 +239,15 @@ impl TaskOutcome {
             ));
         }
         let cancelled_without_change = self.reason == EndReason::Cancelled && parts.is_empty();
-        if parts.is_empty() {
+        if parts.is_empty()
+            && self.failures.is_empty()
+            && self.error.is_none()
+            && self.reason != EndReason::Failed
+        {
             parts.push(
-                i18n.t(if cancelled_without_change {
+                i18n.t(if cancelled_without_change && saved {
+                    MessageId::GuideWizardResultCancelled
+                } else if cancelled_without_change {
                     MessageId::GuideWizardResultCancelledNone
                 } else {
                     MessageId::GuideWizardResultNone
@@ -220,7 +276,11 @@ impl TaskOutcome {
             }
             EndReason::Done | EndReason::Failed | EndReason::Cancelled => {}
         }
-        if self.committed_any() || !partial.is_empty() || self.unconfirmed_any() {
+        if committed.contains(&ActionKind::Configure)
+            && !partial.contains(&ActionKind::Configure)
+            && !unknown.contains(&ActionKind::Configure)
+            && !self.failures.contains_key(&ActionKind::Configure)
+        {
             parts.push(i18n.t(MessageId::GuideWizardResultScope).to_string());
         }
         parts.join(" ")

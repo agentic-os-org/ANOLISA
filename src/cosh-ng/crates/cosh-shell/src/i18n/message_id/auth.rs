@@ -22,6 +22,47 @@ macro_rules! guide_ai_management_ids {
     };
 }
 
+macro_rules! guide_ai_management_navigation_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            GuideAuthPending,
+            GuideAuthTemplateTitle,
+            GuideAuthDiscardTitle,
+            GuideAuthDiscardBody,
+            GuideAuthDiscardKeys,
+            GuideAuthDiscardAction,
+            GuideAuthContinueEditing,
+            GuideAuthContinueKey,
+            GuideAuthDestinationHome,
+            GuideAuthDestinationOverview,
+            GuideAuthDestinationService,
+            GuideAuthDestinationManagement,
+            GuideAuthDestinationTemplates,
+            GuideAuthActivateTitle,
+            GuideAuthActivateBody,
+            GuideAuthActivateAction,
+            GuideAuthDeleteTitle,
+            GuideAuthDeleteBody,
+            GuideAuthDeleteAction,
+            GuideAuthEnterField,
+            GuideAuthEditField,
+            GuideAuthFieldHint,
+            GuideAuthFieldError,
+            GuideAuthKeepField,
+            GuideAuthBaseUrl,
+            GuideAuthApiKey,
+            GuideAuthModel,
+            GuideAuthBaseUrlHint,
+            GuideAuthApiKeyHint,
+            GuideAuthModelHint,
+            GuideAuthValidationChecks,
+            GuideAuthValidationUsage,
+        );
+    };
+}
+
 macro_rules! auth_ecs_ids {
     ($next:ident, $remaining:tt, $($ids:ident,)*) => {
         $next!(

@@ -1458,7 +1458,7 @@ fn review_fix_shutdown_consumes_configuration_result_as_configure() {
 }
 
 #[test]
-fn rereview_fix_ecs_saving_abort_then_escape_keeps_exit_and_typed_receipt() {
+fn navigation_review_ecs_saving_ignores_abort_and_escape_and_keeps_receipt() {
     use crate::runtime::guide::result::{ActionFacts, ActionKind, EndReason};
     for abort in [0x03, 0x04] {
         for (receipt, expected) in [
@@ -1510,12 +1510,9 @@ fn rereview_fix_ecs_saving_abort_then_escape_keeps_exit_and_typed_receipt() {
             let reason = state.auth.outcome.reason;
             release.send(()).unwrap();
             shutdown(&mut state);
-            assert!(
-                exit_requested,
-                "raw {abort:#x} lost its exit intent while saving"
-            );
-            assert_eq!(reason, EndReason::Cancelled);
-            assert_eq!(state.auth.outcome.reason, EndReason::Cancelled);
+            assert!(!exit_requested, "raw {abort:#x} must not exit while saving");
+            assert_eq!(reason, EndReason::Done);
+            assert_eq!(state.auth.outcome.reason, EndReason::Done);
             assert_eq!(state.auth.outcome.facts(ActionKind::Configure), expected);
             assert!(state.auth.ecs.is_none());
             assert!(!state.auth.menu_reload);
@@ -1524,10 +1521,8 @@ fn rereview_fix_ecs_saving_abort_then_escape_keeps_exit_and_typed_receipt() {
 }
 
 #[test]
-fn publish_fix_ecs_escape_requests_list_not_exit() {
-    use crate::raw_input::{AuthCardInput, RawInputEvent};
+fn navigation_review_ecs_escape_does_not_schedule_a_return_during_save() {
     use crate::runtime::guide::result::{ActionKind, EndReason};
-    use crate::types::{ShellEvent, ShellEventKind};
     let mut state = state("guide-save-escape");
     state.auth.host = super::super::host::AuthHost::Guide;
     let (release, wait_release) = std::sync::mpsc::channel();
@@ -1538,23 +1533,7 @@ fn publish_fix_ecs_escape_requests_list_not_exit() {
     let flow = state.auth.ecs.as_mut().unwrap();
     flow.stage = Stage::Submitting;
     flow.operation = Some(Operation::Configure(Some(worker)));
-    let capture = runtime::pending_auth_capture(&state).unwrap();
-    let raw = AuthCardInput::default().consume(&capture, &[0x1b]);
-    let [RawInputEvent::QuestionCancel(id)] = raw.as_slice() else {
-        panic!("Esc must request one auth layer back");
-    };
-    let mut event = ShellEvent::user_input_intercepted("guide-auth", id);
-    event.kind = ShellEventKind::UserInputIntercepted;
-    event.component = Some("card".into());
-    event.message = Some("question_cancel".into());
-    super::super::card_actions::render_auth_card_actions(
-        &[event],
-        &AdapterInstance::Fake(FakeAgentAdapter),
-        &mut state,
-        &mut Vec::new(),
-        0,
-    )
-    .unwrap();
+    route_guide_reload_key(&mut state, 0x1b, 0);
     let list_requested = state.auth.menu_reload;
     let exit_requested = state.auth.exit_requested;
     let reason = state.auth.outcome.reason;
@@ -1566,8 +1545,8 @@ fn publish_fix_ecs_escape_requests_list_not_exit() {
     release.send(()).unwrap();
     shutdown(&mut state);
     assert!(
-        list_requested,
-        "Esc must return to management after the original save settles"
+        !list_requested,
+        "Esc must not queue a return to management during a save"
     );
     assert!(
         !exit_requested,
@@ -1654,11 +1633,12 @@ fn route_guide_reload_key(state: &mut InlineState, byte: u8, event_index: usize)
         return;
     }
     let capture = runtime::pending_auth_capture(state).unwrap();
-    let raw = AuthCardInput::default().consume(&capture, &[byte]);
+    let mut input = AuthCardInput::default();
+    let mut raw = input.consume(&capture, &[byte]);
+    raw.extend(input.idle(&capture));
     assert_eq!(raw.len(), 1);
     let (id, message) = match &raw[0] {
         RawInputEvent::QuestionCancel(id) => (id, "question_cancel"),
-        RawInputEvent::QuestionAbort(id) => (id, "question_abort"),
         other => panic!("unexpected auth input: {other:?}"),
     };
     let mut event = ShellEvent::user_input_intercepted("guide-auth", id);
@@ -1725,7 +1705,7 @@ fn publish_fix_ecs_escape_reload_retires_each_polled_receipt_without_losing_fact
             expected_failure.as_deref()
         );
         super::super::standalone::retire_ecs_for_reload(&mut state, &mut Vec::new()).unwrap();
-        assert!(list_requested);
+        assert!(!list_requested);
         assert!(!exit_requested);
         assert_eq!(before_retire, expected);
         assert_eq!(state.auth.outcome.facts(ActionKind::Configure), expected);
@@ -1749,7 +1729,7 @@ fn publish_fix_ecs_escape_reload_retires_each_polled_receipt_without_losing_fact
 }
 
 #[test]
-fn publish_fix_ecs_escape_then_abort_keeps_exit_when_each_receipt_is_retired() {
+fn navigation_review_ecs_escape_then_abort_does_not_displace_a_save_receipt() {
     use crate::runtime::guide::result::{ActionKind, EndReason};
     for abort in [0x03, 0x04] {
         for (receipt, expected) in guide_reload_receipts() {
@@ -1766,12 +1746,12 @@ fn publish_fix_ecs_escape_then_abort_keeps_exit_when_each_receipt_is_retired() {
             poll_released_guide_save(&mut state, release);
             super::super::standalone::retire_ecs_for_reload(&mut state, &mut Vec::new()).unwrap();
             assert!(
-                exit_requested,
-                "raw {abort:#x} must upgrade the pending list request"
+                !exit_requested,
+                "raw {abort:#x} must not queue an exit while saving"
             );
-            assert_eq!(reason, EndReason::Cancelled);
-            assert!(state.auth.exit_requested);
-            assert_eq!(state.auth.outcome.reason, EndReason::Cancelled);
+            assert_eq!(reason, EndReason::Done);
+            assert!(!state.auth.exit_requested);
+            assert_eq!(state.auth.outcome.reason, EndReason::Done);
             assert_eq!(state.auth.outcome.facts(ActionKind::Configure), expected);
             assert_eq!(
                 state.auth.outcome.failure(ActionKind::Configure),

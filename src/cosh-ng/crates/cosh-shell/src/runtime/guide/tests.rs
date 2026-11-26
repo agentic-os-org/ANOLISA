@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
+mod acceptance;
 mod ai;
 
 fn fixture() -> (tempfile::TempDir, UserPaths) {
@@ -91,8 +92,9 @@ fn guide_ai_unknown_access_invites_questions_and_keeps_management_secondary() {
         |row| matches!(row, WizardRow::Text(text) if text.contains("免配置自动接入，可直接提问"))
     ));
     assert!(
-        matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == "查看提问方式")
+        matches!(&view.rows[view.cursor], WizardRow::Choice {label, ..} if label == "回终端去提问")
     );
+    assert!(matches!(session.handle(key(KeyCode::Enter)), Flow::Ask));
     session.handle(key(KeyCode::Down));
     assert!(matches!(
         session.handle(key(KeyCode::Enter)),
@@ -277,7 +279,11 @@ fn language_save_persists_stays_on_page_and_refreshes_the_ui_language() {
     let config = fs::read_to_string(temp.path().join(".copilot-shell/config.toml")).unwrap();
     assert!(config.contains("zh-CN"), "{config}");
     assert_eq!(session.view().title, "语言 / Language");
-    assert!(session.view().message.unwrap().contains("已保存"));
+    assert!(session
+        .view()
+        .message
+        .unwrap()
+        .contains("界面语言已切换为 简体中文"));
 }
 
 #[test]
@@ -307,7 +313,7 @@ fn health_save_reports_the_next_login_scope() {
     session.handle(key(KeyCode::Down));
     session.handle(key(KeyCode::Enter));
     let message = session.view().message.unwrap();
-    assert!(message.contains("Saved: off"), "{message}");
+    assert!(message.contains("Login health summary: off"), "{message}");
     assert!(message.contains("next login"), "{message}");
     let store = GuideStore::open(paths.cosh_dir.as_ref().unwrap().join("guide")).unwrap();
     assert!(!store.peek_preferences().unwrap().unwrap().banner_enabled);
@@ -325,7 +331,7 @@ fn health_save_states_the_saved_result_once() {
     session.handle(key(KeyCode::Down));
     session.handle(key(KeyCode::Enter));
     let message = session.view().message.unwrap();
-    assert_eq!(message.matches("Saved").count(), 1, "{message}");
+    assert_eq!(message.matches("next login").count(), 1, "{message}");
 }
 
 #[test]
@@ -339,10 +345,11 @@ fn login_confirmation_hint_follows_the_focused_action() {
     ));
     session.handle(key(KeyCode::Enter));
     let hint = session.view().hint;
-    assert!(hint.contains("Cancel"), "{hint}");
+    assert!(hint.contains("Enter cancel"), "{hint}");
+    render_confirmation(&mut session);
     session.handle(key(KeyCode::Up));
     let hint = session.view().hint;
-    assert!(hint.contains("Confirm"), "{hint}");
+    assert!(hint.contains("Enter set Cosh"), "{hint}");
 }
 
 #[test]
@@ -412,6 +419,7 @@ fn import_toggle_saves_preference_and_keeps_existing_data() {
     session.page = super::session::Page::Personal;
     session.select_choice_for_test(2); // import follows the two recommendation choices
     session.tips_open();
+    render_confirmation(&mut session);
     session.select_choice_for_test(0);
     session.handle(key(KeyCode::Enter));
     assert_eq!(session.bash.saved, Some(true));
@@ -468,6 +476,7 @@ fn clear_data_requires_confirmation_and_keeps_the_on_off_preference() {
     session.enter(super::session::Page::Personal);
     session.select_choice_for_test(3);
     session.tips_open();
+    render_confirmation(&mut session);
     session.shift(-1); // Confirm
     session.handle(key(KeyCode::Enter));
     assert_eq!(session.rec.user_enabled, Reading::Value(true));
@@ -544,7 +553,9 @@ fn data_clear_reset_and_privacy_routes_follow_visible_choices() {
                 assert_eq!(before, snapshot_dir(&root));
             }
         }
-        session.enter(Page::DataResetConfirm);
+        session.enter(Page::Personal);
+        session.open_subpage(Page::DataResetConfirm);
+        render_confirmation(&mut session);
         session.shift(-1);
         session.handle(key(KeyCode::Enter));
         assert!(session.page == Page::Personal);
@@ -706,6 +717,7 @@ fn managed_login_page_offers_restore_and_other_only() {
         session.handle(key(KeyCode::Enter)),
         Flow::Continue
     ));
+    render_confirmation(&mut session);
     session.select_choice_for_test(0);
     assert!(matches!(
         session.handle(key(KeyCode::Enter)),
@@ -1009,7 +1021,7 @@ fn too_small_screen_only_accepts_exit_keys() {
     }
     for code in [KeyCode::Char('c'), KeyCode::Char('d')] {
         let ctrl = KeyEvent::new(code, KeyModifiers::CONTROL);
-        assert!(matches!(super::too_small_flow(ctrl), Flow::Exit));
+        assert!(matches!(super::too_small_flow(ctrl), Flow::Continue));
     }
     for code in [
         KeyCode::Enter,
@@ -1101,6 +1113,7 @@ fn confirming_recommendations_off_clears_once_and_returns_to_the_page() {
     session.open_subpage(super::session::Page::Personal);
     session.shift(1);
     session.handle(key(KeyCode::Enter));
+    render_confirmation(&mut session);
     session.shift(-1);
     session.handle(key(KeyCode::Enter));
     assert_eq!(session.page, super::session::Page::Personal);
@@ -1108,7 +1121,10 @@ fn confirming_recommendations_off_clears_once_and_returns_to_the_page() {
     assert_eq!(state.preferences.user_enabled, Some(false));
     assert!(state.journal.records.is_empty());
     let message = session.view().message.unwrap();
-    assert!(message.contains("new sessions"), "{message}");
+    assert!(
+        message.contains("cleared local recommendation data"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -1377,7 +1393,7 @@ fn login_page_states_the_benefit_and_the_terminal_verification() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("让每次登录直接进入 Cosh"), "{text}");
-    assert!(text.contains("在当前终端按 sudo 提示验证权限"), "{text}");
+    assert!(text.contains("需要管理员授权"), "{text}");
 }
 
 #[test]
@@ -1467,6 +1483,7 @@ fn import_target_follows_the_saved_preference_under_an_environment_override() {
             session.select_choice_for_test(2);
             session.tips_open();
             if !saved_on {
+                render_confirmation(&mut session);
                 session.select_choice_for_test(0);
                 session.handle(key(KeyCode::Enter));
             }
@@ -1478,11 +1495,11 @@ fn import_target_follows_the_saved_preference_under_an_environment_override() {
             assert_eq!(session.bash.effective, override_on, "the env value stays");
             let message = session.view().message.unwrap_or_default();
             assert!(
-                message.contains(
-                    session
-                        .i18n
-                        .t(crate::i18n::MessageId::GuideWizardDataEnvNote)
-                ),
+                message.contains("COSH_RECOMMENDATIONS_BASH_HISTORY"),
+                "{message}"
+            );
+            assert!(
+                message.ends_with(if override_on { "to on." } else { "to off." }),
                 "{message}"
             );
         }
@@ -1569,6 +1586,265 @@ fn rendered(session: &Session, width: u16, height: u16) -> String {
         .join("\n")
 }
 
+fn draw_session(session: &mut Session, width: u16, height: u16) -> String {
+    let view = session.view();
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    let mut drawn = None;
+    terminal
+        .draw(|frame| drawn = Some(crate::ui::guide::render(frame, &view)))
+        .unwrap();
+    session.apply_draw(drawn.unwrap());
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+fn render_confirmation(session: &mut Session) {
+    draw_session(session, 80, 24);
+}
+
+#[test]
+fn navigation_review_home_from_nested_privacy_restores_its_home_entry() {
+    use super::session::Page;
+
+    for shortcut in [KeyCode::F(2), KeyCode::Char('h')] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(Language::EnUs));
+        session.select_home_entry(5);
+        session.handle(key(KeyCode::Enter));
+        session.select_choice_for_test(1);
+        session.handle(key(KeyCode::Enter));
+        session.open_subpage(Page::DataPrivacy);
+        assert_eq!(session.page, Page::DataPrivacy);
+        session.handle(key(shortcut));
+        assert_eq!(session.page, Page::Home);
+        assert_eq!(session.choice_index(), 5);
+        assert!(matches!(session.handle(key(KeyCode::Esc)), Flow::Exit));
+    }
+}
+
+#[test]
+fn navigation_review_return_restores_the_source_scroll() {
+    use super::session::Page;
+
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.enter(Page::Personal);
+    session.scroll = 6;
+    session.open_subpage(Page::DataPrivacy);
+    session.handle(key(KeyCode::Esc));
+    assert_eq!(session.page, Page::Personal);
+    assert_eq!(session.scroll, 6);
+    assert!(!session.view().follow_cursor);
+}
+
+#[test]
+fn navigation_review_confirmation_footer_keeps_cancel_and_back_visible() {
+    use super::session::Page;
+
+    for (language, cancel, back) in [
+        (Language::EnUs, "Entercancel", "Escback"),
+        (Language::ZhCn, "Enter取消", "Esc返回"),
+    ] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(language));
+        session.enter(Page::DataClearConfirm);
+        for (width, height) in [(40, 16), (80, 24)] {
+            let text = rendered(&session, width, height);
+            let footer: String = text.lines().skip(height as usize - 2).collect::<String>();
+            let footer: String = footer.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(footer.contains(cancel) && footer.contains(back), "{text}");
+        }
+    }
+}
+
+#[test]
+fn navigation_review_long_confirmation_cannot_select_write_before_review() {
+    let mut status = login_status("/usr/bin/cosh", Some("/bin/bash"), "applied", true, false);
+    status.username = "long-account-".repeat(16);
+    status.original_bash = Some(format!("/opt/{}/bin/bash", "original/".repeat(32)));
+    let (_guard, _temp, mut session) = login_session(status);
+    session.handle(key(KeyCode::Enter));
+    let text = draw_session(&mut session, 40, 16);
+    assert!(text.contains("long-account"), "{text}");
+    session.handle(key(KeyCode::Up));
+    assert_eq!(session.choice_index(), 1);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::Continue
+    ));
+    assert_eq!(session.page, super::session::Page::Login);
+    session.handle(key(KeyCode::Enter));
+    draw_session(&mut session, 40, 16);
+    for _ in 0..12 {
+        session.handle(key(KeyCode::PageDown));
+        draw_session(&mut session, 40, 16);
+    }
+    session.handle(key(KeyCode::Up));
+    assert_eq!(session.choice_index(), 0);
+    assert!(matches!(
+        session.handle(key(KeyCode::Enter)),
+        Flow::LoginRestore
+    ));
+}
+
+#[test]
+fn navigation_review_quit_exits_read_only_pages() {
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.enter(super::session::Page::DataPrivacy);
+    assert!(matches!(
+        session.handle(key(KeyCode::Char('q'))),
+        Flow::Exit
+    ));
+}
+
+#[test]
+fn navigation_review_ai_receipt_is_not_erased_by_quiet_browsing() {
+    use super::result::{ActionKind, ChangeFact, TaskOutcome, Verification};
+    use super::session::Page;
+
+    let (_guard, _temp, paths) = isolated_fixture();
+    let mut session = Session::new(paths, I18n::new(Language::EnUs));
+    session.select_home_entry(2);
+    session.handle(key(KeyCode::Enter));
+    let mut outcome = TaskOutcome::default();
+    outcome.record(
+        ActionKind::Configure,
+        ChangeFact::Committed,
+        Verification::Verified,
+    );
+    session.finish_ai_task(outcome);
+    session.finish_ai_task(TaskOutcome::default());
+    session.handle(key(KeyCode::Esc));
+    assert_eq!(session.page, Page::Home);
+    assert!(session
+        .view()
+        .message
+        .as_deref()
+        .is_some_and(|text| text.contains("saved")));
+    session.handle(key(KeyCode::Enter));
+    assert!(session
+        .view()
+        .message
+        .as_deref()
+        .is_some_and(|text| text.contains("AI service")));
+    session.settle_ai_load();
+}
+
+#[test]
+fn coordinator_review_home_keeps_unresolved_ai_outcomes_after_a_later_save() {
+    use super::result::{ActionKind, ChangeFact, TaskOutcome, Verification};
+    use super::session::Page;
+
+    for (change, expected) in [
+        (ChangeFact::Unknown, "AI service change unconfirmed."),
+        (ChangeFact::Partial, "AI service change partly completed."),
+        (ChangeFact::None, "AI service change not completed."),
+    ] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(Language::EnUs));
+        session.select_home_entry(2);
+        session.handle(key(KeyCode::Enter));
+        let mut earlier = TaskOutcome::default();
+        if change == ChangeFact::None {
+            earlier.record_failure(ActionKind::Configure, "earlier rejection".into());
+        } else {
+            earlier.record(ActionKind::Configure, change, Verification::Unconfirmed);
+        }
+        session.finish_ai_task(earlier);
+        session.handle(key(KeyCode::Esc));
+        session.handle(key(KeyCode::Enter));
+        let mut later = TaskOutcome::default();
+        later.record(
+            ActionKind::TrialPreference,
+            ChangeFact::Committed,
+            Verification::Verified,
+        );
+        session.finish_ai_task(later);
+        let receipt = session.ai_receipt().unwrap();
+        assert_eq!(session.view().message.as_deref(), Some(receipt.as_str()));
+        assert_eq!(receipt.matches("add or edit AI service").count(), 1);
+        assert_eq!(receipt.matches("zero-config access setting").count(), 1);
+        assert_eq!(
+            session.blocked_writes.contains(&ActionKind::Configure),
+            change == ChangeFact::Unknown
+        );
+
+        session.handle(key(KeyCode::Char('h')));
+        assert_eq!(session.page, Page::Home);
+        assert_eq!(session.choice_index(), 2);
+        assert_eq!(session.view().message.as_deref(), Some(expected));
+        session.handle(key(KeyCode::Enter));
+        assert_eq!(session.view().message.as_deref(), Some(receipt.as_str()));
+        assert!(matches!(
+            session.handle(key(KeyCode::Char('q'))),
+            Flow::Exit
+        ));
+        assert_eq!(session.ai_receipt().as_deref(), Some(receipt.as_str()));
+        session.settle_ai_load();
+    }
+}
+
+#[test]
+fn coordinator_review_saved_configuration_survives_a_later_discard() {
+    use super::result::{ActionKind, ChangeFact, EndReason, TaskOutcome, Verification};
+    use super::session::Page;
+
+    for (saved, home_key) in [(true, KeyCode::F(2)), (false, KeyCode::Char('h'))] {
+        let (_guard, _temp, paths) = isolated_fixture();
+        let mut session = Session::new(paths, I18n::new(Language::EnUs));
+        session.select_home_entry(2);
+        session.handle(key(KeyCode::Enter));
+        if saved {
+            let mut configure = TaskOutcome::default();
+            configure.record(
+                ActionKind::Configure,
+                ChangeFact::Committed,
+                Verification::Verified,
+            );
+            session.finish_ai_task(configure);
+            session.handle(key(KeyCode::Esc));
+            session.handle(key(KeyCode::Enter));
+        }
+        let mut discard = TaskOutcome::default();
+        discard.reason = EndReason::Cancelled;
+        session.finish_ai_task(discard);
+
+        let expected = if saved {
+            "This action was cancelled; saved changes are kept."
+        } else {
+            "Cancelled. No configuration changed."
+        };
+        let receipt = session.ai_receipt().unwrap();
+        assert_eq!(session.view().message.as_deref(), Some(receipt.as_str()));
+        assert_eq!(receipt.matches(expected).count(), 1, "{receipt}");
+        assert_eq!(
+            receipt.matches("Saved: add or edit AI service.").count(),
+            usize::from(saved),
+            "{receipt}"
+        );
+        if saved {
+            assert!(!receipt.contains("No configuration changed"), "{receipt}");
+        }
+
+        session.handle(key(home_key));
+        assert_eq!(session.page, Page::Home);
+        assert_eq!(session.view().message.as_deref(), Some(expected));
+        assert!(matches!(
+            session.handle(key(KeyCode::Char('q'))),
+            Flow::Exit
+        ));
+        assert_eq!(session.ai_receipt().as_deref(), Some(receipt.as_str()));
+        session.settle_ai_load();
+    }
+}
+
 #[test]
 fn quick_guide_last_line_stays_reachable_at_40x16_in_both_languages() {
     for (language, tail) in [
@@ -1632,6 +1908,7 @@ fn review_fix_login_requires_confirmation_and_defaults_to_cancel() {
     assert_eq!(session.page, super::session::Page::Login);
     assert_eq!(session.choice_index(), 0);
     session.handle(key(KeyCode::Enter));
+    render_confirmation(&mut session);
     session.select_choice_for_test(0);
     assert!(matches!(
         session.handle(key(KeyCode::Enter)),
@@ -1663,6 +1940,7 @@ fn review_fix_history_import_requires_consent_and_preserves_return_focus() {
     assert_eq!(session.choice_index(), 2);
     assert_ne!(session.bash.saved, Some(true));
     session.handle(key(KeyCode::Enter));
+    render_confirmation(&mut session);
     session.select_choice_for_test(0);
     session.handle(key(KeyCode::Enter));
     assert_eq!(session.bash.saved, Some(true));
@@ -1773,6 +2051,7 @@ fn publish_fix_cleanup_uncertainty_survives_enabling_and_reentry() {
     session.handle(key(KeyCode::Enter));
     session.select_choice_for_test(1);
     session.handle(key(KeyCode::Enter));
+    render_confirmation(&mut session);
     session.select_choice_for_test(0);
     session.handle(key(KeyCode::Enter));
     assert_eq!(
@@ -1806,6 +2085,7 @@ fn publish_fix_cleanup_uncertainty_survives_enabling_and_reentry() {
         .unwrap();
     session.select_choice_for_test(clear);
     session.handle(key(KeyCode::Enter));
+    render_confirmation(&mut session);
     session.select_choice_for_test(0);
     session.handle(key(KeyCode::Enter));
     assert!(!session.view().rows.iter().any(|r|matches!(r,crate::ui::guide::WizardRow::Text(t) if t.contains("cleanup remains unconfirmed"))));
