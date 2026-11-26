@@ -23,14 +23,14 @@ pub(crate) struct HermesSession {
     pub(crate) cwd: Option<String>,
     pub(crate) started_at: f64,
     pub(crate) ended_at: Option<f64>,
-    pub(crate) input_tokens: i64,
-    pub(crate) output_tokens: i64,
-    pub(crate) cache_read_tokens: i64,
-    pub(crate) cache_write_tokens: i64,
-    pub(crate) reasoning_tokens: i64,
+    pub(crate) input_tokens: Option<i64>,
+    pub(crate) output_tokens: Option<i64>,
+    pub(crate) cache_read_tokens: Option<i64>,
+    pub(crate) cache_write_tokens: Option<i64>,
+    pub(crate) reasoning_tokens: Option<i64>,
     pub(crate) estimated_cost_usd: Option<f64>,
     pub(crate) actual_cost_usd: Option<f64>,
-    pub(crate) api_call_count: i64,
+    pub(crate) api_call_count: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -346,22 +346,23 @@ fn content_text(raw: Option<&str>) -> String {
 
 fn final_metrics(session: &HermesSession, total_steps: usize) -> FinalMetrics {
     let mut extra = HashMap::new();
-    extra.insert("api_call_count".into(), Value::from(session.api_call_count));
-    extra.insert(
-        "cache_write_tokens".into(),
-        Value::from(session.cache_write_tokens),
-    );
-    extra.insert(
-        "reasoning_tokens".into(),
-        Value::from(session.reasoning_tokens),
-    );
+    for (name, value) in [
+        ("api_call_count", session.api_call_count),
+        ("cache_write_tokens", session.cache_write_tokens),
+        ("reasoning_tokens", session.reasoning_tokens),
+    ] {
+        if let Some(value) = value {
+            extra.insert(name.into(), Value::from(value));
+        }
+    }
+    let tokens = |value: Option<i64>| value.and_then(|n| u64::try_from(n).ok());
     FinalMetrics {
-        total_prompt_tokens: u64::try_from(session.input_tokens).ok(),
-        total_completion_tokens: u64::try_from(session.output_tokens).ok(),
-        total_cached_tokens: u64::try_from(session.cache_read_tokens).ok(),
+        total_prompt_tokens: tokens(session.input_tokens),
+        total_completion_tokens: tokens(session.output_tokens),
+        total_cached_tokens: tokens(session.cache_read_tokens),
         total_cost_usd: session.actual_cost_usd.or(session.estimated_cost_usd),
         total_steps: Some(total_steps),
-        extra: Some(extra),
+        extra: (!extra.is_empty()).then_some(extra),
     }
 }
 
@@ -400,12 +401,21 @@ pub(crate) fn source_fingerprint(
     session.parent_session_id.hash(&mut hasher);
     session.cwd.hash(&mut hasher);
     session.started_at.to_bits().hash(&mut hasher);
-    session.input_tokens.hash(&mut hasher);
-    session.output_tokens.hash(&mut hasher);
-    session.cache_read_tokens.hash(&mut hasher);
-    session.cache_write_tokens.hash(&mut hasher);
-    session.reasoning_tokens.hash(&mut hasher);
-    session.api_call_count.hash(&mut hasher);
+    let counters = [
+        session.input_tokens,
+        session.output_tokens,
+        session.cache_read_tokens,
+        session.cache_write_tokens,
+        session.reasoning_tokens,
+        session.api_call_count,
+    ];
+    // Keep existing scan fingerprints for fully populated sessions, including evicted ones.
+    if counters.iter().any(Option::is_none) {
+        counters.map(|counter| counter.is_some()).hash(&mut hasher);
+    }
+    for counter in counters.into_iter().flatten() {
+        counter.hash(&mut hasher);
+    }
     session
         .estimated_cost_usd
         .map(f64::to_bits)
