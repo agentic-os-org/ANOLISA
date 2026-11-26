@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
@@ -276,73 +276,10 @@ impl StorageBackend for BtrfsLoopBackend {
         let subvol_path = self.mount_path.join(ws_id);
         let snap_base = self.snapshots_dir.join(ws_id);
 
-        // Record subvolume root permissions before rsync
-        let subvol_meta = tokio::fs::metadata(&subvol_path).await.with_context(|| {
-            format!(
-                "cannot recover: subvolume {:?} is missing or unreadable; no data was restored. \
-                 If it was deleted, use `ws-ckpt unregister -w {:?} --force` to remove only \
-                 the registration while retaining backups and snapshots",
-                subvol_path, original_path
-            )
-        })?;
+        super::workspace_recovery::restore(ws_id, &subvol_path, Path::new(original_path)).await?;
 
-        // 1. Remove symlink; refuse if a non-symlink directory occupies the path
-        match tokio::fs::symlink_metadata(original_path).await {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                tokio::fs::remove_file(original_path)
-                    .await
-                    .context("failed to remove symlink")?;
-            }
-            Ok(_) => {
-                bail!(
-                    "cannot recover: {} is a regular directory, not a workspace symlink; \
-                     move or rename it first to avoid data loss",
-                    original_path
-                );
-            }
-            Err(_) => {} // path gone, rsync will recreate
-        }
-
-        // 2. Rsync subvolume contents back to original path (restore as normal directory)
-        let src = format!("{}/", subvol_path.to_string_lossy()); // trailing / is important
-
-        let sv_uid = subvol_meta.uid();
-        let sv_gid = subvol_meta.gid();
-        let sv_mode = subvol_meta.mode();
-
-        let rsync_status = Command::new("rsync")
-            .args(["-aHAX", "--delete", &src, original_path])
-            .status()
-            .await
-            .context("failed to run rsync")?;
-        if !rsync_status.success() {
-            bail!(
-                "rsync failed restoring {} -> {}, exit: {:?}; \
-                 workspace and snapshots preserved for retry",
-                src,
-                original_path,
-                rsync_status.code()
-            );
-        } else {
-            // Restore directory ownership and permissions to match original
-            if let Err(e) = chown(
-                Path::new(original_path),
-                Some(Uid::from_raw(sv_uid)),
-                Some(Gid::from_raw(sv_gid)),
-            ) {
-                warn!("failed to restore ownership on {}: {}", original_path, e);
-            }
-            if let Err(e) =
-                tokio::fs::set_permissions(original_path, std::fs::Permissions::from_mode(sv_mode))
-                    .await
-            {
-                warn!("failed to restore permissions on {}: {}", original_path, e);
-            }
-            info!("restored workspace contents to {}", original_path);
-        }
-
-        // 3. Delete snapshots before the workspace subvolume so a partial
-        //    teardown remains retryable.
+        // Delete snapshots before the workspace subvolume so a partial
+        // teardown remains retryable.
         btrfs_common::delete_recovery_subvolumes(
             &snap_base,
             &subvol_path,
@@ -351,18 +288,18 @@ impl StorageBackend for BtrfsLoopBackend {
         )
         .await?;
 
-        // 4. Remove snapshots/{ws_id} directory
+        // Remove snapshots/{ws_id} directory
         if let Err(e) = tokio::fs::remove_dir_all(&snap_base).await {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
         }
 
-        // 5. Remove the workspace's internal diff temp directory. recover
-        //    holds the same workspace mutation lock as diff, so nothing here
-        //    can be a live temp snapshot; leftovers sweep first, then the
-        //    directory itself goes away — but only when empty: a plain
-        //    remove_dir keeps the entries the sweep refused to touch (they
-        //    are already reported as leftovers), so the warning never lists
-        //    a path this teardown deleted.
+        // Remove the workspace's internal diff temp directory. Recovery
+        // holds the same workspace mutation lock as diff, so nothing here
+        // can be a live temp snapshot; leftovers sweep first, then the
+        // directory itself goes away — but only when empty: a plain
+        // remove_dir keeps the entries the sweep refused to touch (they
+        // are already reported as leftovers), so the warning never lists
+        // a path this teardown deleted.
         let diff_tmp_dir = self
             .mount_path
             .join(btrfs_common::DIFF_TMP_DIR_NAME)

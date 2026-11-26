@@ -2,7 +2,8 @@
 
 #![cfg(target_os = "linux")]
 
-use std::ffi::CString;
+use std::collections::BTreeSet;
+use std::ffi::{CString, OsString};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -111,11 +112,14 @@ fn assert_metadata(path: &Path) {
         std::fs::metadata(&file).unwrap().ino(),
         std::fs::metadata(&alias).unwrap().ino()
     );
-    std::fs::write(&file, b"updated through original name").unwrap();
-    assert_eq!(
-        std::fs::read(&alias).unwrap(),
-        b"updated through original name"
-    );
+    assert_eq!(std::fs::read(&alias).unwrap(), PAYLOAD);
+}
+
+fn entries(path: &Path) -> BTreeSet<OsString> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect()
 }
 
 fn executable(path: &Path, contents: &str) {
@@ -152,7 +156,15 @@ fn run_cases(test_name: &str, fail_copy: bool) {
         let operations: &[&str] = if fail_copy {
             &["init", "recover"]
         } else {
-            &["init", "recover", "roundtrip"]
+            &[
+                "init",
+                "recover",
+                "roundtrip",
+                "absent",
+                "occupied",
+                "foreign-link",
+                "concurrent",
+            ]
         };
         for operation in operations {
             let root = tempfile::tempdir().unwrap();
@@ -174,7 +186,25 @@ esac
 "#,
             );
             if fail_copy {
-                executable(&bin.join("rsync"), "#!/bin/sh\nexit 23\n");
+                executable(
+                    &bin.join("rsync"),
+                    r#"#!/bin/sh
+set -eu
+for dest do :; done
+mkdir -p -- "$dest"
+echo partial > "$dest/partial"
+exit 23
+"#,
+                );
+            } else if *operation == "concurrent" {
+                executable(
+                    &bin.join("rsync"),
+                    r#"#!/bin/sh
+set -eu
+mkdir -- "$WS_CKPT_METADATA_TEST_ROOT/workspace"
+echo concurrent > "$WS_CKPT_METADATA_TEST_ROOT/workspace/user-file"
+"#,
+                );
             }
             let mut paths = vec![bin];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
@@ -215,11 +245,16 @@ async fn run_case(root: PathBuf, fail_copy: bool) {
     let live = backend.data_root().join("ws-metadata");
     let snapshots = backend.snapshots_root().join("ws-metadata");
     let operation = std::env::var("WS_CKPT_METADATA_TEST_OPERATION").unwrap();
-    if operation == "recover" {
+    if !matches!(operation.as_str(), "init" | "roundtrip") {
         prepare_workspace(&live).unwrap();
         std::fs::create_dir_all(snapshots.join("retained-snapshot")).unwrap();
         std::fs::write(snapshots.join("retained-snapshot/data"), PAYLOAD).unwrap();
-        std::os::unix::fs::symlink(&live, &workspace).unwrap();
+        match operation.as_str() {
+            "absent" | "concurrent" => {}
+            "occupied" => std::fs::create_dir(&workspace).unwrap(),
+            "foreign-link" => std::os::unix::fs::symlink(&snapshots, &workspace).unwrap(),
+            _ => std::os::unix::fs::symlink(&live, &workspace).unwrap(),
+        }
     } else {
         prepare_workspace(&workspace).unwrap();
         let result = backend
@@ -236,11 +271,49 @@ async fn run_case(root: PathBuf, fail_copy: bool) {
     }
 
     if operation != "init" {
-        let result = backend
+        let before = entries(&root);
+        let original_meta = live.metadata().unwrap();
+        let mut result = backend
             .recover_workspace("ws-metadata", workspace.to_str().unwrap())
             .await;
         if fail_copy {
-            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("23"));
+            assert_eq!(entries(&root), before);
+            assert_eq!(std::fs::read_link(&workspace).unwrap(), live);
+            assert_metadata(&workspace);
+            assert!(!workspace.join("partial").exists());
+            assert_eq!(
+                std::fs::read(snapshots.join("retained-snapshot/data")).unwrap(),
+                PAYLOAD
+            );
+            std::fs::remove_file(root.join("bin/rsync")).unwrap();
+            result = backend
+                .recover_workspace("ws-metadata", workspace.to_str().unwrap())
+                .await;
+        }
+        if matches!(
+            operation.as_str(),
+            "occupied" | "foreign-link" | "concurrent"
+        ) {
+            let error = result.unwrap_err().to_string();
+            let mut expected = before;
+            if operation == "foreign-link" {
+                assert!(error.contains("different workspace"), "{error}");
+                assert_eq!(std::fs::read_link(&workspace).unwrap(), snapshots);
+            } else {
+                assert!(
+                    error.contains("regular directory, not a workspace symlink"),
+                    "{error}"
+                );
+                if operation == "concurrent" {
+                    expected.insert("workspace".into());
+                    assert_eq!(
+                        std::fs::read(workspace.join("user-file")).unwrap(),
+                        b"concurrent\n"
+                    );
+                }
+            }
+            assert_eq!(entries(&root), expected);
             assert_metadata(&live);
             assert_eq!(
                 std::fs::read(snapshots.join("retained-snapshot/data")).unwrap(),
@@ -249,6 +322,20 @@ async fn run_case(root: PathBuf, fail_copy: bool) {
             return;
         }
         result.unwrap();
+        let restored = workspace.symlink_metadata().unwrap();
+        assert!(restored.is_dir());
+        assert_eq!(
+            (restored.uid(), restored.gid(), restored.mode()),
+            (
+                original_meta.uid(),
+                original_meta.gid(),
+                original_meta.mode()
+            )
+        );
+        assert!(!workspace.join("partial").exists());
+        let mut expected = before;
+        expected.insert("workspace".into());
+        assert_eq!(entries(&root), expected);
         assert!(!live.exists());
         assert!(!snapshots.exists());
     }

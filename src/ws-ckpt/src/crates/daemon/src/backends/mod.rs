@@ -3,3 +3,4 @@ pub mod btrfs_common;
 pub(crate) mod btrfs_identity;
 pub mod btrfs_loop;
 pub(crate) mod rollback_recovery;
+mod workspace_recovery;
