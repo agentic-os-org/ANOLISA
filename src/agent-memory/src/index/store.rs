@@ -388,6 +388,9 @@ impl BM25Store {
         let superseded_filter = "AND f.is_superseded = 0";
 
         let scope = resolve_agent_scope(agent_scope)?;
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
 
         // The FTS5 `trigram` tokenizer emits one token per 3-character
         // window. A query term shorter than 3 chars (common for CJK words
@@ -422,108 +425,70 @@ impl BM25Store {
         let category_slot = if agent_param.is_some() { "?4" } else { "?3" };
         let (category_filter, category_param) = category_filter_sql(category, category_slot);
 
-        // Join with files to get mtime for time decay.
+        // Raw BM25 order is sufficient only if every row gets the same boost.
+        let rerank = self.time_decay_alpha != 0.0 && self.time_decay_lambda != 0.0;
+        let (order, limit) = if rerank {
+            ("", -1) // SQLite's unlimited LIMIT
+        } else {
+            (
+                "ORDER BY rank, f.path",
+                i64::try_from(top_k).unwrap_or(i64::MAX),
+            )
+        };
         let sql = format!(
             r#"
-            SELECT f.path,
-                   snippet(files_fts, 1, '«', '»', '…', 16) AS snip,
-                   bm25(files_fts) AS rank,
-                   body,
-                   f.mtime_ms
+            SELECT f.path, snippet(files_fts, 1, '«', '»', '…', 16),
+                   bm25(files_fts) AS rank, f.mtime_ms
             FROM files_fts
             JOIN files f ON f.rowid = files_fts.rowid
             WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
                   {category_filter}
-            ORDER BY rank
-            LIMIT ?2
-        "#
+            {order} LIMIT ?2
+            "#
         );
-        let bind = match_bind(&match_query, top_k, &agent_param, &category_param);
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows: Vec<(String, String, f64, String, i64)> = stmt
-            .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+        let mut run_match = |query: &str| -> Result<Vec<_>> {
+            let bind = match_bind(query, limit, &agent_param, &category_param);
+            let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+                let rank: f64 = row.get(2)?;
+                let mtime_ms = row.get(3)?;
+                let boost = if rerank {
+                    self.time_decay_alpha * time_decay_at(mtime_ms, self.time_decay_lambda, now_ms)
+                } else {
+                    self.time_decay_alpha
+                };
+                // FTS5 gives better matches more negative ranks; RRF consumes
+                // these hits in descending relevance order.
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
+                    -rank + boost,
                 ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        // OR fallback: FTS5 implicit-AND semantics return 0 results
-        // when any single query term is absent from the corpus.
-        // Natural-language prompts (e.g. auto-recall queries) routinely
-        // contain common words ("What", "is", "Answer") that don't
-        // appear in any memory file, causing every AND query to fail.
-        // When the AND path returns nothing and we have multiple tokens,
-        // retry with OR-joined quoted tokens so partial matches still
-        // surface.
-        let rows: Vec<(String, String, f64, String, i64)> = if rows.is_empty() && tokens.len() > 1 {
-            let or_q = literal_fts_query(&tokens, " OR ");
-            let or_sql = format!(
-                r#"
-                SELECT f.path,
-                       snippet(files_fts, 1, '«', '»', '…', 16) AS snip,
-                       bm25(files_fts) AS rank,
-                       body,
-                       f.mtime_ms
-                FROM files_fts
-                JOIN files f ON f.rowid = files_fts.rowid
-                WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
-                      {category_filter}
-                ORDER BY rank
-                LIMIT ?2
-                "#
-            );
-            let or_bind = match_bind(&or_q, top_k, &agent_param, &category_param);
-            let mut or_stmt = self.conn.prepare(&or_sql)?;
-            or_stmt
-                .query_map(rusqlite::params_from_iter(or_bind.iter()), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            rows
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         };
-        let mut out: Vec<SearchHit> = rows
+        let mut rows = run_match(&match_query)?;
+        if rows.is_empty() && tokens.len() > 1 {
+            rows = run_match(&literal_fts_query(&tokens, " OR "))?;
+        }
+        if rerank {
+            rows.sort_unstable_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+            rows.truncate(top_k);
+        }
+        let out = rows
             .into_iter()
-            .map(|(path, snippet, bm25_score, _body, mtime_ms)| {
-                let decay = time_decay(mtime_ms, self.time_decay_lambda);
-                // FTS5's `bm25()` is negative and *more negative is a better
-                // match* — which is why the SQL above orders by `rank`
-                // ascending to keep the best `top_k` rows. Negate it so
-                // `SearchHit::score` means "higher is better" like the two
-                // sibling scorers (`search_like`, `search_vec`) and so the
-                // additive recency boost lifts a good match instead of being
-                // subtracted from it: sorted descending, the raw value ranked
-                // the weakest matched row first and handed
-                // `search_hybrid_inner`'s RRF the BM25 ranks in reverse. FTS5
-                // clamps a negative IDF to ~0, so relevance is never below
-                // zero on this path.
-                let relevance = -bm25_score;
-                let adjusted_score = relevance + self.time_decay_alpha * decay;
+            .map(|(path, snippet, score)| {
                 let suspicious =
                     crate::safety::looks_like_prompt_injection(&strip_snippet_markers(&snippet));
                 SearchHit {
                     path,
                     snippet,
-                    score: adjusted_score,
+                    score,
                     suspicious,
                 }
             })
             .collect();
-
-        // Best match first — `score` is "higher is better" on every path.
-        out.sort_by(|a, b| b.score.total_cmp(&a.score));
-
         Ok(out)
     }
 
@@ -1345,13 +1310,13 @@ fn category_filter_sql(category: Option<&str>, placeholder: &str) -> (String, Op
 /// stays in step with the SQL text without a branch per combination.
 fn match_bind(
     fts_q: &str,
-    top_k: usize,
+    limit: i64,
     agent_param: &Option<String>,
     category_param: &Option<String>,
 ) -> Vec<rusqlite::types::Value> {
     let mut bind = vec![
         rusqlite::types::Value::Text(fts_q.to_string()),
-        rusqlite::types::Value::Integer(top_k as i64),
+        rusqlite::types::Value::Integer(limit),
     ];
     for v in [agent_param, category_param].into_iter().flatten() {
         bind.push(rusqlite::types::Value::Text(v.clone()));
@@ -1460,11 +1425,11 @@ pub(crate) fn time_decay(mtime_ms: i64, lambda: f64) -> f64 {
     if lambda == 0.0 {
         return 1.0;
     }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let age_days = ((now_ms - mtime_ms).max(0) as f64) / 86_400_000.0;
+    time_decay_at(mtime_ms, lambda, chrono::Utc::now().timestamp_millis())
+}
+
+fn time_decay_at(mtime_ms: i64, lambda: f64, now_ms: i64) -> f64 {
+    let age_days = now_ms.saturating_sub(mtime_ms).max(0) as f64 / 86_400_000.0;
     (-lambda * age_days).exp()
 }
 
@@ -2496,6 +2461,43 @@ mod tests {
         // The new file should rank higher (same relevance, larger decay boost)
         assert_eq!(hits[0].path, "new.md");
         assert_eq!(hits[1].path, "old.md");
+    }
+
+    #[test]
+    fn bm25_ranks_before_limiting() {
+        for (lambda, alpha, winner) in [
+            (1.0, 1.0, "new.md"),
+            (1.0, 0.0, "old.md"),
+            (0.0, 1.0, "old.md"),
+        ] {
+            let mut store = BM25Store::open_in_memory_with(lambda, alpha, true).unwrap();
+            let old_body = "orbit ".repeat(12);
+            store
+                .upsert("old.md", 0, old_body.len() as u64, &old_body, None)
+                .unwrap();
+            store
+                .upsert(
+                    "new.md",
+                    chrono::Utc::now().timestamp_millis(),
+                    5,
+                    "orbit",
+                    None,
+                )
+                .unwrap();
+
+            for query in ["orbit", "orbit absentword"] {
+                let one = store.search(query, 1, true).unwrap();
+                let both = store.search(query, 2, true).unwrap();
+                assert_eq!(one.len(), 1);
+                assert_eq!(both.len(), 2);
+                assert_eq!(
+                    one[0].path, winner,
+                    "{query}, lambda={lambda}, alpha={alpha}"
+                );
+                assert_eq!(one[0].path, both[0].path);
+                assert!(store.search(query, 0, true).unwrap().is_empty());
+            }
+        }
     }
 
     #[test]
