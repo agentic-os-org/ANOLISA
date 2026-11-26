@@ -9,8 +9,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TESTS_DIR = Path(__file__).resolve().parent
 COMPONENT_ROOT = TESTS_DIR.parent
@@ -336,6 +338,95 @@ class TestCaptureCtestSourcePinning(unittest.TestCase):
             self.assertIn(image_id, recorded_cmd)
             img_idx = recorded_cmd.index(image_id)
             self.assertEqual(recorded_cmd[img_idx + 1 :], expected_cmd)
+
+
+class _FakeSelectorKey:
+    def __init__(self, fileobj: object, data: object) -> None:
+        self.fileobj = fileobj
+        self.data = data
+
+
+class _FakeSelector:
+    """POSIX-independent selector: expose each registered pipe once."""
+
+    def __init__(self) -> None:
+        self._entries: dict[object, object] = {}
+        self._pending: list[object] = []
+
+    def __enter__(self) -> "_FakeSelector":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def register(self, fileobj: object, _events: int, data: object) -> None:
+        self._entries[fileobj] = data
+        if fileobj not in self._pending:
+            self._pending.append(fileobj)
+
+    def unregister(self, fileobj: object) -> None:
+        del self._entries[fileobj]
+
+    def get_map(self) -> dict[object, object]:
+        return self._entries
+
+    def select(self, timeout: float = 1.0) -> list[tuple[_FakeSelectorKey, int]]:
+        ready, self._pending = self._pending, []
+        return [
+            (_FakeSelectorKey(fileobj, self._entries[fileobj]), 1)
+            for fileobj in ready
+            if fileobj in self._entries
+        ]
+
+
+class TestCaptureCtestDeadline(unittest.TestCase):
+    def test_final_wait_is_bounded_after_both_pipes_close(self) -> None:
+        # A child that closes both output pipes before exiting used to leave the
+        # selector loop while capture() then waited forever at proc.wait().
+        script = "import os, time; os.close(1); os.close(2); time.sleep(30)"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                mock.patch.object(capture_ctest.selectors, "DefaultSelector", _FakeSelector),
+                mock.patch.object(capture_ctest.subprocess, "run") as cleanup,
+            ):
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError) as ctx:
+                    capture_ctest.capture(
+                        [sys.executable, "-c", script],
+                        ["python", "-c", "<close pipes and sleep>"],
+                        root / "capture",
+                        container_name="tokenless-deadline-test",
+                        timeout_seconds=2,
+                    )
+                elapsed = time.monotonic() - started
+
+            self.assertIn("exceeded 2s", str(ctx.exception))
+            self.assertLess(elapsed, 10)
+            cleanup.assert_called_once()
+            self.assertEqual(
+                cleanup.call_args.args[0],
+                ["docker", "rm", "-f", "tokenless-deadline-test"],
+            )
+            self.assertFalse((root / "capture" / "capture.json").exists())
+
+    def test_completed_capture_still_writes_a_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(capture_ctest.selectors, "DefaultSelector", _FakeSelector):
+                record = capture_ctest.capture(
+                    [sys.executable, "-c", "pass"],
+                    ["python", "-c", "pass"],
+                    root / "capture",
+                    container_name="tokenless-completed-test",
+                    timeout_seconds=10,
+                )
+            capture_dir = root / "capture"
+            self.assertEqual(record["exit_code"], 0)
+            self.assertEqual(record["observed_bytes"], 0)
+            self.assertEqual((capture_dir / "stdout.txt").read_bytes(), b"")
+            self.assertEqual((capture_dir / "stderr.txt").read_bytes(), b"")
+            self.assertTrue((capture_dir / "capture.json").exists())
 
 
 if __name__ == "__main__":
