@@ -301,9 +301,7 @@ fn usage_help_is_bilingual_and_describes_interactive_entry() {
     assert!(chinese.stdout.contains("新登录"));
     assert!(chinese.stdout.contains("已有会话"));
     assert!(chinese.stdout.contains("仅支持登录切换的系统可用"));
-    assert!(chinese
-        .stdout
-        .contains("cosh --ask '磁盘不足时先检查什么？'"));
+    assert!(chinese.stdout.contains("cosh --ask '磁盘满了怎么查？'"));
     assert_ne!(english.stdout, chinese.stdout);
 }
 
@@ -338,7 +336,7 @@ fn plain_quick_guide_keeps_the_first_question_command_on_one_line() {
         runtime_base: None,
     };
     for (language, command) in [
-        (Language::ZhCn, "cosh --ask '磁盘不足时先检查什么？'"),
+        (Language::ZhCn, "cosh --ask '磁盘满了怎么查？'"),
         (Language::EnUs, "cosh --ask 'Why is my disk full?'"),
     ] {
         let result = run_with_paths(&[], &paths, I18n::new(language));

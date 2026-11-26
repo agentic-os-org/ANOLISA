@@ -108,12 +108,18 @@ impl GuideInput {
     }
 
     pub(crate) fn next(&mut self) -> Input {
+        if self.size_changed() {
+            return Input::Resize;
+        }
         if let Some(key) = self.decoder.pop() {
             return Input::Key(key);
         }
         match self.source.read_batch(POLL_TIMEOUT_MS) {
             Batch::Bytes(bytes) => {
                 self.decoder.push(&bytes);
+                if self.size_changed() {
+                    return Input::Resize;
+                }
                 self.decoder.pop().map(Input::Key).unwrap_or(Input::Tick)
             }
             Batch::Idle => {
@@ -141,6 +147,12 @@ impl GuideInput {
 
     pub(crate) fn read_raw(&mut self) -> Batch {
         self.source.read_batch(POLL_TIMEOUT_MS)
+    }
+
+    pub(crate) fn discard_auth_submission_input(&mut self) -> std::io::Result<()> {
+        self.discard_pending();
+        nix::errno::Errno::result(unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) })?;
+        Ok(())
     }
 
     /// Drops bytes this process already read for the previous owner. Terminal
@@ -292,6 +304,7 @@ impl KeyDecoder {
                         b'B' => Some(KeyCode::Down),
                         b'C' => Some(KeyCode::Right),
                         b'D' => Some(KeyCode::Left),
+                        b'Q' => Some(KeyCode::F(2)),
                         _ => None,
                     } {
                         self.ready
@@ -354,6 +367,7 @@ fn csi_key(parameters: &[u8], final_byte: u8) -> Option<KeyEvent> {
         (b"", b'D') => KeyCode::Left,
         (b"5", b'~') => KeyCode::PageUp,
         (b"6", b'~') => KeyCode::PageDown,
+        (b"12", b'~') => KeyCode::F(2),
         _ => return None,
     };
     Some(KeyEvent::new(code, KeyModifiers::NONE))
@@ -371,6 +385,20 @@ mod tests {
             codes.push(key.code);
         }
         codes
+    }
+
+    #[test]
+    fn navigation_review_f2_decodes_across_every_chunk_boundary() {
+        for sequence in [b"\x1bOQ".as_slice(), b"\x1b[12~".as_slice()] {
+            for split in 1..sequence.len() {
+                let mut decoder = KeyDecoder::default();
+                decoder.push(&sequence[..split]);
+                assert!(decoder.pop().is_none());
+                decoder.push(&sequence[split..]);
+                assert_eq!(decoder.pop().map(|key| key.code), Some(KeyCode::F(2)));
+                assert!(decoder.pop().is_none());
+            }
+        }
     }
 
     #[test]

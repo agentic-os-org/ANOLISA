@@ -33,10 +33,19 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
     output: &mut W,
     terminal_rows: Option<u16>,
 ) -> io::Result<()> {
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    render_auth_panel(state, output, &renderer, terminal_rows)
+}
+
+pub(super) fn render_auth_panel<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+    renderer: &RatatuiInlineRenderer,
+    terminal_rows: Option<u16>,
+) -> io::Result<()> {
     let Some(auth) = &state.auth.state else {
         return Ok(());
     };
-    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     let i18n = I18n::new(state.language);
     let panel_id = auth_capture_id(auth);
 
@@ -115,7 +124,7 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
                 auth,
                 provider_idx,
                 &panel_id,
-                &renderer,
+                renderer,
                 auth_presentation(state.auth.host, i18n, &auth.phase, false, terminal_rows),
                 output,
             )?;
@@ -130,7 +139,11 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
                 .collect();
             let model = QuestionPanelModel {
                 id: &panel_id,
-                question: i18n.t(MessageId::AuthSelectProviderQuestion),
+                question: i18n.t(if state.auth.host.is_guide() {
+                    MessageId::GuideAuthTemplateTitle
+                } else {
+                    MessageId::AuthSelectProviderQuestion
+                }),
                 options: &options,
                 selected_option: auth.selected_provider,
                 selected_options: &[],
@@ -149,24 +162,77 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
         }
         AuthPhase::FillingField => {
             let field = auth.current_field_info();
-            let label = field.map(|field| field.label.as_str()).unwrap_or("Value");
+            let mut label = field.map(|field| field.label.as_str()).unwrap_or("Value");
             let is_secret = field.map(|field| field.secret).unwrap_or(false);
-            let hint_text = field.and_then(|field| field.hint.as_deref()).unwrap_or("");
+            let mut hint_text = field.and_then(|field| field.hint.as_deref()).unwrap_or("");
             let provider = auth.current_provider();
             let is_editing = auth.editing_provider_name.is_some();
+            let guided = state.auth.host.is_guide();
+            if guided && provider.id == "openai_compat" {
+                if let Some((name, hint)) = field.and_then(|field| match field.name.as_str() {
+                    "base_url" => {
+                        Some((MessageId::GuideAuthBaseUrl, MessageId::GuideAuthBaseUrlHint))
+                    }
+                    "api_key" => Some((MessageId::GuideAuthApiKey, MessageId::GuideAuthApiKeyHint)),
+                    "model" => Some((MessageId::GuideAuthModel, MessageId::GuideAuthModelHint)),
+                    _ => None,
+                }) {
+                    label = i18n.t(name);
+                    hint_text = i18n.t(hint);
+                }
+            }
             let action = if is_editing { "Edit" } else { "Enter" };
-            let mut question = format!(
-                "\u{1f511} {} \u{2014} {} {}:",
-                provider.label, action, label
-            );
-            if !hint_text.is_empty() {
+            let mut question = if guided {
+                i18n.format(
+                    if is_editing {
+                        MessageId::GuideAuthEditField
+                    } else {
+                        MessageId::GuideAuthEnterField
+                    },
+                    &[("service", &provider.label), ("field", label)],
+                )
+            } else {
+                format!(
+                    "\u{1f511} {} \u{2014} {} {}:",
+                    provider.label, action, label
+                )
+            };
+            if !guided && !hint_text.is_empty() {
                 question.push_str(&format!("\n  hint: {hint_text}"));
             }
             if let Some(error) = auth.field_error.as_deref() {
-                question.push_str(&format!("\n  error: {error}"));
+                question.push('\n');
+                question.push_str(&if guided {
+                    i18n.format(MessageId::GuideAuthFieldError, &[("value", error)])
+                } else {
+                    format!("  error: {error}")
+                });
+            }
+            if guided && !hint_text.is_empty() {
+                question.push('\n');
+                question
+                    .push_str(&i18n.format(MessageId::GuideAuthFieldHint, &[("value", hint_text)]));
             }
             if is_editing && !auth.field_input.is_empty() {
-                question.push_str("\n  (Enter to keep current value)");
+                question.push('\n');
+                question.push_str(if guided {
+                    i18n.t(MessageId::GuideAuthKeepField)
+                } else {
+                    "  (Enter to keep current value)"
+                });
+            }
+            let details_end = question.len();
+            let last_guide_field = guided
+                && auth.editable_field_at_or_after(auth.current_field + 1) >= provider.fields.len();
+            if last_guide_field {
+                for line in guide_validation_body(
+                    i18n,
+                    &provider.id,
+                    auth.collected_values.get("auth_source").map(String::as_str),
+                ) {
+                    question.push('\n');
+                    question.push_str(line);
+                }
             }
             if !auth.field_input.is_empty() {
                 let display = if is_secret {
@@ -174,11 +240,31 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
                 } else {
                     auth.field_input.clone()
                 };
-                question.push_str(&format!("\n  > {display}"));
+                if guided
+                    && crate::ui::display_width(&display)
+                        > renderer.question_body_width().saturating_sub(4)
+                {
+                    let limit = renderer.question_body_width().saturating_sub(5);
+                    let mut width = 0;
+                    let suffix = display
+                        .chars()
+                        .rev()
+                        .take_while(|ch| {
+                            width += crate::ui::display_width(ch.encode_utf8(&mut [0; 4]));
+                            width <= limit
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<String>();
+                    question.push_str(&format!("\n  > …{suffix}"));
+                } else {
+                    question.push_str(&format!("\n  > {display}"));
+                }
             } else {
                 question.push_str("\n  > ");
             }
-            let model = QuestionPanelModel {
+            let mut model = QuestionPanelModel {
                 id: &panel_id,
                 question: &question,
                 options: &[],
@@ -189,11 +275,22 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
                 selection_mode: QuestionSelectionMode::Single,
                 input_feedback: QuestionInputFeedback::Disabled,
             };
-            let height = renderer.write_question_panel_with_presentation(
-                output,
-                model,
-                auth_presentation(state.auth.host, i18n, &auth.phase, false, terminal_rows),
-            )?;
+            let mut presentation =
+                auth_presentation(state.auth.host, i18n, &auth.phase, false, terminal_rows);
+            let bounded_question;
+            if last_guide_field {
+                let mut bounded = presentation;
+                bounded.max_rows = terminal_rows;
+                if let Some(body) =
+                    renderer.question_with_required_tail(&model, bounded, details_end)
+                {
+                    bounded_question = body;
+                    model.question = &bounded_question;
+                    presentation = bounded;
+                }
+            }
+            let height =
+                renderer.write_question_panel_with_presentation(output, model, presentation)?;
             state.questions.active_panel_height = height;
             state.questions.active_panel_id = Some(panel_id.clone());
         }
@@ -266,6 +363,36 @@ pub(super) fn render_current_auth_panel_with_rows<W: Write>(
     }
     state.questions.active_panel_width = Some(renderer.panel_standard_width());
     output.flush()
+}
+
+pub(super) fn guide_validation_body(
+    i18n: I18n,
+    provider_id: &str,
+    auth_source: Option<&str>,
+) -> Vec<&'static str> {
+    let mut lines = vec![i18n.t(MessageId::GuideAuthValidationChecks)];
+    if may_validate_with_chat(provider_id, auth_source) {
+        lines.push(i18n.t(MessageId::GuideAuthValidationUsage));
+    }
+    lines
+}
+
+pub(super) fn auth_validation_body(provider_id: &str, auth_source: Option<&str>) -> Vec<String> {
+    let mut body = vec!["Checking endpoint, credentials, and model.".to_string()];
+    if may_validate_with_chat(provider_id, auth_source) {
+        body.push(
+            "If read-only model validation is unavailable or cannot verify credentials, validation may make a minimal chat request (max_tokens=1) that consumes a very small amount of quota or incurs a very small charge."
+                .to_string(),
+        );
+    }
+    body
+}
+
+fn may_validate_with_chat(provider_id: &str, auth_source: Option<&str>) -> bool {
+    matches!(
+        provider_id,
+        "dashscope" | "openai_compat" | "coding_plan" | "token_plan"
+    ) || (provider_id == "aliyun" && auth_source != Some("ecs_ram_role"))
 }
 
 pub(super) fn clear_active_auth_panel<W: Write>(

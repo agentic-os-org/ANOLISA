@@ -11,27 +11,29 @@ Use `cosh --shell bash --help` for Bash help. In an enhanced Cosh session, `/hel
 
 `cosh guide` opens a configuration and onboarding wizard. Its home menu is:
 
-1. **Quick start guide** — selected by default, starting with a question from Bash.
+1. **Quick start guide** — selected by default, with examples for Bash, zsh, and Cosh.
 2. **Default login shell** — enter Cosh at every login, without starting it manually.
 3. **AI service** — inspect access and manage saved services without starting a working shell.
 4. **Login health summary**.
 5. **Language**.
 6. **More settings** — command analysis and personalized recommendations/data.
 
-To try AI from Bash, leave the guide with Esc, one level at a time, then run:
+Esc goes back one level, F2 or `h` goes to the guide home, and `q` exits to the
+calling terminal. From the quick guide, Enter exits and prints an example without
+running it. To try AI from Bash or zsh, run:
 
 ```bash
 cosh --ask 'Why is my disk full?'
 ```
 
 Follow the existing AI setup prompts when needed. After the answer you remain in
-Cosh; `exit` returns to the Bash that launched it. Run `cosh` for a daily session,
+Cosh; `exit` returns to the session that launched it. Run `cosh` for a daily session,
 where commands and natural-language questions share the prompt; `/help` lists
-session commands. If you are already in Cosh, do not start another nested session.
+session commands. If you are already in Cosh, type the question directly.
 
 To use Cosh at every login, choose **Default login shell** on the guide home
-page. Check the account and target path, then confirm; Cancel is selected by
-default. Sudo uses the current terminal for any password prompt, and the wizard
+page. Review the account, UID, and full target path, scrolling if needed. Cancel
+is selected by default. Sudo uses the current terminal for any password prompt, and the wizard
 returns after the operation finishes. The change affects later logins, not the
 current session. A trusted managed record permits restoring the original Bash.
 When Cosh is the login shell, `exit` ends that login session.
@@ -42,10 +44,13 @@ or remaining quota. Saved AI service configurations show an unverified connectio
 The existing CLI controls `cosh guide on`, `cosh guide off` and
 `cosh guide status` remain independent of the wizard's settings.
 
-Configuration failures preserve the current form's confirmed fields. Leaving the
-form discards unsaved input. Esc returns one level; Ctrl-C/Ctrl-D ends AI
-management after any submitted task settles. Cancellation keeps already saved
-changes. A missing mutation receipt holds that kind of write for this guide
+Configuration failures preserve fields that can be retried. In a field, `h` and
+`q` are text. Esc moves back a field; when you leave a form with unsaved changes,
+the guide asks whether to discard them and defaults to continuing the edit. F2
+returns home and Ctrl-D returns to the AI service overview, subject to this draft
+check. A submitted change must finish before navigation resumes. Results stay
+available in the guide and are printed on exit; browsing alone prints no receipt.
+A missing mutation receipt holds that kind of write for this guide
 session; reading current state does not establish the earlier operation's result.
 Partial success keeps the saved configuration and unsaved session-record facts
 separate. Analysis and recommendation preferences affect new Cosh sessions;

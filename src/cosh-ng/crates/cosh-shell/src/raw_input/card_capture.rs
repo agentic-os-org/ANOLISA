@@ -1,5 +1,5 @@
 use super::draft_editor::PromptDraftEditor;
-use super::{RawInputCapture, RawInputEvent, CTRL_C};
+use super::{AuthNavigation, RawInputCapture, RawInputEvent, CTRL_C};
 use crate::question::choices::toggle_question_option;
 
 use events::{
@@ -32,6 +32,7 @@ pub(super) struct CardInputState {
     /// draft newlines instead of submitting.
     draft_paste: bool,
     draft_selection: Option<prompt_draft::DraftSlashSelection>,
+    guide: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +254,46 @@ impl CardInputState {
         }
         let mut idx = 0;
         while idx < input.len() {
+            if self.guide {
+                let rest = &input[idx..];
+                let text = matches!(capture, RawInputCapture::TextQuestion { .. });
+                let byte = rest[0];
+                if self.draft_paste && byte != 0x1b && (!text || byte.is_ascii_control()) {
+                    idx += 1;
+                    continue;
+                }
+                if !self.draft_paste {
+                    let navigation = match byte {
+                        0x04 => Some(AuthNavigation::Overview),
+                        b'h' if !text => Some(AuthNavigation::Home),
+                        b'q' | b'Q' if !text => Some(AuthNavigation::Quit),
+                        0x1b if rest.starts_with(b"\x1bOQ") || rest.starts_with(b"\x1b[12~") => {
+                            Some(AuthNavigation::Home)
+                        }
+                        _ => None,
+                    };
+                    if let Some(navigation) = navigation {
+                        events.push(RawInputEvent::GuideAuthNavigation(navigation));
+                        return (events, Vec::new());
+                    }
+                }
+                if rest == [0x1b] {
+                    self.pending_input.push(0x1b);
+                    break;
+                }
+                if self.draft_paste && rest.starts_with(b"\x1bO") {
+                    if rest.len() < 3 {
+                        self.pending_input.extend_from_slice(rest);
+                        break;
+                    }
+                    idx += 3;
+                    continue;
+                }
+                if self.draft_paste && byte == 0x1b && !rest.starts_with(b"\x1b[") {
+                    idx += 1;
+                    continue;
+                }
+            }
             match input[idx] {
                 CTRL_C => {
                     match capture {
@@ -570,7 +611,32 @@ impl CardInputState {
                 break;
             }
         }
-        (events, input[idx..].to_vec())
+        let remainder = if self.guide && !self.pending_input.is_empty() {
+            Vec::new()
+        } else {
+            input[idx..].to_vec()
+        };
+        (events, remainder)
+    }
+
+    pub(super) fn consume_guide(
+        &mut self,
+        capture: &RawInputCapture,
+        bytes: &[u8],
+    ) -> (Vec<RawInputEvent>, Vec<u8>) {
+        self.guide = true;
+        self.consume_split(capture, bytes)
+    }
+
+    pub(super) fn finish_guide_escape(
+        &mut self,
+        capture: &RawInputCapture,
+    ) -> Option<RawInputEvent> {
+        if !self.draft_paste && self.pending_input == [0x1b] {
+            Some(cancel_event(capture))
+        } else {
+            None
+        }
     }
 
     fn submit(&self, capture: &RawInputCapture) -> Option<RawInputEvent> {

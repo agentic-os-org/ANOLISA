@@ -290,3 +290,49 @@ macro_rules! guide_wizard_ids {
         );
     };
 }
+
+macro_rules! guide_wizard_navigation_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            GuideWizardAskHint,
+            GuideWizardAskReceipt,
+            GuideWizardReviewHint,
+            GuideWizardConfirmSet,
+            GuideWizardConfirmRestore,
+            GuideWizardConfirmReset,
+            GuideWizardConfirmClear,
+            GuideWizardConfirmDisable,
+            GuideWizardConfirmImport,
+            GuideWizardCancelKey,
+            GuideWizardLoginSetTitle,
+            GuideWizardLoginTargetLine,
+            GuideWizardLoginRestoreAction,
+            GuideWizardLoginSetDone,
+            GuideWizardLanguageSaved,
+            GuideWizardLanguageOverride,
+            GuideWizardLanguageFollowed,
+            GuideWizardLanguagePrefLine,
+            GuideWizardSavedMarker,
+            GuideWizardHealthSaved,
+            GuideWizardHealthReadFailed,
+            GuideWizardHealthSaveFailed,
+            GuideWizardAnalysisChoiceHelp,
+            GuideWizardAnalysisOverride,
+            GuideWizardDataImportOverride,
+            GuideWizardPersonalEnable,
+            GuideWizardPersonalDisable,
+            GuideWizardPersonalDisabled,
+            GuideWizardAiConfigure,
+            GuideWizardAiConfiguredHome,
+            GuideWizardAiPendingHome,
+            GuideWizardAiCheck,
+            GuideWizardAiDisabledNext,
+            GuideWizardAiSummarySaved,
+            GuideWizardAiSummaryPartial,
+            GuideWizardAiSummaryUnconfirmed,
+            GuideWizardAiSummaryFailed,
+        );
+    };
+}

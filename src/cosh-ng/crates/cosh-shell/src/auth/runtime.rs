@@ -137,6 +137,9 @@ pub(crate) struct AuthState {
     /// Guide-only: the user asked to leave management.
     pub(crate) exit_requested: bool,
     pub(crate) outcome: crate::runtime::guide::result::TaskOutcome,
+    pub(super) guide_drafts: HashMap<usize, String>,
+    pub(super) guide_edited: bool,
+    pub(super) guide_submitted: bool,
 }
 
 impl AuthState {
@@ -199,6 +202,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     let core_state = match load_core_auth_state(cosh_core) {
         Ok(state) => state,
         Err(message) => {
+            super::standalone::record_open_failure(state, &message);
             let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
             renderer.write_notice_panel(
                 output,
@@ -394,6 +398,7 @@ pub(super) fn handle_auth_input<W: std::io::Write>(
         return Ok(false);
     }
     if auth.phase == AuthPhase::FillingField {
+        state.auth.guide_edited |= state.auth.host.is_guide() && auth.field_input != text;
         record_field_edit(auth, text);
         clear_active_auth_panel(state, output)?;
         render_current_auth_panel(state, output)?;
@@ -619,6 +624,9 @@ pub(super) fn handle_auth_answer<W: std::io::Write>(
             }
             auth.current_field = auth.editable_field_at_or_after(auth.current_field + 1);
             auth.load_current_field_input();
+            if let Some(draft) = state.auth.guide_drafts.remove(&auth.current_field) {
+                auth.field_input = draft;
+            }
             render_or_submit_auth(adapter, state, output)?;
             Ok(true)
         }
@@ -747,14 +755,23 @@ pub(super) fn send_auth_response<W: std::io::Write>(
     };
 
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    let validation_body = auth_validation_body(
-        &provider.id,
-        response.values.get("auth_source").map(String::as_str),
-    );
+    let source = response.values.get("auth_source").map(String::as_str);
+    let validation_body = if state.auth.host.is_guide() {
+        super::prompt::guide_validation_body(state.i18n(), &provider.id, source)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    } else {
+        super::prompt::auth_validation_body(&provider.id, source)
+    };
     renderer.write_notice_panel(
         output,
         NoticePanelModel {
-            title: "Validating configuration...",
+            title: if state.auth.host.is_guide() {
+                state.i18n().t(crate::i18n::MessageId::GuideAuthPending)
+            } else {
+                "Validating configuration..."
+            },
             body: validation_body,
             footer: None,
         },
@@ -776,10 +793,16 @@ pub(super) fn send_auth_response<W: std::io::Write>(
     } else {
         match auth.backend {
             AuthBackend::CoreRegistry => {
+                state.auth.guide_submitted |= state.auth.host.is_guide();
                 let adapter = adapter.ok_or_else(|| {
                     std::io::Error::other("missing adapter for cosh-core auth registry")
                 })?;
-                if let Err(error) = core_auth_configure(adapter, &response) {
+                let result = core_auth_configure(adapter, &response);
+                if result.is_ok() || result.as_ref().is_err_and(|error| error.provider_updated) {
+                    state.auth.guide_drafts.clear();
+                    state.auth.guide_edited = false;
+                }
+                if let Err(error) = result {
                     if error.provider_updated {
                         state.auth.completed_ids.insert(auth.id);
                         return super::completion::finish_partial_configuration(
@@ -798,6 +821,11 @@ pub(super) fn send_auth_response<W: std::io::Write>(
                         error.code.as_deref(),
                         error.focus_field(&provider_template_id),
                     );
+                    let fields = &auth.current_provider().fields;
+                    state
+                        .auth
+                        .guide_drafts
+                        .retain(|index, _| fields.get(*index).is_some_and(|field| !field.secret));
                     state.auth.state = Some(auth);
                     renderer.write_notice_panel(
                         output,
@@ -850,21 +878,6 @@ fn restore_after_configure_failure(
     restore_after_failed_submission_at(auth, field_name);
 }
 
-pub(super) fn auth_validation_body(provider_id: &str, auth_source: Option<&str>) -> Vec<String> {
-    let mut body = vec!["Checking endpoint, credentials, and model.".to_string()];
-    if matches!(
-        provider_id,
-        "dashscope" | "openai_compat" | "coding_plan" | "token_plan"
-    ) || (provider_id == "aliyun" && auth_source != Some("ecs_ram_role"))
-    {
-        body.push(
-            "If read-only model validation is unavailable or cannot verify credentials, validation may make a minimal chat request (max_tokens=1) that consumes a very small amount of quota or incurs a very small charge."
-                .to_string(),
-        );
-    }
-    body
-}
-
 /// Reports whether `event` carries the capture id the auth panel is currently listening on.
 ///
 /// The scoped id is what keeps a keystroke left over from an earlier field from acting on
@@ -895,17 +908,18 @@ pub(super) fn handle_auth_back<W: std::io::Write>(
             .as_ref()
             .is_some_and(|a| a.phase != AuthPhase::FillingField);
         if ecs_page && state.auth.ecs.is_some() {
-            state.auth.menu_reload = true;
-            if !state
+            if state
                 .auth
                 .ecs
                 .as_ref()
                 .is_some_and(super::ecs_poll::EcsFlow::is_saving)
             {
-                super::ecs_poll::shutdown(state);
-                clear_active_auth_panel(state, output)?;
-                state.auth.state = None;
+                return Ok(());
             }
+            state.auth.menu_reload = true;
+            super::ecs_poll::shutdown(state);
+            clear_active_auth_panel(state, output)?;
+            state.auth.state = None;
             return Ok(());
         }
     }
@@ -914,6 +928,11 @@ pub(super) fn handle_auth_back<W: std::io::Write>(
     };
     match step_back_for_host(auth, state.auth.host) {
         BackOutcome::Redraw => {
+            if auth.phase == AuthPhase::FillingField {
+                if let Some(draft) = state.auth.guide_drafts.remove(&auth.current_field) {
+                    auth.field_input = draft;
+                }
+            }
             clear_active_auth_panel(state, output)?;
             render_current_auth_panel(state, output)
         }

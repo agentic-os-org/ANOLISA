@@ -447,7 +447,24 @@ mod tests {
             MessageId::ApprovalCommandOutputUnredacted as usize
         );
         assert_eq!(
-            MessageId::ApprovalOutputScrollback as usize,
+            MessageId::GuideWizardLoginSummaryConflict as usize + 1,
+            MessageId::GuideWizardLoginSummaryRecoveryMissing as usize
+        );
+        assert_eq!(
+            MessageId::GuideAuthFieldKeys as usize + 1,
+            MessageId::GuideWizardLoginPrivilegeDenied as usize
+        );
+        assert_eq!(MessageId::ApprovalOutputScrollback as usize, 1191);
+        assert_eq!(
+            MessageId::ApprovalOutputScrollback as usize + 1,
+            MessageId::GuideWizardAskHint as usize
+        );
+        assert_eq!(
+            MessageId::GuideWizardAiSummaryFailed as usize + 1,
+            MessageId::GuideAuthPending as usize
+        );
+        assert_eq!(
+            MessageId::GuideAuthValidationUsage as usize,
             MessageId::ALL.len() - 1
         );
     }
@@ -502,7 +519,7 @@ mod tests {
         assert!(zh_field.contains("提交"), "{zh_field}");
         assert!(!zh_field.contains("发送"), "{zh_field}");
         let en_field = en.t(MessageId::GuideAuthFieldKeys);
-        assert!(en_field.contains("Type the value"), "{en_field}");
+        assert!(en_field.starts_with("Type "), "{en_field}");
         assert!(en_field.contains("Enter submit"), "{en_field}");
         assert!(!en_field.contains("send"), "{en_field}");
     }

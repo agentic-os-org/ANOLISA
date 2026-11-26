@@ -24,14 +24,14 @@ cases:
       - {id: narrow-home, type: wait_quiet, quiet_ms: 2500, timeout_ms: 30000}
       - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {type: wait_for, text: "Return to terminal to ask", timeout_ms: 45000}
       - {id: narrow-ai-page, type: wait_quiet, quiet_ms: 800, timeout_ms: 15000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 800, timeout_ms: 10000}
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["AI service", "See how to ask"]
+      contains: ["AI service", "Return to terminal to ask"]
       not_contains: ["Not configured", "Terminal too small"]
     evidence:
       points:
@@ -55,7 +55,7 @@ cases:
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["AI 服务", "查看提问方式"]
+      contains: ["AI 服务", "回终端去提问"]
       not_contains: ["未配置", "终端过小"]
     evidence:
       points:
@@ -103,6 +103,7 @@ cases:
         - "当前 AI"
         - "零配置自动使用：开启"
         - "免配置自动接入，可直接提问"
+        - "首次使用时验证接入"
       not_contains:
         - "未配置"
         - "待确认"
@@ -139,7 +140,7 @@ cases:
       - type: key
         name: enter
       - type: wait_for
-        text: "See how to ask"
+        text: "Return to terminal to ask"
         timeout_ms: 45000
       - id: ai-page-settled
         type: wait_quiet
@@ -158,6 +159,7 @@ cases:
         - "AI service"
         - "Zero-config auto use"
         - "Zero-config automatic access; ask directly"
+        - "access is verified on first use"
       not_contains:
         - "Not configured"
         - "unconfirmed"
@@ -264,12 +266,8 @@ cases:
         quiet_ms: 800
         timeout_ms: 15000
       - type: key
-        name: esc
-      - type: wait_quiet
-        quiet_ms: 500
-        timeout_ms: 10000
-      - type: key
-        name: esc
+        name: enter
+      - {type: wait_for, text: "已在 Cosh 中？直接输入", timeout_ms: 30000}
       - type: wait_for
         text: "GUIDE_RETURN_PARENT"
         occurrence: "+1"
@@ -295,7 +293,7 @@ cases:
       status: 0
       contains:
         - "快速使用指南"
-        - "磁盘不足时先检查什么？"
+        - "磁盘满了怎么查？"
         - "GUIDESTART10166"
         - "GUIDE_RETURN_PARENT"
       not_contains: ["等待开通", "Waiting for activation", "ModelNotConfigured", "EcsTrialDisabled"]
@@ -314,7 +312,7 @@ cases:
           layout_sensitive: true
           required_types: [screenshot]
   - id: GUIDE-AI-PAGE-ASK-EN
-    title: The primary AI page choice shows how to ask and keeps management secondary
+    title: The primary AI page choice returns to Bash with an example and keeps management secondary
     tags: [shell, guide, ai-state, issue-10166, ecs-real, scripted-pty-downgraded]
     terminal_cols: 80
     command:
@@ -343,7 +341,7 @@ cases:
       - type: key
         name: enter
       - type: wait_for
-        text: "See how to ask"
+        text: "Return to terminal to ask"
         timeout_ms: 45000
       - id: ai-page-primary-choice
         type: wait_quiet
@@ -352,24 +350,12 @@ cases:
       - type: key
         name: enter
       - type: wait_for
-        text: "cosh --ask"
+        text: "In Bash or zsh, run: cosh --ask"
         timeout_ms: 30000
-      - id: ai-how-to-page
+      - id: terminal-ask-example
         type: wait_quiet
         quiet_ms: 800
         timeout_ms: 15000
-      - type: key
-        name: esc
-      - type: wait_quiet
-        quiet_ms: 500
-        timeout_ms: 10000
-      - type: key
-        name: esc
-      - type: wait_quiet
-        quiet_ms: 500
-        timeout_ms: 10000
-      - type: key
-        name: esc
       - type: wait_for
         text: "AI_PAGE_RETURN_PARENT"
         occurrence: "+1"
@@ -394,8 +380,8 @@ cases:
     expect:
       status: 0
       contains:
-        - "See how to ask"
-        - "Quick start guide"
+        - "Return to terminal to ask"
+        - "Manage AI services"
         - "Why is my disk full?"
         - "AIPAGE10166"
         - "AI_PAGE_RETURN_PARENT"
@@ -406,8 +392,8 @@ cases:
           trigger_event: ai-page-primary-choice
           layout_sensitive: true
           required_types: [screenshot]
-        - id: ai-how-to-page
-          trigger_event: ai-how-to-page
+        - id: terminal-ask-example
+          trigger_event: terminal-ask-example
           layout_sensitive: true
           required_types: [screenshot]
         - id: ai-page-answer
@@ -444,8 +430,8 @@ cases:
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["Automatic ECS trial use is off", "READONLY_STATE_OK"]
-      not_contains: ["Not configured", "Unable to confirm AI access right now"]
+      contains: ["Automatic ECS access is off", "READONLY_STATE_OK"]
+      not_contains: ["Not configured", "Unable to read AI access status", "Return to terminal to ask"]
     evidence:
       points:
         - {id: disabled-state, trigger_event: disabled-state, layout_sensitive: true, required_types: [screenshot]}
@@ -479,8 +465,8 @@ cases:
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["Unable to confirm AI access right now", "READONLY_STATE_OK"]
-      not_contains: ["Automatic ECS trial use is off", "Not configured"]
+      contains: ["Unable to read AI access status", "READONLY_STATE_OK"]
+      not_contains: ["Automatic ECS access is off", "Not configured"]
     evidence:
       points:
         - {id: preference-error, trigger_event: preference-error, layout_sensitive: true, required_types: [screenshot]}
@@ -507,7 +493,7 @@ cases:
       - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
       - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {type: wait_for, text: "Return to terminal to ask", timeout_ms: 45000}
       - {id: explicit-provider, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
@@ -550,7 +536,7 @@ cases:
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["chosen-service", "Check configuration", "No automatic trial fallback.", "READONLY_STATE_OK"]
+      contains: ["chosen-service", "Configuration incomplete", "Check configuration", "No automatic trial fallback.", "READONLY_STATE_OK"]
       not_contains: ["Zero-config automatic access; ask directly", "Not configured"]
     evidence:
       points:
@@ -564,22 +550,22 @@ cases:
       - {type: wait_quiet, quiet_ms: 2500, timeout_ms: 15000}
       - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "See how to ask", timeout_ms: 45000}
+      - {type: wait_for, text: "Return to terminal to ask", timeout_ms: 45000}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: bytes, hex: "1b5b42"}
       - {type: key, name: enter}
       - {type: wait_for, text: "Provider Management", timeout_ms: 30000}
       - {id: real-provider-management, type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: key, name: esc}
-      - {type: wait_for, text: "This action was cancelled", timeout_ms: 30000}
+      - {type: wait_for, text: "Current AI service:", occurrence: "+1", timeout_ms: 30000}
       - {id: refreshed-guide, type: wait_quiet, quiet_ms: 2000, timeout_ms: 30000}
       - {type: key, name: esc}
       - {type: wait_quiet, quiet_ms: 500, timeout_ms: 10000}
       - {type: bytes, text: q}
     expect:
       status: 0
-      contains: ["Provider Management", "This action was cancelled", "Zero-config automatic access; ask directly"]
-      not_contains: ["Provider switched", "Auth configured", "Agent reply", "Waiting for activation"]
+      contains: ["Provider Management", "Zero-config automatic access; ask directly"]
+      not_contains: ["Cancelled", "No configuration changed", "Provider switched", "Auth configured", "Agent reply", "Waiting for activation"]
     evidence:
       points:
         - {id: real-provider-management, trigger_event: real-provider-management, layout_sensitive: true, required_types: [screenshot]}

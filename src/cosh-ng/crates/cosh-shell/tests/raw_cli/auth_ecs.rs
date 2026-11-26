@@ -1,6 +1,6 @@
 use super::*;
 
-const CORE: &str = r#"#!/bin/sh
+pub(super) const CORE: &str = r#"#!/bin/sh
 if [ "$1" = --registry ]; then
     read -r request
     printf '%s\n' "$request" >> "$AUTH_REGISTRY_LOG"
@@ -8,11 +8,13 @@ if [ "$1" = --registry ]; then
     request_id=${request_id%%\"*}
     case "$request" in
         *'"action":"state"'*)
-            data='{"templates":[{"id":"aliyun","label":"Aliyun Authentication","fields":[{"name":"access_key_id","label":"Access Key ID","secret":true,"required":true}]}],"saved_providers":[]}' ;;
+            data='{"templates":[{"id":"aliyun","label":"Aliyun Authentication","fields":[{"name":"access_key_id","label":"Access Key ID","secret":true,"required":true}]}],"saved_providers":[],"config_write_guard":"v1"}' ;;
         *'"action":"prepare"'*)
             data='{"mode":"ecs_ram_role","instance_id":"i-fixture","console_url":"https://example.invalid/authorize","values":{"auth_source":"ecs_ram_role"}}' ;;
         *'"action":"verify"'*)
-            if [ "$AUTH_WAIT_ONCE" = 1 ] && [ ! -f "$AUTH_READY_MARK" ]; then
+            if [ "$AUTH_WAIT_ONCE" = always ]; then
+                data='{"status":"not_ready","reason":"role_missing"}'
+            elif [ "$AUTH_WAIT_ONCE" = 1 ] && [ ! -f "$AUTH_READY_MARK" ]; then
                 : > "$AUTH_READY_MARK"
                 data='{"status":"not_ready","reason":"role_missing"}'
             else

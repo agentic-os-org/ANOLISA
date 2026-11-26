@@ -133,23 +133,12 @@ impl Session {
                 self.i18n.t(MessageId::LoginCurrentShell),
                 status.current_shell
             )),
-            WizardRow::Text(original),
         ];
         if status.conflict {
             rows.push(WizardRow::Text(
                 self.i18n.t(MessageId::LoginStateConflict).to_string(),
             ));
         }
-        rows.push(WizardRow::Text(format!(
-            "{}{}",
-            self.i18n.t(MessageId::LoginTransaction),
-            transaction
-        )));
-        rows.push(WizardRow::Text(format!(
-            "{}{}",
-            self.i18n.t(MessageId::LoginManaged),
-            managed
-        )));
         rows.push(WizardRow::Blank);
         if self.blocked_writes.contains(&ActionKind::LoginShell) {
             rows.push(WizardRow::Text(
@@ -172,15 +161,20 @@ impl Session {
             rows.push(WizardRow::Text(
                 self.i18n.t(MessageId::GuideWizardLoginSudoNote).to_string(),
             ));
-            rows.push(WizardRow::Text(
-                self.i18n
-                    .t(MessageId::GuideWizardLoginSudoConfirmNote)
-                    .to_string(),
-            ));
         }
         rows.push(WizardRow::Text(
             self.i18n.t(MessageId::LoginNewLoginsOnly).to_string(),
         ));
+        rows.push(WizardRow::Blank);
+        rows.push(WizardRow::Text(original));
+        rows.push(WizardRow::Text(format!(
+            "{}{transaction}",
+            self.i18n.t(MessageId::LoginTransaction)
+        )));
+        rows.push(WizardRow::Text(format!(
+            "{}{managed}",
+            self.i18n.t(MessageId::LoginManaged)
+        )));
         if self.login_guidance {
             rows.push(WizardRow::Blank);
             rows.push(WizardRow::Text(
@@ -203,30 +197,53 @@ impl Session {
     /// Handoff text shown while the terminal is plain: sudo owns the password
     /// prompt, and the wizard only returns after the supervised change ends.
     pub(crate) fn login_confirmation_rows(&self, restore: bool) -> Vec<WizardRow> {
-        let mut lines = self.login_handoff_lines(if restore { "restore" } else { "set" });
-        lines.truncate(3);
-        if let Ok(status) = &self.snapshot.login {
-            lines.push(format!(
+        let Ok(status) = &self.snapshot.login else {
+            return Vec::new();
+        };
+        let target = if restore {
+            status.original_bash.as_deref().unwrap_or_default()
+        } else {
+            COSH_PATH
+        };
+        let uid = status.uid.to_string();
+        vec![
+            WizardRow::Text(self.i18n.format(
+                MessageId::GuideWizardSudoHandoffTarget,
+                &[("user", &status.username), ("uid", &uid)],
+            )),
+            WizardRow::Text(format!(
                 "{}{}",
                 self.i18n.t(MessageId::LoginCurrentShell),
                 status.current_shell
-            ));
-        }
-        lines.push(self.i18n.t(MessageId::LoginNewLoginsOnly).to_string());
-        lines.push(
-            self.i18n
-                .t(MessageId::GuideWizardLoginSudoConfirmNote)
-                .to_string(),
-        );
-        let mut rows: Vec<_> = lines.into_iter().map(WizardRow::Text).collect();
-        rows.push(WizardRow::Blank);
-        for label in [MessageId::GuideWizardConfirm, MessageId::GuideWizardCancel] {
-            rows.push(WizardRow::Choice {
-                label: self.i18n.t(label).to_string(),
+            )),
+            WizardRow::Text(
+                self.i18n
+                    .format(MessageId::GuideWizardLoginTargetLine, &[("target", target)]),
+            ),
+            WizardRow::Blank,
+            WizardRow::Text(self.i18n.t(MessageId::LoginNewLoginsOnly).to_string()),
+            WizardRow::Text(
+                self.i18n
+                    .t(MessageId::GuideWizardLoginSudoConfirmNote)
+                    .to_string(),
+            ),
+            WizardRow::Blank,
+            WizardRow::Choice {
+                label: if restore {
+                    self.i18n.format(
+                        MessageId::GuideWizardLoginRestoreAction,
+                        &[("target", target)],
+                    )
+                } else {
+                    self.i18n.t(MessageId::GuideWizardConfirmSet).to_string()
+                },
                 value: String::new(),
-            });
-        }
-        rows
+            },
+            WizardRow::Choice {
+                label: self.i18n.t(MessageId::GuideWizardCancel).to_string(),
+                value: String::new(),
+            },
+        ]
     }
 
     pub(crate) fn login_handoff_lines(&self, action: &str) -> Vec<String> {
@@ -360,10 +377,14 @@ impl Session {
                 );
                 format!(
                     "{} {}",
-                    self.i18n.format(
-                        MessageId::GuideWizardLoginVerified,
-                        &[("value", &status.current_shell)],
-                    ),
+                    if action == "set" {
+                        self.i18n.t(MessageId::GuideWizardLoginSetDone).to_string()
+                    } else {
+                        self.i18n.format(
+                            MessageId::GuideWizardLoginVerified,
+                            &[("value", &status.current_shell)],
+                        )
+                    },
                     self.i18n.t(MessageId::LoginNewLoginsOnly)
                 )
             }

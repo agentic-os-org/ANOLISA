@@ -33,35 +33,35 @@ cases:
     input:
       - {type: wait_for, text: "Enter", timeout_ms: 15000}
       - {type: key, name: enter}
-      - {type: wait_for, text: "Ask from Bash when you need it", timeout_ms: 10000}
+      - {type: wait_for, text: "Ask from Bash or zsh", timeout_ms: 10000}
       - {type: wait_for, text: "Why is my disk full?", timeout_ms: 10000}
       - {id: quick-guide, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
       - {type: key, name: esc}
       - {type: wait_for, text: "Quick start guide", timeout_ms: 10000}
       - {type: bytes, hex: "1b5b421b5b42"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "See how to ask", timeout_ms: 15000}
+      - {type: wait_for, text: "Manage AI services", timeout_ms: 15000}
       - {type: bytes, hex: "1b5b42"}
       - {type: key, name: enter}
       - {type: wait_for, text: "Provider Management", timeout_ms: 15000}
       - {type: bytes, hex: "1b5b411b5b41"}
       - {type: key, name: enter}
-      - {type: wait_for, text: "Authentication Required", timeout_ms: 15000}
+      - {type: wait_for, text: "Choose an AI service to add", timeout_ms: 15000}
       - {id: ai-template-ready, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
       - {type: key, name: esc}
       - {type: wait_for, text: "Provider Management", timeout_ms: 10000}
       - {id: ai-template-esc-management-add, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
       - {type: bytes, hex: "04"}
-      - {type: wait_for, text: "No configuration changed.", timeout_ms: 10000}
+      - {type: wait_for, text: "Manage AI services", occurrence: "+1", timeout_ms: 10000}
       - {id: ai-ctrl-d-restores-source, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
-      - {type: key, name: esc}
+      - {type: bytes, text: h}
       - {type: wait_for, text: "Quick start guide", timeout_ms: 10000}
       - {id: ai-home-focus-restored, type: wait_quiet, quiet_ms: 600, timeout_ms: 10000}
       - {type: key, name: esc}
     expect:
       status: 0
-      contains: ["Ask from Bash when you need it", "Why is my disk full?", "Authentication Required", "Provider Management", "Add AI service", "No configuration changed.", "ACCOUNT_AND_CONFIG_UNCHANGED"]
-      not_contains: ["Checking endpoint, credentials, and model", "credentials saved", "panicked", "Traceback"]
+      contains: ["Ask from Bash or zsh", "Why is my disk full?", "Choose an AI service to add", "Provider Management", "Add AI service", "ACCOUNT_AND_CONFIG_UNCHANGED"]
+      not_contains: ["Checking the result", "credentials saved", "No configuration changed", "Cancelled", "panicked", "Traceback"]
     evidence:
       points:
         - {id: quick-guide, trigger_event: quick-guide, layout_sensitive: true, required_types: [screenshot]}

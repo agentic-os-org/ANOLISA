@@ -7,7 +7,7 @@ use crate::config::{write_user_language_config_checked, Language, LanguageSettin
 use crate::i18n::{I18n, MessageId};
 
 use super::session::Session;
-use super::status::{self, Reading};
+use super::status::{self, Reading, Source};
 
 impl Session {
     pub(super) fn save_language(&mut self, setting: LanguageSetting) {
@@ -22,8 +22,17 @@ impl Session {
                 self.reload();
                 self.i18n = I18n::new(self.snapshot.language.effective);
                 let message = self.i18n.format(
-                    MessageId::GuideWizardSavedLine,
-                    &[("value", self.language_label_setting(setting))],
+                    if self.snapshot.language.source == Source::Env {
+                        MessageId::GuideWizardLanguageOverride
+                    } else if setting == LanguageSetting::Auto {
+                        MessageId::GuideWizardLanguageFollowed
+                    } else {
+                        MessageId::GuideWizardLanguageSaved
+                    },
+                    &[
+                        ("saved", self.language_label_setting(setting)),
+                        ("effective", self.language_label(self.language())),
+                    ],
                 );
                 self.select_choice(choice);
                 self.set_message(message);
@@ -44,20 +53,16 @@ impl Session {
         };
         match store.set_banner(enabled) {
             Ok(_) => {
-                self.message = Some(format!(
-                    "{}{}",
-                    self.i18n.format(
-                        MessageId::GuideWizardSavedLine,
-                        &[("value", self.toggle_label(enabled))],
-                    ),
-                    self.i18n.t(MessageId::GuideWizardSavedNextLogin),
+                self.message = Some(self.i18n.format(
+                    MessageId::GuideWizardHealthSaved,
+                    &[("value", self.toggle_label(enabled))],
                 ));
                 self.reload();
             }
             Err(error) => {
                 status::warn_failure("save_health", "set_banner");
                 self.message = Some(self.i18n.format(
-                    MessageId::GuideWizardSaveFailed,
+                    MessageId::GuideWizardHealthSaveFailed,
                     &[("error", &cli::error_reason(self.i18n, &error))],
                 ));
             }

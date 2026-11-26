@@ -8,17 +8,22 @@ use std::io::{self, Write};
 
 use crate::adapter::AdapterInstance;
 use crate::config::Language;
-use crate::raw_input::{AuthCardInput, RawInputEvent};
-use crate::runtime::guide::input::{Batch, GuideInput};
+use crate::raw_input::{AuthCardInput, AuthNavigation, RawInputEvent};
+use crate::runtime::guide::input::{Batch, GuideInput, Input};
 use crate::runtime::guide::result::{EndReason, TaskOutcome};
-use crate::runtime::prelude::{NoticePanelModel, RatatuiInlineRenderer, ShellEvent};
+use crate::runtime::prelude::{MessageId, NoticePanelModel, RatatuiInlineRenderer, ShellEvent};
 use crate::runtime::state::InlineState;
 use crate::types::ShellEventKind;
+use crate::ui::guide::Screen;
 use nix::libc;
+use ratatui::crossterm::event::KeyCode;
 
 use super::card_actions::render_auth_card_actions;
 use super::host::AuthHost;
 use super::runtime::{cancel_auth_panel, has_auth_operation, trigger_auth_from_slash};
+
+mod confirmation;
+use confirmation::Answer;
 
 pub(crate) struct TaskExit {
     pub(crate) outcome: TaskOutcome,
@@ -26,10 +31,12 @@ pub(crate) struct TaskExit {
     pub(crate) terminal_lost: bool,
     /// A termination signal arrived; the whole wizard exits after cleanup.
     pub(crate) terminate: Option<i32>,
+    pub(crate) destination: AuthNavigation,
 }
 
 pub(crate) fn run(
     input: &mut GuideInput,
+    screen: &mut Screen,
     adapter: &AdapterInstance,
     language: Language,
     blocked_writes: std::collections::BTreeSet<crate::runtime::guide::result::ActionKind>,
@@ -41,7 +48,14 @@ pub(crate) fn run(
     // never overlaps the page the user was reading, and never touch the caller's Bash screen.
     let _ = output.write_all(b"\x1b[H\x1b[2J");
     let _ = output.flush();
-    let exit = run_loop(input, adapter, language, blocked_writes, &mut output);
+    let exit = run_loop(
+        input,
+        screen,
+        adapter,
+        language,
+        blocked_writes,
+        &mut output,
+    );
     let _ = output.flush();
     exit
 }
@@ -54,11 +68,21 @@ fn failed(message: String) -> TaskExit {
         outcome,
         terminal_lost: false,
         terminate: None,
+        destination: AuthNavigation::Overview,
+    }
+}
+
+pub(super) fn record_open_failure(state: &mut InlineState, message: &str) {
+    if state.auth.host.is_guide() {
+        state.auth.outcome.reason = EndReason::Failed;
+        state.auth.outcome.error = Some(message.to_string());
+        state.auth.exit_requested = true;
     }
 }
 
 fn run_loop<W: Write>(
     input: &mut GuideInput,
+    screen: &mut Screen,
     adapter: &AdapterInstance,
     language: Language,
     blocked_writes: std::collections::BTreeSet<crate::runtime::guide::result::ActionKind>,
@@ -76,13 +100,47 @@ fn run_loop<W: Write>(
     let mut event_index = 0usize;
     let mut terminal_lost = false;
     let mut terminate = None;
+    let mut destination = AuthNavigation::Overview;
+    let mut undersized = false;
 
     if let Err(error) = trigger_auth_from_slash(adapter, &mut state, output) {
         return failed(format!("auth open: {error}"));
     }
 
-    loop {
-        if input.size_changed() && state.auth.state.is_some() {
+    'task: loop {
+        let small = screen.too_small();
+        if small && !submission_pending(&state) {
+            if !undersized {
+                undersized = true;
+                let _ = write!(
+                    output,
+                    "\x1b[H\x1b[2J{}\n{}\n",
+                    state.i18n().t(MessageId::GuideWizardTooSmall),
+                    state.i18n().t(MessageId::GuideWizardTooSmallHint)
+                );
+                let _ = output.flush();
+                card.reset();
+            }
+            if let Some(signal) = crate::runtime::terminal::take_guide_signal() {
+                terminate = Some(signal);
+                state.auth.outcome.reason = EndReason::Interrupted;
+                break;
+            }
+            match input.next() {
+                Input::Lost => {
+                    terminal_lost = true;
+                    state.auth.outcome.reason = EndReason::Interrupted;
+                    break;
+                }
+                Input::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | 'Q')) => {
+                    destination = AuthNavigation::Quit;
+                    state.auth.exit_requested = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        if (input.size_changed() || std::mem::take(&mut undersized)) && state.auth.state.is_some() {
             // Geometry changed under us: the old panel height no longer describes the screen,
             // so repaint the whole hosted screen instead of erasing rows at stale offsets.
             let _ = output.write_all(b"\x1b[H\x1b[2J");
@@ -146,6 +204,8 @@ fn run_loop<W: Write>(
             }
             state.auth.menu_reload = false;
             state.auth.state = None;
+            state.auth.guide_drafts.clear();
+            state.auth.guide_edited = false;
             state.auth.handled_card_events.clear();
             card.reset();
             if let Err(error) = trigger_auth_from_slash(adapter, &mut state, output) {
@@ -163,6 +223,7 @@ fn run_loop<W: Write>(
                 break;
             }
         }
+        let was_pending = submission_pending(&state);
         if let Err(error) = crate::auth::ecs_poll::poll(adapter, &mut state, output)
             .and_then(|()| crate::auth::trial::poll(adapter, &mut state, output))
         {
@@ -173,37 +234,81 @@ fn run_loop<W: Write>(
         if state.auth.exit_requested {
             break;
         }
-        match input.read_raw() {
-            Batch::Lost => {
-                terminal_lost = true;
-                state.auth.outcome.reason = EndReason::Interrupted;
+        if was_pending && !submission_pending(&state) {
+            card.reset();
+            if let Err(error) = input.discard_auth_submission_input() {
+                state.auth.outcome.reason = EndReason::Failed;
+                state.auth.outcome.error = Some(format!("auth input: {error}"));
                 break;
             }
-            Batch::Idle => {}
-            Batch::Bytes(bytes) => {
-                if bytes.contains(&0x03) || bytes.contains(&0x04) {
-                    handle_waiting_input(&mut state, &bytes);
-                    continue;
+        }
+        let batch = input.read_raw();
+        if matches!(batch, Batch::Lost) {
+            terminal_lost = true;
+            state.auth.outcome.reason = EndReason::Interrupted;
+            break;
+        }
+        if submission_pending(&state) {
+            card.reset();
+            continue;
+        }
+        let Some(capture) = crate::auth::runtime::pending_auth_capture(&state) else {
+            if let Batch::Bytes(bytes) = batch {
+                handle_waiting_input(&mut state, &bytes);
+            }
+            continue;
+        };
+        let events = match batch {
+            Batch::Lost => unreachable!(),
+            Batch::Idle => card.idle(&capture).into_iter().collect(),
+            Batch::Bytes(bytes) => card.consume(&capture, &bytes),
+        };
+        for event in events {
+            let result = confirmation::route(
+                &mut state,
+                adapter,
+                screen,
+                input,
+                output,
+                event,
+                &mut event_index,
+            );
+            match result {
+                Ok(Some(Answer::Home)) => {
+                    destination = AuthNavigation::Home;
+                    state.auth.exit_requested = true;
+                    break 'task;
                 }
-                let Some(capture) = crate::auth::runtime::pending_auth_capture(&state) else {
-                    // No card is armed (menu preparing, for example). Ctrl-C and
-                    // Ctrl-D are bytes in raw mode, so they must still work.
-                    handle_waiting_input(&mut state, &bytes);
-                    continue;
-                };
-                let events = card.consume(&capture, &bytes);
-                let shell_events = auth_events(&events, &mut event_index);
-                if shell_events.is_empty() {
-                    continue;
+                Ok(Some(Answer::Quit)) => {
+                    destination = AuthNavigation::Quit;
+                    state.auth.exit_requested = true;
+                    break 'task;
                 }
-                let base = event_index;
-                if let Err(error) =
-                    render_auth_card_actions(&shell_events, adapter, &mut state, output, base)
-                {
+                Ok(Some(Answer::Signal(signal))) => {
+                    terminate = Some(signal);
+                    state.auth.outcome.reason = EndReason::Interrupted;
+                    break 'task;
+                }
+                Ok(Some(Answer::Lost)) => {
+                    terminal_lost = true;
+                    state.auth.outcome.reason = EndReason::Interrupted;
+                    break 'task;
+                }
+                Err(error) => {
                     state.auth.outcome.reason = EndReason::Failed;
                     state.auth.outcome.error = Some(format!("auth action: {error}"));
-                    break;
+                    break 'task;
                 }
+                _ => {}
+            }
+            if std::mem::take(&mut state.auth.guide_submitted) {
+                card.reset();
+                if let Err(error) = input.discard_auth_submission_input() {
+                    state.auth.outcome.reason = EndReason::Failed;
+                    state.auth.outcome.error = Some(format!("auth input: {error}"));
+                    break 'task;
+                }
+                break;
             }
         }
     }
@@ -213,15 +318,45 @@ fn run_loop<W: Write>(
         outcome: std::mem::take(&mut state.auth.outcome),
         terminal_lost,
         terminate,
+        destination,
     }
 }
 
+fn submission_pending(state: &InlineState) -> bool {
+    state
+        .auth
+        .ecs
+        .as_ref()
+        .is_some_and(super::ecs_poll::EcsFlow::is_saving)
+        || state.auth.ecs_trial.preference_job.is_some()
+}
+
+pub(super) fn show_pending_result<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> io::Result<()> {
+    if state.auth.host.is_guide() {
+        state.auth.guide_submitted = true;
+        super::prompt::clear_active_auth_panel(state, output)?;
+        writeln!(output, "{}", state.i18n().t(MessageId::GuideAuthPending))?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
 pub(super) fn handle_waiting_input(state: &mut InlineState, bytes: &[u8]) {
-    if bytes.contains(&0x03) || bytes.contains(&0x04) {
+    if submission_pending(state) {
+        return;
+    }
+    if bytes == [0x03]
+        && state
+            .auth
+            .ecs
+            .as_ref()
+            .is_some_and(super::ecs_poll::EcsFlow::can_cancel)
+    {
         state.auth.outcome.reason = EndReason::Cancelled;
         state.auth.exit_requested = true;
-    } else if bytes == [0x1b] {
-        state.auth.menu_reload = true;
     }
 }
 

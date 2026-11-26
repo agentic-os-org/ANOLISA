@@ -82,7 +82,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::LoginTransactionApplied => "applied",
         MessageId::LoginTransactionRestored => "restored",
         MessageId::LoginTransactionConflict => "conflict",
-        MessageId::LoginNewLoginsOnly => "Changes affect new logins only.",
+        MessageId::LoginNewLoginsOnly => {
+            "Changes affect new logins only. Your current session continues unchanged."
+        }
         MessageId::LoginChangePreview => "User: {user} (UID {uid}): {before} -> {after}. New logins only.",
         MessageId::LoginConfirm => "Continue? [y/N] ",
         MessageId::LoginShellChanged => "Login shell: {shell}. New logins only.",
@@ -95,28 +97,28 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::LoginRecoveryMissing => "No trusted login recovery record; no account change made.",
         MessageId::GuideWizardTitle => "Cosh setup and getting started",
         MessageId::GuideWizardStart => concat!(
-            "### Ask from Bash when you need it\n",
+            "### Ask from Bash or zsh\n",
             "\n",
-            "Press Esc to leave the guide one level at a time. In Bash, run:\n",
+            "In your terminal, run:\n",
             "\n",
             "`cosh --ask 'Why is my disk full?'`\n",
             "\n",
-            "Connect an AI service on first use; you stay in Cosh after the answer,\n",
-            "and `exit` returns to the original Bash.\n",
+            "### Ask from inside Cosh\n",
+            "\n",
+            "Type ‘Why is my disk full?’ and press Enter. On eligible ECS instances,\n",
+            "you can ask without setup; the first question verifies access. Otherwise,\n",
+            "Cosh prompts when configuration is needed.\n",
             "\n",
             "### Use Cosh day to day\n",
             "\n",
-            "`cosh`\n",
+            "In Bash or zsh, run `cosh` to start a session. Run `df -h` to see disk\n",
+            "usage, ask Cosh to explain it, or use `/help` for session commands.\n",
             "\n",
-            "Type commands or plain questions at the prompt, such as `df -h`.\n",
-            "Run `/help` inside Cosh for session commands. Already in Cosh? No need\n",
-            "to start it again.\n",
+            "### Return to your original session\n",
             "\n",
-            "### Set Cosh as the default login shell\n",
-            "\n",
-            "Every login starts Cosh directly, with no extra step. Set it in\n",
-            "\"Default login shell\" on the home page. Only later logins change; a\n",
-            "trusted record can restore Bash. As a login shell, `exit` ends the login.\n",
+            "After the answer you stay in Cosh. If you started it from Bash or zsh,\n",
+            "`exit` returns to that session. If you logged in directly to Cosh,\n",
+            "`exit` ends the login. Use Default login shell to change future logins.\n",
         ),
         MessageId::GuideWizardEntryLanguage => "Language",
         MessageId::GuideWizardEntryAi => "AI service",
@@ -124,7 +126,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardEntryHealth => "Login health summary",
         MessageId::GuideWizardEntryLogin => "Default login shell",
         MessageId::GuideWizardEntryStart => "Quick start guide",
-        MessageId::GuideWizardStartSummary => "Start from Bash",
+        MessageId::GuideWizardStartSummary => "Questions and commands",
         MessageId::GuideWizardLanguageTitle => "Language / 语言",
         MessageId::GuideWizardGuideTipLabel => "Usage tips",
         MessageId::GuideWizardLanguageBody => {
@@ -157,11 +159,21 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardPlainFooter => {
             "Run `cosh guide` in a normal terminal to change settings interactively."
         }
-        MessageId::GuideWizardHomeHint => "↑↓ select  Enter open  Esc quit",
-        MessageId::GuideWizardChoiceHint => "↑↓ select  Enter save  Esc back",
-        MessageId::GuideWizardOpenHint => "↑↓ select  Enter open  Esc back",
-        MessageId::GuideWizardConfirmHint => "↑↓ select  Enter {action}  Esc back",
-        MessageId::GuideWizardScrollHint => "↑↓ scroll  PgUp/PgDn page  Esc back",
+        MessageId::GuideWizardHomeHint => "Enter open  Esc/q quit\n↑↓ select",
+        MessageId::GuideWizardChoiceHint => "Enter save  Esc back\nF2/h home  ↑↓ select  q quit",
+        MessageId::GuideWizardOpenHint => "Enter open  Esc back\nF2/h home  ↑↓ select  q quit",
+        MessageId::GuideWizardConfirmHint => "Enter {action}  Esc back\nF2/h home  ↑↓/PgDn  q quit",
+        MessageId::GuideWizardScrollHint => "Esc back  q quit\nF2/h home  ↑↓/PgUp/PgDn scroll",
+        MessageId::GuideWizardAskHint => "Enter ask in terminal  Esc back\nF2/h home  ↑↓ scroll  q quit",
+        MessageId::GuideWizardAskReceipt => "In Bash or zsh, run: cosh --ask 'Why is my disk full?'\nAlready in Cosh? Type: Why is my disk full?",
+        MessageId::GuideWizardReviewHint => "Scroll down to review before confirm",
+        MessageId::GuideWizardConfirmSet => "set Cosh",
+        MessageId::GuideWizardConfirmRestore => "restore shell",
+        MessageId::GuideWizardConfirmReset => "reset data",
+        MessageId::GuideWizardConfirmClear => "clear data",
+        MessageId::GuideWizardConfirmDisable => "turn off & clear",
+        MessageId::GuideWizardConfirmImport => "allow import",
+        MessageId::GuideWizardCancelKey => "cancel",
         MessageId::GuideWizardSavedLine => "Saved: {value}",
         MessageId::GuideWizardSavedNextLogin => ", applies to the next login.",
         MessageId::GuideWizardSaveFailed => "Save failed: {error}",
@@ -169,23 +181,31 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardLanguageAuto => "Follow system",
         MessageId::GuideWizardLanguageEn => "English",
         MessageId::GuideWizardLanguageZh => "简体中文",
-        MessageId::GuideWizardLanguageEffectiveLine => "Effective: {value}",
+        MessageId::GuideWizardLanguageEffectiveLine => "Interface: {value}",
+        MessageId::GuideWizardLanguagePrefLine => "Saved preference: {value}",
+        MessageId::GuideWizardSavedMarker => "saved",
+        MessageId::GuideWizardLanguageSaved => "Interface language: {effective}.",
+        MessageId::GuideWizardLanguageFollowed => "Saved Follow system. Current interface: {effective}.",
+        MessageId::GuideWizardLanguageOverride => "Saved {saved}. COSH_SHELL_LANG still sets the interface to {effective}.",
         MessageId::GuideWizardLanguageSourceLine => "Source: {value}",
         MessageId::GuideWizardSourceConfig => "user config",
         MessageId::GuideWizardSourceEnv => "environment",
         MessageId::GuideWizardSourceDefault => "default",
         MessageId::GuideWizardLanguageEnvNote => {
-            "COSH_SHELL_LANG overrides the saved value; saving changes new sessions only."
+            "COSH_SHELL_LANG sets the current interface and overrides the saved preference."
         }
         MessageId::GuideWizardLanguageScopeNote => {
-            "Interface language only; AI replies follow the language of your question."
+            "This changes only the interface. You can ask questions in the language you prefer."
         }
         MessageId::GuideWizardGuideTipBody => {
             "Shows Cosh usage tips; not an AI master switch. Manual cosh use stays available."
         }
         MessageId::GuideWizardHealthDetailBody => {
-            "Shows health and resource state at login; affects later logins."
+            "Shows system health and resource usage at login."
         }
+        MessageId::GuideWizardHealthSaved => "Login health summary: {value}. Applies at the next login.",
+        MessageId::GuideWizardHealthReadFailed => "Unable to read login health summary settings.",
+        MessageId::GuideWizardHealthSaveFailed => "Unable to save login health summary: {error}",
         MessageId::GuideWizardAiReadonly => {
             "Ask from your own terminal; access is verified on first use."
         }
@@ -195,20 +215,23 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardLoginFailed => "Unable to read the login shell: {error}",
         MessageId::GuideWizardTooSmall => "Terminal too small for the wizard.",
         MessageId::GuideWizardTooSmallHint => {
-            "Enlarge the terminal, or run cosh guide --plain. Esc quits."
+            "Enlarge to resume, or press Esc or q to quit. For text, run cosh guide --plain."
         }
         MessageId::GuideWizardCurrent => "current",
         MessageId::GuideWizardAiLoading => "Loading…",
-        MessageId::GuideWizardAiAsk => "Start asking questions",
+        MessageId::GuideWizardAiAsk => "Return to terminal to ask",
         MessageId::GuideWizardAiConfigured => "AI access configured",
+        MessageId::GuideWizardAiConfiguredHome => "Configured · unverified",
+        MessageId::GuideWizardAiPendingHome => "No setup; ask directly",
         MessageId::GuideWizardAiUnverified => "Connection unverified",
-        MessageId::GuideWizardAiIncomplete => "Check configuration",
+        MessageId::GuideWizardAiIncomplete => "Configuration incomplete",
         MessageId::GuideWizardAiNoFallback => "No automatic trial fallback.",
-        MessageId::GuideWizardAiUnknown => "Unable to confirm AI access right now",
-        MessageId::GuideWizardAiDisabled => "Automatic ECS trial use is off",
+        MessageId::GuideWizardAiUnknown => "Unable to read AI access status",
+        MessageId::GuideWizardAiDisabled => "Automatic ECS access is off",
+        MessageId::GuideWizardAiDisabledNext => "Re-enable automatic access or choose a configured service in management.",
         MessageId::GuideWizardAiEcs => "ECS zero-config access; verified on first question",
         MessageId::GuideWizardAiPending => "Zero-config automatic access; ask directly",
-        MessageId::GuideWizardAiIdentityFailed => "ECS identity check failed; retry asking",
+        MessageId::GuideWizardAiIdentityFailed => "ECS access could not be confirmed; try asking again",
         MessageId::GuideWizardAiSourceRuntime => "Runtime configuration",
         MessageId::GuideWizardAiUnconfigured => "AI service configuration needed",
         MessageId::GuideWizardAiServiceLine => "Current AI service: {value}",
@@ -219,6 +242,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardAiAutoUseOn => "on",
         MessageId::GuideWizardAiAutoUseOff => "off",
         MessageId::GuideWizardAiManage => "Manage AI services",
+        MessageId::GuideWizardAiConfigure => "Configure an AI service",
+        MessageId::GuideWizardAiCheck => "Check configuration",
         MessageId::GuideWizardTipsAnalysis => "Command analysis",
         MessageId::GuideWizardTipsPersonal => "Personalized prompt recommendations",
         MessageId::GuideWizardTipsData => "Recommendation data & privacy",
@@ -237,14 +262,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "manual pauses recommendations in new sessions but keeps the on preference."
         }
         MessageId::GuideWizardDataImportLine => "Bash history import: {value}",
-        MessageId::GuideWizardDataAllowImport => "Allow import and save",
-        MessageId::GuideWizardDataStopImport => "Stop import and save",
+        MessageId::GuideWizardDataAllowImport => "Allow Bash history import",
+        MessageId::GuideWizardDataStopImport => "Stop future imports",
         MessageId::GuideWizardDataSaveOnPref => "Save on preference",
         MessageId::GuideWizardDataSaveOffPref => "Save off preference",
         MessageId::GuideWizardDataEnvNote => "Effective state is still controlled by the environment.",
         MessageId::GuideWizardDataStopKeepsNote => "Stopping only affects future imports; existing data is kept.",
-        MessageId::GuideWizardDataClear => "Clear data only",
+        MessageId::GuideWizardDataClear => "Clear local recommendation data",
         MessageId::GuideWizardDataReset => "Reset data and turn recommendations off",
+        MessageId::GuideWizardPersonalEnable => "Turn on recommendations",
+        MessageId::GuideWizardPersonalDisable => "Turn off and clear local data",
+        MessageId::GuideWizardPersonalDisabled => "Saved off and cleared local recommendation data. Existing sessions keep their loaded settings.",
+        MessageId::GuideWizardDataImportOverride => "COSH_RECOMMENDATIONS_BASH_HISTORY sets the effective import state to {effective}.",
+        MessageId::GuideWizardAnalysisOverride => "Saved {saved}. COSH_SHELL_ANALYSIS_MODE still selects {effective}.",
+        MessageId::GuideWizardAnalysisChoiceHelp => "Suggest first: review useful failures or diagnostics.\nAnalyze automatically: some high-confidence failures may start AI analysis; otherwise Cosh suggests first.\nManual only: no proactive suggestions, analysis, or recommendations. You can still ask or analyze manually.\nUse /mode analysis to change the current session.",
         MessageId::GuideWizardDataDamaged => "Recommendation data cannot be read.",
         MessageId::GuideWizardDataPrivacy => {
             "## Privacy\n\n- Bash history is not imported by default; enabling needs separate consent. The first sync only reads the tail of history to build a baseline.\n- Activity is kept 7 days, recent profiles 14 days, long-term patterns and evidence snapshots 90 days, subject to capacity limits.\n- A small amount of recent activity may be sent to the current AI service; redaction is best-effort. Clearing locally does not clear provider records."
@@ -260,19 +291,23 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardLoginSet => "Set Cosh as login shell",
         MessageId::GuideWizardLoginRestore => "Restore original login shell",
         MessageId::GuideWizardLoginOther => "View other-user management commands",
-        MessageId::GuideWizardLoginVerified => "Verified: {value}",
+        MessageId::GuideWizardLoginVerified => "Restored the default login shell to {value}.",
+        MessageId::GuideWizardLoginSetDone => "Cosh is now your default login shell.",
+        MessageId::GuideWizardLoginSetTitle => "Make Cosh the default login shell",
+        MessageId::GuideWizardLoginTargetLine => "Change to: {target}",
+        MessageId::GuideWizardLoginRestoreAction => "Restore to {target}",
         MessageId::GuideWizardLoginUnconfirmed => "Change unconfirmed. Read the current state or return; do not submit it again in this guide.",
-        MessageId::GuideWizardLoginSudoNote => "Changes require administrator authorization; the password is entered in the terminal, not the wizard.",
+        MessageId::GuideWizardLoginSudoNote => "Changes require administrator authorization.",
         MessageId::GuideWizardConfigUnreadable => "Unable to read the config file. Edit it manually, then reopen the wizard.",
         MessageId::GuideWizardDataClearConfirm => "Clear local recommendation data? The on/off setting will be kept.",
         MessageId::GuideWizardLoginOtherGuidance => "Other user commands (administrator):",
         MessageId::GuideWizardLoginReread => "Reread login status",
         MessageId::GuideWizardLoginRereadDone => "Login status reread.",
-        MessageId::GuideWizardDetailHint => "↑↓ select  Enter apply  PgUp/PgDn scroll  Esc back",
+        MessageId::GuideWizardDetailHint => "Enter apply  Esc back\nF2/h home  ↑↓/PgDn  q quit",
         MessageId::GuideWizardResultSaved => "Saved: {actions}.",
         MessageId::GuideWizardResultPartial => "Partly completed: {actions}.",
         MessageId::GuideWizardResultUnconfirmed => {
-            "Unconfirmed: {actions}. Read the current state or finish and return; these writes remain on hold in this guide."
+            "Unconfirmed: {actions}. Check the current state first; these writes remain on hold in this guide."
         }
         MessageId::GuideWizardResultNone => "No configuration changed.",
         MessageId::GuideWizardResultCancelledNone => "Cancelled. No configuration changed.",
@@ -282,14 +317,18 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::GuideWizardResultFailed => "Not completed: {error}",
         MessageId::GuideWizardResultInterrupted => "The action was interrupted.",
         MessageId::GuideWizardResultScope => {
-            "New sessions use the saved value; existing sessions are not updated."
+            "Cosh will try to connect on your first question."
         }
         MessageId::GuideWizardActionConfigure => "add or edit AI service",
         MessageId::GuideWizardActionActivate => "switch AI service",
         MessageId::GuideWizardActionDelete => "delete AI service",
         MessageId::GuideWizardActionTrial => "zero-config access setting",
         MessageId::GuideWizardActionLogin => "login shell",
-        MessageId::GuideWizardAiExit => "Finish and return",
+        MessageId::GuideWizardAiExit => "Finish and return to AI service",
+        MessageId::GuideWizardAiSummarySaved => "AI service changes saved.",
+        MessageId::GuideWizardAiSummaryPartial => "AI service change partly completed.",
+        MessageId::GuideWizardAiSummaryUnconfirmed => "AI service change unconfirmed.",
+        MessageId::GuideWizardAiSummaryFailed => "AI service change not completed.",
         MessageId::GuideWizardAiAddService => "Add AI service",
         MessageId::GuideWizardAiUnavailable => "Could not open AI service management: {error}",
         MessageId::GuideWizardAiCoreUntrusted => {
@@ -324,12 +363,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "The login shell change may already be committed and is unconfirmed. Read the current state or return; further login shell changes are on hold in this guide."
         }
         MessageId::GuideWizardPartialSessionRecord => {
-            "Model configuration saved, but the session record was not; existing terminals and later sessions are unaffected."
+            "Model configuration saved, but the session record was not saved."
         }
         MessageId::GuideWizardTipsSummary => "Analysis mode and recommendation data",
         MessageId::GuideWizardCleanupUnconfirmed => "Local recommendation data cleanup remains unconfirmed.",
         MessageId::GuideWizardLoginSummarySet => "Cosh · already the default",
-        MessageId::GuideWizardLoginSummaryBenefit => "Use Cosh at the next login",
+        MessageId::GuideWizardLoginSummaryBenefit => "Current: {shell}",
         MessageId::GuideWizardLoginSummaryPending => "Change unconfirmed",
         MessageId::GuideWizardLoginSummaryConflict => "Login shell and record conflict",
         MessageId::GuideWizardLoginSummaryRecoveryMissing => "Cosh · no trusted recovery record",

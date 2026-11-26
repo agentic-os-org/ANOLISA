@@ -594,6 +594,10 @@ pub(super) fn set_preference_from_auth<W: Write>(
     super::prompt::clear_active_auth_panel(state, output)?;
     state.auth.state = None;
     begin_preference(core.clone(), auto_use, state);
+    if state.auth.host.is_guide() {
+        let pending = state.i18n().t(crate::i18n::MessageId::GuideAuthPending);
+        return notice(state, output, pending, pending);
+    }
     notice(
         state,
         output,

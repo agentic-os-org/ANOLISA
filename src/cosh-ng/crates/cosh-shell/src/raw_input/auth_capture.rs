@@ -6,6 +6,13 @@
 use super::card_capture::{events::releases_capture, CardInputState};
 use super::{RawInputCapture, RawInputEvent};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthNavigation {
+    Home,
+    Overview,
+    Quit,
+}
+
 #[derive(Default)]
 pub(crate) struct AuthCardInput {
     state: CardInputState,
@@ -28,8 +35,10 @@ impl AuthCardInput {
         let mut batch = std::mem::take(&mut self.carry);
         batch.extend_from_slice(bytes);
         self.state.apply_capture(capture);
-        let (events, remainder) = self.state.consume_split(capture, &batch);
-        if events.iter().any(releases_capture) {
+        let (events, remainder) = self.state.consume_guide(capture, &batch);
+        if events.iter().any(|event| {
+            releases_capture(event) || matches!(event, RawInputEvent::GuideAuthNavigation(_))
+        }) {
             // Bytes typed after a submit belong to no live capture: they must
             // not advance the next field or reach the wizard.
             self.state.reset();
@@ -38,6 +47,16 @@ impl AuthCardInput {
             self.carry = remainder;
         }
         events
+    }
+
+    pub(crate) fn idle(&mut self, capture: &RawInputCapture) -> Option<RawInputEvent> {
+        if self.capture_id.as_deref() != Some(capture_identity(capture).as_str()) {
+            self.reset();
+            return None;
+        }
+        let event = self.state.finish_guide_escape(capture)?;
+        self.reset();
+        Some(event)
     }
 
     pub(crate) fn reset(&mut self) {
@@ -107,14 +126,30 @@ mod tests {
     fn escape_steps_back_and_ctrl_c_aborts() {
         let mut input = AuthCardInput::default();
         let capture = question("menu");
-        assert!(matches!(
-            input.consume(&capture, b"\x1b").as_slice(),
-            [RawInputEvent::QuestionCancel(_)]
-        ));
+        assert!(input.consume(&capture, b"\x1b").is_empty());
+        assert!(matches!(input.idle(&capture), Some(RawInputEvent::QuestionCancel(_))));
         assert!(matches!(
             input.consume(&capture, &[0x03]).as_slice(),
             [RawInputEvent::QuestionAbort(_)]
         ));
+    }
+
+    #[test]
+    fn navigation_review_hosted_keys_keep_text_and_decode_split_f2() {
+        let mut parser = AuthCardInput::default();
+        let capture = text("draft");
+        let events = parser.consume(&capture, b"hq");
+        assert!(matches!(events.last(), Some(RawInputEvent::CardInput(_, value)) if value == "hq"));
+        for sequence in [b"\x1bOQ".as_slice(), b"\x1b[12~".as_slice()] {
+            for split in 1..sequence.len() {
+                assert!(parser.consume(&capture, &sequence[..split]).is_empty());
+                assert_eq!(parser.consume(&capture, &sequence[split..]), [RawInputEvent::GuideAuthNavigation(AuthNavigation::Home)]);
+            }
+        }
+        assert_eq!(parser.consume(&capture, b"\x04"), [RawInputEvent::GuideAuthNavigation(AuthNavigation::Overview)]);
+        let menu = question("menu");
+        assert!(parser.consume(&menu, b"\x1b[200~hq\r\x1b[201~").is_empty());
+        assert_eq!(parser.consume(&menu, b"q\r"), [RawInputEvent::GuideAuthNavigation(AuthNavigation::Quit)]);
     }
 
     #[test]
