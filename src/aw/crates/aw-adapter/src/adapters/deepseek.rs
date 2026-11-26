@@ -14,7 +14,11 @@ use std::{collections::BTreeMap, ffi::OsStr, fs, time::Duration};
 pub(crate) struct DeepSeek;
 
 pub(crate) fn replaceable(native: &Value) -> bool {
-    native["nested"] != true
+    let result = &native["tool_response"];
+    let structured_bash = native["tool_call"]["name"] == "bash"
+        && (result["value"].get("stdout").is_some() || result["value"].get("kind").is_some());
+    (!structured_bash || mirrored_stdout(native))
+        && native["nested"] != true
         && native["tool_response"]["isError"] == false
         && native["tool_response"]["content"]
             .as_array()
@@ -22,6 +26,19 @@ pub(crate) fn replaceable(native: &Value) -> bool {
                 blocks.len() == 1 && blocks[0]["type"] == "text" && blocks[0]["text"].is_string()
             })
 }
+
+// Only the verified pre-publication gate can adopt both fields atomically.
+pub(crate) fn mirrored_stdout(native: &Value) -> bool {
+    let result = &native["tool_response"];
+    native["aw_result_gate"] == true
+        && native["nested"] == false
+        && native["tool_call"]["name"] == "bash"
+        && result["value"]["kind"] == "foreground"
+        && result["value"]["stdout"]["text"].is_string()
+        && result["value"]["stdout"]["text"] == result["content"][0]["text"]
+}
+
+pub(crate) const BASH_TEXT_PATHS: [&str; 2] = ["/content/0/text", "/value/stdout/text"];
 
 struct Prepared {
     input: LaunchInput,

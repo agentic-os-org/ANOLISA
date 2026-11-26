@@ -273,6 +273,9 @@ Qoder 等待公开 `UserPromptSubmit` 快照的检查结果，拒绝时返回原
 
 `mask` 和 `replace_result` 都需要在步骤中准入 `replace_result` 效果。工具结果命中风险时，Provider 在私有副本中清空 Adapter 授权的文本槽，扫描保留的 stderr、元数据等字段。文本槽缺失、无法唯一定位或保留字段仍含风险时，返回 `unsupported_pii_result`。
 
+收到显式的 `text_paths` 时，Provider 核对两处原文，清空两处后扫描保留字段，并复扫重建结果。
+完整 JSON 的脱敏结果一旦改动授权位置之外的数据，检查即失败。
+
 - `replace_result` 用固定提示 `Sensitive data detected by AW; content withheld.` 替换整个文本槽。
 - `mask` 请求 sec-core 脱敏授权文本槽，并复核候选文本。对于嵌套文本槽，还要请求脱敏原始 JSON。如果原始 JSON 命中，改写必须局限于授权槽。完整 JSON 的脱敏结果缺失、被省略、为空或与原文相同，或改写涉及槽外字段时，返回 `unsupported_pii_result`。原始 JSON 在初扫时命中、脱敏时改判为通过，也返回此错误。只有候选放回槽后与完整 JSON 的脱敏结果逐字节一致（原始 JSON 命中时），且重建的结果通过复核，才采用局部脱敏文本。
 - 风险仅涉及授权槽时，候选文本不可用、与原文相同、复核仍命中或超过协议上限，均使用固定提示。整段 JSON 投影还须能无歧义解码，保留原有结构和键名，且解码后的键和值均通过复核。每个改写后的字符串须与后端对其原始解码值的脱敏结果一致，包括含实际换行的字符串。任何阶段的传输故障或不完整扫描均按 `on_error` 处理。

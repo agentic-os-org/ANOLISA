@@ -493,3 +493,39 @@ fn sdk_projects_and_replaces_string_and_structured_text_slots() {
         assert_eq!(value, json!({"aw_replacement": expected_replaced}));
     }
 }
+
+#[test]
+fn deepseek_bash_replaces_both_verified_copies_only_at_the_publication_gate() {
+    let native = json!({"aw_result_gate":true, "nested":false, "tool_call":{"name":"bash","input":{}},
+        "tool_response":{"isError":false,"content":[{"type":"text","text":"original"}],
+            "value":{"kind":"foreground","stdout":{"text":"original","truncated":false}},
+            "meta":{"cwd":"/work"}}});
+    let projection = project("deepseek-harness", &native).unwrap();
+    assert_eq!(
+        projection["text_paths"],
+        json!(["/content/0/text", "/value/stdout/text"])
+    );
+    let reply_value: Value =
+        serde_json::from_slice(&reply("deepseek-harness", &native, "masked").unwrap().stdout)
+            .unwrap();
+    let mut expected = native["tool_response"].clone();
+    expected["content"][0]["text"] = json!("masked");
+    expected["value"]["stdout"]["text"] = json!("masked");
+    assert_eq!(reply_value["aw_replacement"], expected);
+    for (field, value) in [
+        ("/nested", json!(true)),
+        ("/aw_result_gate", json!(false)),
+        ("/tool_response/isError", json!(true)),
+        ("/tool_response/value/kind", json!("background")),
+        ("/tool_response/value/stdout/text", json!("other")),
+        ("/tool_response/content", json!([])),
+    ] {
+        let mut changed = native.clone();
+        *changed.pointer_mut(field).unwrap() = value;
+        assert!(project("deepseek-harness", &changed).is_none(), "{field}");
+        assert!(
+            reply("deepseek-harness", &changed, "masked").is_err(),
+            "{field}"
+        );
+    }
+}
