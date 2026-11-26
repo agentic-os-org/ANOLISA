@@ -19,6 +19,12 @@ use std::collections::HashMap;
 /// config and SSE readers already treat exactly one leading mark as the
 /// format's: a second one is data and still fails the parse.
 pub fn load_jsonl_events(content: &str) -> Vec<serde_json::Value> {
+    parse_jsonl_events(content).0
+}
+
+/// Also report skipped lines so a partial replay cannot authorize snapshot deletion.
+pub(crate) fn parse_jsonl_events(content: &str) -> (Vec<serde_json::Value>, bool) {
+    let mut complete = true;
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let mut events = Vec::new();
     for (line_num, line) in content.lines().enumerate() {
@@ -29,11 +35,12 @@ pub fn load_jsonl_events(content: &str) -> Vec<serde_json::Value> {
         match serde_json::from_str::<serde_json::Value>(line) {
             Ok(v) => events.push(v),
             Err(e) => {
+                complete = false;
                 log::warn!("Skipping malformed JSON on line {}: {e}", line_num + 1);
             }
         }
     }
-    events
+    (events, complete)
 }
 
 /// Qoder-private session info destined for the ATIF `extra` field.

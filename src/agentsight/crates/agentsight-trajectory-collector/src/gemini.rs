@@ -26,8 +26,8 @@ use agentsight_atif::{
 /// existing negative-fingerprint namespace to invalidate pre-fix byte sizes.
 pub(crate) fn scan_fingerprint(project: &str, file_size: i64, mtime_ns: i64) -> i64 {
     let mut digest = Sha256::new();
-    // Refresh stored snapshots that predate tool-input accounting.
-    digest.update(b"agentsight-gemini-project-v2\0");
+    // Retry cached notice-only rewinds that previously retained withdrawn turns.
+    digest.update(b"agentsight-gemini-project-v3\0");
     digest.update(file_size.to_le_bytes());
     digest.update(mtime_ns.to_le_bytes());
     digest.update(project.as_bytes());
@@ -70,6 +70,7 @@ pub fn legacy_document(content: &str) -> Option<serde_json::Value> {
 
 /// Conversation state after replaying the correction records.
 struct Replay {
+    applied_reset: bool,
     metadata: serde_json::Map<String, serde_json::Value>,
     messages: Vec<serde_json::Value>,
 }
@@ -89,7 +90,7 @@ pub fn convert_gemini_events(
     let mut step_id: usize = 0;
     let mut agent_model: Option<String> = None;
 
-    for msg in &replay.messages {
+    for msg in replay.messages.iter().filter(|msg| !is_cli_notice(msg)) {
         let ts = msg.get("timestamp").and_then(|v| v.as_str());
         match msg.get("type").and_then(|v| v.as_str()) {
             Some("user") => {
@@ -111,8 +112,7 @@ pub fn convert_gemini_events(
                 step_id += 1;
                 steps.push(gemini_step(msg, step_id, ts, model));
             }
-            // info/error/warning records are CLI notices surfaced in the UI,
-            // not conversation turns.
+            // Unknown record types do not have an ATIF representation.
             _ => {}
         }
     }
@@ -204,6 +204,7 @@ pub fn extract_private_metadata(
 /// matches what the CLI would resume.
 fn replay_conversation(events: &[serde_json::Value]) -> Replay {
     let mut replay = Replay {
+        applied_reset: false,
         metadata: serde_json::Map::new(),
         messages: Vec::new(),
     };
@@ -217,15 +218,29 @@ fn replay_conversation(events: &[serde_json::Value]) -> Replay {
             {
                 // The rewind target itself is removed too: the CLI rewinds to
                 // the state *before* that message.
-                Some(pos) => replay.messages.truncate(pos),
-                None => replay.messages.clear(),
+                Some(pos) => {
+                    replay.messages.truncate(pos);
+                    replay.applied_reset = true;
+                }
+                None => {
+                    // Mirror CLI replay, but a missing target cannot authorize deletion.
+                    replay.messages.clear();
+                    replay.applied_reset = false;
+                }
             }
         } else if let Some(patch) = event.get("$patch").filter(|v| v.is_object()) {
+            let before = replay.messages.len();
             apply_patch(&mut replay.messages, patch);
+            if replay.messages.len() < before {
+                replay.applied_reset = patch["removeIds"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().all(|id| id.is_string()));
+            }
         } else if is_message_record(event) {
             upsert_message(&mut replay.messages, event);
         } else if let Some(set) = event.get("$set").filter(|v| v.is_object()) {
             if let Some(messages) = set.get("messages").and_then(|v| v.as_array()) {
+                replay.applied_reset = messages.iter().all(is_message_record);
                 replay.messages.clear();
                 for msg in messages {
                     if is_message_record(msg) {
@@ -236,6 +251,7 @@ fn replay_conversation(events: &[serde_json::Value]) -> Replay {
             merge_metadata(&mut replay.metadata, set);
         } else if is_partial_metadata(event) {
             if let Some(messages) = event.get("messages").and_then(|v| v.as_array()) {
+                replay.applied_reset |= messages.is_empty();
                 for msg in messages {
                     if is_message_record(msg) {
                         upsert_message(&mut replay.messages, msg);
@@ -258,27 +274,14 @@ fn is_message_record(event: &serde_json::Value) -> bool {
     message_id(event).is_some() && event.get("$patch").is_none()
 }
 
-/// Whether a complete history operation authoritatively removed all messages.
+fn is_cli_notice(msg: &serde_json::Value) -> bool {
+    matches!(msg["type"].as_str(), Some("info" | "warning" | "error"))
+}
+
+/// Only an applied reset may withdraw a previously stored conversation.
 pub(crate) fn explicitly_cleared(events: &[serde_json::Value]) -> bool {
-    let has_reset = events.iter().any(|event| {
-        event
-            .get("$rewindTo")
-            .is_some_and(|value| value.is_string())
-            || event
-                .pointer("/$patch/removeIds")
-                .and_then(|value| value.as_array())
-                .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|id| id.is_string()))
-            || event
-                .pointer("/$set/messages")
-                .and_then(|value| value.as_array())
-                .is_some_and(|messages| messages.is_empty())
-            || (is_partial_metadata(event)
-                && event
-                    .get("messages")
-                    .and_then(|value| value.as_array())
-                    .is_some_and(|messages| messages.is_empty()))
-    });
-    has_reset && replay_conversation(events).messages.is_empty()
+    let replay = replay_conversation(events);
+    replay.applied_reset && replay.messages.iter().all(is_cli_notice)
 }
 
 /// The leading/conversation metadata record.
