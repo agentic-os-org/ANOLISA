@@ -84,6 +84,8 @@ const ENV_PREFIX_ALLOWLIST = ["MEMORY_", "RUST_"];
 // stderr from the child is logged with a fixed-size ring buffer so a
 // runaway loop can't flood the gateway's logs.
 const STDERR_RING_CAPACITY = 64; // most recent N lines kept per flush cycle
+const STDERR_RING_MAX_BYTES = 64 * 1024;
+const STDERR_LINE_MAX_BYTES = 4 * 1024;
 const STDERR_FLUSH_INTERVAL_MS = 5_000;
 
 // OpenClaw contract name → agent-memory MCP tool name mapping.
@@ -140,8 +142,10 @@ export class McpStdioClient {
   // Bounded ring buffer for child stderr so a chatty/looping subprocess
   // can't blow up the gateway's log volume.
   private stderrRing: string[] = [];
+  private stderrRingBytes = 0;
   private stderrFlushTimer: NodeJS.Timeout | null = null;
   private stderrDroppedSinceLastFlush = 0;
+  private stderrTruncatedSinceLastFlush = 0;
 
   constructor(config: AgentMemoryConfig) {
     this.config = config;
@@ -446,13 +450,27 @@ export class McpStdioClient {
   /** Append a stderr chunk to the ring buffer and arm the flush timer. */
   private appendStderr(chunk: string): void {
     for (const line of chunk.split(/\r?\n/)) {
-      const trimmed = line.trim();
+      let trimmed = line.trim();
       if (!trimmed) continue;
-      if (this.stderrRing.length >= STDERR_RING_CAPACITY) {
-        this.stderrRing.shift();
+      let bytes = Buffer.byteLength(trimmed, "utf8");
+      if (bytes > STDERR_LINE_MAX_BYTES) {
+        const encoded = Buffer.from(trimmed, "utf8");
+        let start = encoded.length - STDERR_LINE_MAX_BYTES;
+        // Keep a recent suffix without splitting a UTF-8 code point.
+        while ((encoded[start] & 0xc0) === 0x80) start++;
+        trimmed = encoded.toString("utf8", start);
+        bytes = encoded.length - start;
+        this.stderrTruncatedSinceLastFlush++;
+      }
+      while (
+        this.stderrRing.length >= STDERR_RING_CAPACITY ||
+        this.stderrRingBytes + bytes > STDERR_RING_MAX_BYTES
+      ) {
+        this.stderrRingBytes -= Buffer.byteLength(this.stderrRing.shift()!, "utf8");
         this.stderrDroppedSinceLastFlush++;
       }
       this.stderrRing.push(trimmed);
+      this.stderrRingBytes += bytes;
     }
     if (!this.stderrFlushTimer) {
       this.stderrFlushTimer = setTimeout(() => this.flushStderr(), STDERR_FLUSH_INTERVAL_MS);
@@ -461,18 +479,28 @@ export class McpStdioClient {
   }
 
   private flushStderr(): void {
-    this.stderrFlushTimer = null;
-    if (this.stderrRing.length === 0 && this.stderrDroppedSinceLastFlush === 0) return;
+    if (this.stderrFlushTimer) {
+      clearTimeout(this.stderrFlushTimer);
+      this.stderrFlushTimer = null;
+    }
+    if (this.stderrRing.length === 0) return;
     if (this.stderrDroppedSinceLastFlush > 0) {
       console.error(
         `[agent-memory stderr] (dropped ${this.stderrDroppedSinceLastFlush} earlier lines due to volume)`,
       );
       this.stderrDroppedSinceLastFlush = 0;
     }
+    if (this.stderrTruncatedSinceLastFlush > 0) {
+      console.error(
+        `[agent-memory stderr] (truncated ${this.stderrTruncatedSinceLastFlush} oversized lines, keeping their most recent text)`,
+      );
+      this.stderrTruncatedSinceLastFlush = 0;
+    }
     for (const line of this.stderrRing) {
       console.error(`[agent-memory stderr] ${line}`);
     }
     this.stderrRing = [];
+    this.stderrRingBytes = 0;
   }
 
   /** Handle child process exit: reject all pending calls. The next
@@ -566,12 +594,6 @@ export class McpStdioClient {
 
     this.proc = null;
     this.pending.clear();
-    // flushStderr writes once more, but we also need to cancel the
-    // pending flush timer so no extra summary line fires after stop().
     this.flushStderr();
-    if (this.stderrFlushTimer) {
-      clearTimeout(this.stderrFlushTimer);
-      this.stderrFlushTimer = null;
-    }
   }
 }

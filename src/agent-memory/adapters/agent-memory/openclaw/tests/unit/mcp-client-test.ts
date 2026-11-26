@@ -8,7 +8,7 @@
  * - `callTool` rejection when the binary can't spawn
  */
 
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -322,6 +322,222 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(text, expected);
 
     await client.stop();
+  });
+
+  describe("stderr buffering", () => {
+    function capture(context: TestContext) {
+      const client = new McpStdioClient(cfg);
+      const output: string[] = [];
+      context.mock.method(console, "error", (message: string) => output.push(message));
+      const buffer = client as unknown as {
+        appendStderr(chunk: string): void;
+        flushStderr(): void;
+        stderrRing: string[];
+        stderrRingBytes: number;
+        stderrFlushTimer: NodeJS.Timeout | null;
+      };
+      context.after(() => buffer.flushStderr());
+      return { buffer, output };
+    }
+
+    it("flushes worker stderr through the timer and on shutdown", {
+      timeout: 15_000,
+    }, async (context) => {
+      const directory = await mkdtemp(join(tmpdir(), "memory-stderr-worker-"));
+      const binaryPath = join(directory, "mcp-server");
+      let client: McpStdioClient | undefined;
+      let childPid: number | undefined;
+
+      context.after(async () => {
+        try {
+          await client?.dispose();
+        } finally {
+          try {
+            if (childPid !== undefined) {
+              try {
+                process.kill(childPid, "SIGKILL");
+              } catch (error) {
+                assert.equal((error as NodeJS.ErrnoException).code, "ESRCH");
+              }
+            }
+          } finally {
+            await rm(directory, { recursive: true, force: true });
+          }
+        }
+      });
+
+      const output: string[] = [];
+      context.mock.method(console, "error", (message: unknown) => {
+        output.push(String(message));
+      });
+      // Retain real timer behavior, including Timeout.unref().
+      const scheduled = context.mock.method(globalThis, "setTimeout");
+      const cleared = context.mock.method(globalThis, "clearTimeout");
+      await writeFile(binaryPath, [
+        "#!" + process.execPath,
+        'const readline = require("node:readline");',
+        'setInterval(() => {}, 1000);',
+        'process.stdin.on("end", () => process.exit(0));',
+        'readline.createInterface({ input: process.stdin }).on("line", (line) => {',
+        '  const request = JSON.parse(line);',
+        '  if (request.id === undefined) return;',
+        '  const reply = (result) => {',
+        '    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");',
+        '  };',
+        '  if (request.method === "initialize") { reply({}); return; }',
+        '  const diagnostic = request.params.arguments.phase === "long"',
+        '    ? "记🧠".repeat(16000) + " STDERR_LONG_END\\n"',
+        '    : "STDERR_STOP_END\\n";',
+        '  process.stderr.write(diagnostic, () => {',
+        '    reply({ content: [{ type: "text", text: String(process.pid) }] });',
+        '  });',
+        '});',
+      ].join("\n"), { mode: 0o700 });
+
+      client = new McpStdioClient({ ...cfg, binaryPath });
+      const buffered = client as unknown as {
+        stderrRing: string[];
+        stderrRingBytes: number;
+        stderrFlushTimer: NodeJS.Timeout | null;
+      };
+      async function waitForDiagnostic(marker: string): Promise<void> {
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          const latest = buffered.stderrRing[buffered.stderrRing.length - 1];
+          if (latest?.endsWith(marker)) return;
+          await new Promise<void>(resolve => setTimeout(resolve, 10));
+        }
+        assert.fail("stderr did not reach " + marker);
+      }
+
+      childPid = Number(await client.callTool("memory_get_context", { phase: "long" }));
+      assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
+      // The two pipes are independent: the RPC reply does not establish
+      // that the stderr listener has already processed the final chunk.
+      await waitForDiagnostic("STDERR_LONG_END");
+      const firstTimers = scheduled.mock.calls.filter(call => call.arguments[1] === 5000);
+      assert.equal(firstTimers.length, 1);
+      assert.equal(output.length, 0, "stderr must wait for its flush");
+      // Trigger the callback actually registered by the stream handler.
+      (firstTimers[0].arguments[0] as () => void)();
+
+      const prefix = "[agent-memory stderr] ";
+      const diagnostics = output
+        .filter(line => line.startsWith(prefix) && !line.startsWith(prefix + "("))
+        .map(line => line.slice(prefix.length));
+      assert.ok(diagnostics.length > 0);
+      assert.ok(diagnostics.some(line => line.endsWith("STDERR_LONG_END")));
+      assert.ok(diagnostics.every(line => Buffer.byteLength(line, "utf8") <= 4096));
+      assert.ok(diagnostics.every(line => !line.includes("\ufffd")));
+      assert.ok(
+        diagnostics.reduce((bytes, line) => bytes + Buffer.byteLength(line, "utf8"), 0) <= 65536,
+      );
+      assert.ok(output.some(line => /truncated [1-9]\d* oversized lines/.test(line)));
+      assert.equal(buffered.stderrRingBytes, 0);
+      assert.equal(buffered.stderrFlushTimer, null);
+      assert.ok(cleared.mock.calls.some(call => call.arguments[0] === firstTimers[0].result));
+
+      const afterFirstFlush = output.length;
+      assert.equal(
+        Number(await client.callTool("memory_get_context", { phase: "stop" })),
+        childPid,
+      );
+      await waitForDiagnostic("STDERR_STOP_END");
+      const secondTimers = scheduled.mock.calls.filter(call => call.arguments[1] === 5000);
+      assert.equal(secondTimers.length, 2);
+      assert.equal(output.length, afterFirstFlush);
+      await client.stop();
+
+      assert.throws(() => process.kill(childPid!, 0), { code: "ESRCH" });
+      assert.deepEqual(
+        output.slice(afterFirstFlush).filter(line => line.startsWith(prefix)),
+        [prefix + "STDERR_STOP_END"],
+      );
+      assert.equal(buffered.stderrRing.length, 0);
+      assert.equal(buffered.stderrRingBytes, 0);
+      assert.equal(buffered.stderrFlushTimer, null);
+      assert.ok(cleared.mock.calls.some(call => call.arguments[0] === secondTimers[1].result));
+      const afterStop = output.length;
+      await client.stop();
+      assert.equal(output.length, afterStop);
+    });
+
+    it("bounds a single long chunk and keeps the most recent diagnostic", (context) => {
+      const { buffer, output } = capture(context);
+      buffer.appendStderr("x".repeat(2 * 1024 * 1024) + " latest failure");
+      assert.equal(buffer.stderrRing.length, 1);
+      assert.equal(buffer.stderrRingBytes, 4096);
+      assert.equal(Buffer.byteLength(buffer.stderrRing[0], "utf8"), 4096);
+      assert.ok(buffer.stderrRing[0].endsWith(" latest failure"));
+
+      const retained = buffer.stderrRing[0];
+      buffer.flushStderr();
+      assert.match(output[0], /truncated 1 oversized lines/);
+      assert.equal(output[1], "[agent-memory stderr] " + retained);
+      // The flush released both retained data and its pending timer.
+      assert.equal(buffer.stderrRing.length, 0);
+      assert.equal(buffer.stderrRingBytes, 0);
+      assert.equal(buffer.stderrFlushTimer, null);
+    });
+
+    it("does not split Unicode code points at the retained suffix boundary", (context) => {
+      const { buffer, output } = capture(context);
+      const diagnostic = "记🧠".repeat(2000) + " done";
+      buffer.appendStderr(diagnostic);
+      const retained = buffer.stderrRing[0];
+      assert.ok(Buffer.byteLength(retained, "utf8") <= 4096);
+      assert.ok(diagnostic.endsWith(retained));
+      assert.ok(!retained.includes("\ufffd"));
+      assert.equal(Buffer.from(retained, "utf8").toString("utf8"), retained);
+
+      buffer.flushStderr();
+      assert.match(output[0], /truncated 1 oversized lines/);
+      assert.equal(output[1], "[agent-memory stderr] " + retained);
+    });
+
+    it("enforces the total byte budget while retaining the latest entries", (context) => {
+      const { buffer, output } = capture(context);
+      const lines = Array.from(
+        { length: 32 },
+        (_, i) => String(i).padStart(2, "0") + "x".repeat(4094),
+      );
+      buffer.appendStderr(lines.join("\n"));
+      assert.deepEqual(buffer.stderrRing, lines.slice(-16));
+      assert.equal(buffer.stderrRingBytes, 65536);
+
+      buffer.flushStderr();
+      assert.match(output[0], /dropped 16 earlier lines/);
+      assert.deepEqual(output.slice(1), lines.slice(-16).map(line => "[agent-memory stderr] " + line));
+    });
+
+    it("still limits short entries to 64 across multiple chunks", (context) => {
+      const { buffer, output } = capture(context);
+      const lines = Array.from({ length: 80 }, (_, i) => "line-" + i);
+      for (const line of lines) buffer.appendStderr(line + "\n");
+      assert.deepEqual(buffer.stderrRing, lines.slice(-64));
+      assert.equal(
+        buffer.stderrRingBytes,
+        lines.slice(-64).reduce((sum, line) => sum + Buffer.byteLength(line, "utf8"), 0),
+      );
+
+      buffer.flushStderr();
+      assert.match(output[0], /dropped 16 earlier lines/);
+      assert.equal(output.length, 65);
+    });
+
+    it("resets byte accounting and truncation notices after each flush", (context) => {
+      const { buffer, output } = capture(context);
+      buffer.appendStderr("old".repeat(5000));
+      buffer.flushStderr();
+      const previousOutput = output.length;
+      buffer.appendStderr("new diagnostic");
+      assert.equal(buffer.stderrRingBytes, Buffer.byteLength("new diagnostic", "utf8"));
+      buffer.flushStderr();
+      buffer.flushStderr();
+      assert.deepEqual(output.slice(previousOutput), ["[agent-memory stderr] new diagnostic"]);
+      assert.equal(buffer.stderrRingBytes, 0);
+      assert.equal(buffer.stderrFlushTimer, null);
+    });
   });
 
   it("callTool rejects with a real error when the binary cannot spawn", async () => {
