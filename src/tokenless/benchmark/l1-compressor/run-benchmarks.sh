@@ -154,19 +154,20 @@ EOF
 echo "==> Source identity recorded: $IDENTITY_FILE"
 
 echo "==> Building benchmark suite (release)"
-cargo build --release
+cargo build --release --locked
 
 echo "==> Quality + adversarial tests (cargo test)"
-cargo test --release
+cargo test --release --locked
 
 if [[ "$QUICK" -eq 0 ]]; then
     LOG_FILE="benchmark_output_$(date +%Y%m%d_%H%M%S).log"
     echo "==> Performance benchmarks (criterion, 100 samples each)"
-    cargo bench 2>&1 | tee "$LOG_FILE"
+    cargo bench --locked 2>&1 | tee "$LOG_FILE"
     echo "==> Benchmark output saved to $LOG_FILE"
 fi
 
 echo "==> Compression-rate report (Rust in-process)"
-cargo run --release --bin compression_rate
+cargo run --release --locked --bin compression_rate
+cargo run --release --locked --bin component_cases -- --output reports/components.json
 
 echo "==> Done. Criterion HTML reports under target/criterion/."

@@ -158,7 +158,7 @@ behavior across Tokenless revisions. On Linux, run the following command from
 `src/tokenless/benchmark/l1-compressor` in an ANOLISA source checkout:
 
 ```bash
-cargo run --release --bin compression_rate -- --json
+cargo run --release --locked --bin compression_rate -- --json
 ```
 
 The report uses the committed
@@ -177,15 +177,29 @@ uncompressed canonical response saves 17.6% instead of 17.0%, and the full stack
 the same values and verifies actual compaction without omissions; focused suites
 cover record reduction and string, array, and depth bounds.
 
+The current source report's headline is `component_domains` on `o200k_base`.
+The historical bytes/4 snapshot is auxiliary under `legacy_estimates`; these
+path changes do not re-measure or re-label the original snapshot values.
+
+For an optional isolated Headroom comparison, first export private cases with
+`cargo run --release --locked --bin component_cases -- --output reports/components.json`.
+The `assets/worker/headroom_components.py` worker accepts `--fact-checker` pointing
+to that built `component_cases` binary, or finds `target/release/component_cases`.
+It calls `--check-facts-stdin` over private stdin to share the Rust regex rules,
+including Unicode properties; stdout contains only the score. Missing checker
+support leaves the affected row explicitly unverified, not a competitor failure.
+Search checks preserve path/line identity and normalize only matched body text.
+Equal Token counts alone never establish candidate/Runtime output identity.
+
 | JSON field | Isolated stage and input | Saving |
 |---|---|---:|
-| `canonical.response.savings_pct` | Response compression on the canonical response | 0.0% |
-| `canonical.schema.savings_pct` | Schema compression on the canonical schema | 47.3% |
-| `canonical.response.toon_only_savings_pct` | TOON encoding of the uncompressed canonical response | 17.6% |
-| `canonical.schema.toon_only_savings_pct` | TOON encoding of the uncompressed canonical schema | -2.3% |
+| `legacy_estimates.canonical.response.savings_pct` | Response compression on the canonical response | 0.0% |
+| `legacy_estimates.canonical.schema.savings_pct` | Schema compression on the canonical schema | 47.3% |
+| `legacy_estimates.canonical.response.toon_only_savings_pct` | TOON encoding of the uncompressed canonical response | 17.6% |
+| `legacy_estimates.canonical.schema.toon_only_savings_pct` | TOON encoding of the uncompressed canonical schema | -2.3% |
 
 The same report measures mixed-workload stacking configurations over both
-canonical fixtures (`stacking.configs`), against their combined baseline of
+canonical fixtures (`legacy_estimates.stacking.configs`), against their combined baseline of
 5,551 estimated tokens — so single-track rows read lower than the isolated
 rates above:
 
@@ -212,9 +226,10 @@ criterion performance benches; takes a few minutes), run
 `./run-benchmarks.sh --quick` from the same directory.
 
 This is a regression workload, not a promised production range. The response
-fixture is synthetic and already compact, the report uses one response and
-one schema, and token counts use the approximate `ceil(bytes / 4)` rule rather
-than a model tokenizer. It also excludes adapter behavior and the share of tool
+fixture is synthetic and already compact. Its `legacy_estimates` snapshot uses
+one response and one schema with approximate `ceil(bytes / 4)` counts; current
+`component_domains` instead covers multiple content domains using a real
+tokenizer. Neither collection certifies adapter behavior or the share of tool
 data in a complete session. Use the snapshot only to check that the same source
 revision behaves comparably; use your own representative payloads and the
 dry-run comparison below to evaluate an actual workload. See the
