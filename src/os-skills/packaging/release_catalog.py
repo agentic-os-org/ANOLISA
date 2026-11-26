@@ -116,6 +116,11 @@ def release_manifest(text: str, released: List[Path]) -> str:
         elif "adapters" in header or SKILLS_KEY.search(contents):
             raise ValueError(f"unsupported OS Skills adapter declaration in {header}")
         output.append(section)
+    missing = sorted(names - {name for _, name in seen})
+    if missing:
+        raise ValueError(
+            "released Skill has no OS Skills adapter entry: " + ", ".join(missing)
+        )
     return "".join(output)
 
 
