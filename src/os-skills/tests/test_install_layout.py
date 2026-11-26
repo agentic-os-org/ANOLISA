@@ -22,7 +22,14 @@ class InstallLayoutTests(unittest.TestCase):
         self.source = self.root / "source"
         self.source.mkdir()
         shutil.copyfile(ROOT / "Makefile", self.source / "Makefile")
-        (self.source / "component.toml").write_text('[component]\nname = "os-skills"\n')
+        # Released Skills must carry an adapter entry in the emitted contract.
+        manifest = '[component]\nname = "os-skills"\n\n[[adapters]]\nframework = "hermes"\n'
+        for name in ("example", "trial", "replacement", "second"):
+            manifest += (
+                f'[[adapters.hermes.skills]]\nname = "{name}"\n'
+                'source = "{datadir}/skills/' + name + '/"\n'
+            )
+        (self.source / "component.toml").write_text(manifest)
         packaging = self.source / "packaging"
         packaging.mkdir()
         shutil.copyfile(ROOT / "packaging/release_catalog.py", packaging / "release_catalog.py")
