@@ -9,6 +9,8 @@ for (const file of [
   "client.mjs",
   "admission.mjs",
   "configuration.mjs",
+  "codex-gateway.mjs",
+  "codex-gateway.d.ts",
   "deployment.mjs",
   "transport.mjs",
   "control.mjs",

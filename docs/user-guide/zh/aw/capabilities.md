@@ -43,7 +43,8 @@ Qoder CLI 尚未接入失败工具的 Post 回调。Codex CLI 0.163.0 和 0.166.
 已验收提交与工具执行前阻断，
 并可在关闭 Code Mode 且没有其他 PostToolUse Hook 时替换普通模型请求中的文本；
 策略前捕获、遥测和 Hook 故障仍不受保护。本地 app-server stdio 在受信客户端保持线程与轮次
-工作目录和配置不变时通过同等效果验收，见 [Codex 指南](../../../developer-guide/zh/aw/agents/codex.md)。
+工作目录和配置不变时通过同等效果验收。0.166.0 网关入口限制线程为本进程新建且 cwd 固定，
+可在模型出口接入独立的凭证检查。Shell 和 MCP 原生通知仍可能携带原文。见 [Codex 指南](../../../developer-guide/zh/aw/agents/codex.md)。
 其他结果类型和接点限制见各 Agent 页。
 Codex 的 `tool.before` 标为必需时，AW 拒绝其他可在检查后改写参数的原生 PreToolUse Hook；
 非必需检查仅覆盖原始输入。

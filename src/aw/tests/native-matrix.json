@@ -6310,7 +6310,7 @@
         "@openai/codex@0.166.0",
         "codex163@npm:@openai/codex@0.163.0"
       ],
-      "boundary": "Codex 0.163.0 and 0.166.0 native exec and local app-server stdio with UserPromptSubmit/PreToolUse/PostToolUse Hooks and a local Responses fixture. Exec covers ordinary model-side PostToolUse text replacement and withheld Provider failure, input and tool denial, native denial and input rewrite, peer-Hook and Code Mode rejection, MCP text replacement and media withholding, trust refusal and cleanup. App-server covers same-cwd/default-config output replacement and code/prompt denial. Client-controlled thread/turn cwd and config overrides, Code Mode, pre-Hook capture/telemetry, failed tools, hosted models, TUI trust UI, and sandbox enforcement are not certified as protected output.",
+      "boundary": "Codex 0.163.0 and 0.166.0 native exec and local app-server stdio with UserPromptSubmit/PreToolUse/PostToolUse Hooks and a local Responses fixture. Exec covers ordinary model-side PostToolUse text replacement and withheld Provider failure, input and tool denial, native denial and input rewrite, peer-Hook and Code Mode rejection, MCP text replacement and media withholding, trust refusal and cleanup. App-server covers same-cwd/default-config output replacement and code/prompt denial. The 0.166.0 gateway fixture checks reviewed trust reuse in a fresh home, refused peer/Code Mode/RPC overrides, sequential PII and credential replacement in a model request, and the original Shell/MCP native notifications. Client-controlled thread/turn cwd and config overrides, Code Mode, pre-Hook capture/telemetry, failed tools, hosted models, TUI trust UI, and sandbox enforcement are not certified as protected output.",
       "cases": [
         {
           "name": "native-cli",
@@ -6389,6 +6389,7 @@
               "file": "fixtures/codex-app-server/result.json",
               "values": {
                 "version": "codex-cli 0.166.0",
+                "gateway_checked": true,
                 "entrypoint": "app-server stdio",
                 "output_replaced": true,
                 "code_blocked": true,

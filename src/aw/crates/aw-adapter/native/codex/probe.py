@@ -32,7 +32,7 @@ def probe():
     signal.signal(signal.SIGINT, interrupted)
     selector = selectors.DefaultSelector()
     child = subprocess.Popen(
-        [sys.argv[1], "app-server"], stdin=subprocess.PIPE,
+        [sys.argv[1], *sys.argv[3:-1]], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
     )
     try:
@@ -99,14 +99,17 @@ def probe():
                               "input.submit": "userPromptSubmit",
                               "tool.before": "preToolUse", "tool.after": "postToolUse"}
                     hooks = {event: [h for h in rows[0]["hooks"]
-                                    if h.get("command") == command and h["eventName"] == events[event]]
+                                    if h.get("handlerType") == "command" and h.get("command") == command
+                                    and h["eventName"] == events[event]]
                              for event, command in expected.items()}
                     other_pre_tool_hooks = sum(
-                        h["eventName"] == "preToolUse" and h.get("command") != expected.get("tool.before")
+                        h["eventName"] == "preToolUse" and (h.get("handlerType") != "command"
+                            or h.get("command") != expected.get("tool.before"))
                         for h in rows[0]["hooks"]
                     )
                     other_post_tool_hooks = sum(
-                        h["eventName"] == "postToolUse" and h.get("command") != expected.get("tool.after")
+                        h["eventName"] == "postToolUse" and (h.get("handlerType") != "command"
+                            or h.get("command") != expected.get("tool.after"))
                         for h in rows[0]["hooks"]
                     )
                     return {"hooks": hooks, "errors": bool(errors),
@@ -130,7 +133,7 @@ def probe():
 
 if __name__ == "__main__":
     try:
-        with open(sys.argv[3], "w", encoding="utf-8") as result:
+        with open(sys.argv[-1], "w", encoding="utf-8") as result:
             json.dump(probe(), result)
     except Exception as error:
         # Native config and diagnostics may contain credentials; report only the boundary.

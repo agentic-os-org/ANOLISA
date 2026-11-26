@@ -38,4 +38,10 @@ elif request["method"] == "invoke":
         if mode == "replace-parallel":
             text = "AW_REDACTED_" + request["event"]["tool"]["call_id"][-1].upper()
         reply["effects"] = [{"type": "replace_result", "text": text}]
+    if op == "record" and mode == "replace-gateway":
+        text = request["event"]["tool"]["result_projection"]["text"]
+        if "AW_SCAN_UNAVAILABLE" in text:
+            sys.exit(1)
+        reply["effects"] = [{"type": "replace_result",
+                             "text": text.replace("sample-pii", "[pii]").replace("AW_MCP_ORIGINAL", "[pii]")}]
 print(json.dumps(reply))

@@ -57,6 +57,7 @@ time.sleep(30)
                 .arg(&script)
                 .arg(&fixture)
                 .arg("{}")
+                .arg("app-server")
                 .arg(root.path().join("result.json"))
                 .current_dir(root.path())
                 .stdout(Stdio::null())
@@ -247,4 +248,111 @@ fn native_lifecycle_uses_codex_session_and_turn_identity() {
     assert!(super::Codex
         .normalize(&context, "turn.stop", &native)
         .is_err());
+}
+
+#[test]
+fn gateway_requires_the_exact_local_responses_route() {
+    let base = [
+        "app-server",
+        "--listen",
+        "stdio://",
+        "-c",
+        r#"model_provider="gateway""#,
+        "-c",
+        r#"model_providers.gateway.name="Local Gateway""#,
+        "-c",
+        r#"model_providers.gateway.env_key="LOCAL_CODEX_GATEWAY_KEY""#,
+        "-c",
+        "model_providers.gateway.supports_websockets=false",
+        "-c",
+        r#"model_providers.gateway.wire_api="responses""#,
+        "-c",
+        r#"model_providers.gateway.base_url="http://127.0.0.1:4242/v1""#,
+    ];
+    let admitted = |args: &[&str]| {
+        preflight::arguments(&args.iter().map(Into::into).collect::<Vec<_>>()).is_ok()
+    };
+    assert!(admitted(&base));
+    assert!(!admitted(&base[..base.len() - 2]));
+    let mut alternate: Vec<_> = base
+        .iter()
+        .map(|arg| arg.replace("gateway", "local-v2_test").into())
+        .collect();
+    // The selector may follow its settings.
+    alternate[3..].rotate_left(2);
+    let selected = preflight::arguments(&alternate).unwrap();
+    assert!(
+        matches!(selected.entrypoint, preflight::Entrypoint::Gateway(id) if id == "local-v2_test")
+    );
+    let with = |index, setting: &str| {
+        let mut args = base;
+        args[index] = setting;
+        admitted(&args)
+    };
+    for provider in [
+        "",
+        "Local",
+        "2local",
+        "local.key",
+        "local/key",
+        &"a".repeat(65),
+    ] {
+        let args: Vec<_> = base
+            .iter()
+            .map(|arg| arg.replace("gateway", provider).into())
+            .collect();
+        assert!(preflight::arguments(&args).is_err(), "{provider}");
+    }
+    assert!(!with(4, r#"model_provider="other""#));
+    assert!(!with(6, r#"model_providers.other.name="Local Gateway""#));
+    assert!(!with(6, base[8]));
+    assert!(with(6, r#"model_providers.gateway.name="Local \\ 网关""#));
+    for name in ["", "one\ntwo", "one'two", "one\"two", "\u{85}"] {
+        assert!(!with(
+            6,
+            &format!("model_providers.gateway.name={}", json!(name))
+        ));
+    }
+    assert!(with(
+        8,
+        &format!(r#"model_providers.gateway.env_key="{}""#, "A".repeat(64))
+    ));
+    for key in [
+        "",
+        "a",
+        "_KEY",
+        "A-B",
+        "HOME",
+        "PATH",
+        "LD_PRELOAD",
+        "CODEX_HOME",
+        "AW_SOCKET",
+        "PYTHONPATH",
+        "NODE_OPTIONS",
+        "HTTPS_PROXY",
+        &"A".repeat(65),
+    ] {
+        assert!(
+            !with(8, &format!(r#"model_providers.gateway.env_key="{key}""#)),
+            "{key}"
+        );
+    }
+
+    for assignment in [
+        "hooks.state.example.enabled=true",
+        "features.code_mode=true",
+        "features.hooks=false",
+        r#"model_providers.gateway.base_url="http://127.0.0.1:4242/v1?proxy=1""#,
+        r#"model_providers.gateway.base_url="http://localhost:4242/v1""#,
+        r#"model_providers.gateway.base_url="http://127.0.0.1:0/v1""#,
+        r#"model_providers.gateway.base_url="http://127.0.0.1:4242@remote/v1""#,
+        r#"model_providers.gateway.env_key="HOME""#,
+    ] {
+        let mut args = base;
+        args[base.len() - 1] = assignment;
+        assert!(!admitted(&args), "{assignment}");
+    }
+    let mut duplicate = base.to_vec();
+    duplicate.extend_from_slice(&base[3..5]);
+    assert!(!admitted(&duplicate));
 }
