@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import gc
 import io
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1060,6 +1062,79 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(populated_payload["stderr"], "error: linker command not found")
             self.assertEqual(populated_payload["original_command"], "timeout 30 cargo test")
             self.assertEqual(populated_payload["cwd"], "/work/repo")
+
+    async def test_post_tool_honors_disabled_stats_retention_env_overrides(self) -> None:
+        records = [
+            {"name": "same", "value": index, "message": "x" * 80}
+            for index in range(300)
+        ]
+        original = json.dumps({"items": records}, separators=(",", ":"))
+        request = PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="api",
+            content=original,
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.API_RESPONSE,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(
+                replace_output=True,
+                recovery=RecoveryMethod.tool("tokenless_retrieve"),
+                replace_with_text=False,
+            ),
+            attribution=Attribution("sdk-agent", "sdk-retention", "call-ret"),
+        )
+        stats_db = Path(self.temporary_directory.name) / "stats.db"
+        nanos_per_day = 86_400 * 1_000_000_000
+
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENLESS_STATS_RETENTION_DAYS": "0",
+                "TOKENLESS_STATS_TEXT_RETENTION_DAYS": "0",
+            },
+        ):
+            seed_sdk = self.sdk(rtk_enabled=False)
+            await seed_sdk.post_tool(request)
+            await seed_sdk.post_tool(request)
+            # Release the bundled-SQLite runtime before opening stdlib sqlite3 on
+            # the same WAL database in this process; closing a second libsqlite3
+            # instance on POSIX unlinks -wal/-shm out from under an open handle.
+            del seed_sdk
+            gc.collect()
+
+            conn = sqlite3.connect(stats_db)
+            try:
+                row_ids = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT id FROM stats ORDER BY id ASC"
+                    ).fetchall()
+                ]
+                self.assertEqual(len(row_ids), 2)
+                expired_id, mid_id = row_ids
+                conn.execute(
+                    "UPDATE stats SET timestamp_ns = timestamp_ns - ? WHERE id = ?",
+                    (45 * nanos_per_day, expired_id),
+                )
+                conn.execute(
+                    "UPDATE stats SET timestamp_ns = timestamp_ns - ? WHERE id = ?",
+                    (15 * nanos_per_day, mid_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            sdk = self.sdk(rtk_enabled=False)
+            for _ in range(62):
+                await sdk.post_tool(request)
+
+            self.assertEqual(sdk.stats.status.records, 64)
+            expired_record = sdk.stats.show(expired_id)
+            mid_record = sdk.stats.show(mid_id)
+            self.assertIsNotNone(expired_record.before_text)
+            self.assertIsNotNone(expired_record.after_text)
+            self.assertIsNotNone(mid_record.before_text)
+            self.assertIsNotNone(mid_record.after_text)
 
 
 if __name__ == "__main__":

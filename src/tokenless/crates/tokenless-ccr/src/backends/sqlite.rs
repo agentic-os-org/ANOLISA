@@ -4,7 +4,8 @@
 //! short-lived processes that tokenless hooks fork+exec on every call. Uses
 //! WAL mode and `BEGIN IMMEDIATE` for database-wide write serialization.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +26,27 @@ const DEFAULT_CAPACITY: usize = 10_000;
 /// while opening the database and for every later statement.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Minimum number of rows purged in a single operation before automatically
+/// running a non-blocking WAL checkpoint.
+const WAL_CHECKPOINT_PURGE_THRESHOLD: usize = 32;
+
+/// Minimum `-wal` size in bytes at which any purge triggers a WAL checkpoint.
+const WAL_CHECKPOINT_MIN_BYTES: u64 = 1024 * 1024;
+
+/// Result of a non-blocking WAL checkpoint on [`SqliteStore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalCheckpoint {
+    /// Whether `PRAGMA wal_checkpoint(TRUNCATE)` encountered an active reader
+    /// or writer (`busy != 0`).
+    pub busy: bool,
+    /// Total frames currently in the WAL file.
+    pub log_frames: i64,
+    /// Number of frames checkpointed back into the main database file.
+    pub checkpointed_frames: i64,
+}
+
 pub struct SqliteStore {
+    db_path: PathBuf,
     conn: Mutex<Connection>,
     ttl_seconds: u64,
     capacity: usize,
@@ -44,6 +65,7 @@ impl SqliteStore {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         Ok(Self {
+            db_path: path.to_path_buf(),
             conn: Mutex::new(conn),
             ttl_seconds: DEFAULT_TTL_SECONDS,
             capacity: DEFAULT_CAPACITY,
@@ -158,11 +180,52 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(Self {
+            db_path: path.to_path_buf(),
             conn: Mutex::new(conn),
             ttl_seconds,
             capacity,
             read_only: false,
         })
+    }
+
+    /// Checkpoint and truncate `stash.db-wal` without waiting on active readers.
+    ///
+    /// Preserves the `SQLITE_FCNTL_PERSIST_WAL` sidecar files so subsequent
+    /// read-only `retrieve` connections remain valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StashError::Backend`] when called on a read-only handle or if
+    /// SQLite fails to run the checkpoint pragma.
+    pub fn checkpoint_wal(&self) -> Result<WalCheckpoint, StashError> {
+        if self.read_only {
+            return Err(StashError::Backend(
+                "cannot checkpoint WAL on a read-only stash handle".to_string(),
+            ));
+        }
+        let conn = self.lock_conn();
+        checkpoint_wal_nonblocking(&conn)
+    }
+
+    fn wal_size_bytes(&self) -> u64 {
+        std::fs::metadata(sidecar_path(&self.db_path, "-wal"))
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    }
+
+    fn should_checkpoint_after_purge(&self, purged: usize) -> bool {
+        purged >= WAL_CHECKPOINT_PURGE_THRESHOLD
+            || (purged > 0 && self.wal_size_bytes() >= WAL_CHECKPOINT_MIN_BYTES)
+    }
+
+    fn maybe_checkpoint_best_effort(&self, conn: &Connection, purged: usize) {
+        if self.should_checkpoint_after_purge(purged)
+            && let Err(error) = checkpoint_wal_nonblocking(conn)
+        {
+            warn_soft(&format!(
+                "[tokenless-ccr] WARNING: stash WAL checkpoint failed: {error}"
+            ));
+        }
     }
 
     /// Acquire the connection guard, recovering from poison rather than
@@ -226,7 +289,7 @@ impl SqliteStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Compression can write indefinitely without retrieving. Reclaim
         // expired payloads here as well, under the same write transaction.
-        tx.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64])?;
+        let expired = tx.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64])?;
         let previous_generation: Option<u64> = match tx.query_row(
             "SELECT generation FROM stash WHERE hash = ? AND expires_at >= ?",
             rusqlite::params![key, now as i64],
@@ -266,8 +329,9 @@ impl SqliteStore {
                  generation = excluded.generation",
             rusqlite::params![key, payload, expires_at, generation],
         )?;
-        self.enforce_capacity(&tx, now as i64)?;
+        let evicted = self.enforce_capacity(&tx, now as i64)?;
         tx.commit()?;
+        self.maybe_checkpoint_best_effort(&conn, expired + evicted);
         Ok(StashWrite {
             key,
             created: !had_live,
@@ -291,14 +355,20 @@ impl StashStore for SqliteStore {
         // Writable stores reclaim expired rows lazily as well as on writes.
         // Readers rely on the writer's cleanup and only filter out expired rows.
         // A purge failure must not block the lookup.
-        if !self.read_only
-            && let Err(e) = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64])
-        {
-            warn_soft(&format!(
-                "[tokenless-ccr] WARNING: stash lazy-purge failed: {e}"
-            ));
-        }
-        match conn.query_row(
+        let purged = if !self.read_only {
+            match conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64]) {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    warn_soft(&format!(
+                        "[tokenless-ccr] WARNING: stash lazy-purge failed: {e}"
+                    ));
+                    0
+                }
+            }
+        } else {
+            0
+        };
+        let result = match conn.query_row(
             "SELECT payload FROM stash WHERE hash = ? AND expires_at >= ?",
             rusqlite::params![key, now as i64],
             |row| row.get::<_, String>(0),
@@ -306,7 +376,11 @@ impl StashStore for SqliteStore {
             Ok(payload) => Ok(Some(payload)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(StashError::from(e)),
+        };
+        if purged > 0 {
+            self.maybe_checkpoint_best_effort(&conn, purged);
         }
+        result
     }
 
     fn len(&self) -> usize {
@@ -324,6 +398,13 @@ impl StashStore for SqliteStore {
         let now = now_unix();
         let conn = self.lock_conn();
         let evicted = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64])?;
+        if evicted > 0
+            && let Err(error) = checkpoint_wal_nonblocking(&conn)
+        {
+            warn_soft(&format!(
+                "[tokenless-ccr] WARNING: stash WAL checkpoint failed: {error}"
+            ));
+        }
         Ok(evicted)
     }
 
@@ -379,6 +460,83 @@ fn enable_wal(conn: &Connection) -> Result<(), StashError> {
     }
     conn.busy_timeout(BUSY_TIMEOUT)?;
     Ok(())
+}
+
+fn sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut os = OsString::from(db_path.as_os_str());
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+fn is_busy_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+struct BusyTimeoutGuard<'a> {
+    conn: &'a Connection,
+    restore: Duration,
+}
+
+impl<'a> BusyTimeoutGuard<'a> {
+    fn set(
+        conn: &'a Connection,
+        temporary: Duration,
+        restore: Duration,
+    ) -> Result<Self, StashError> {
+        conn.busy_timeout(temporary)?;
+        Ok(Self { conn, restore })
+    }
+}
+
+impl Drop for BusyTimeoutGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.conn.busy_timeout(self.restore);
+    }
+}
+
+fn checkpoint_wal_nonblocking(conn: &Connection) -> Result<WalCheckpoint, StashError> {
+    let (_passive_busy, passive_log, passive_ckpt): (i64, i64, i64) =
+        match conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }) {
+            Ok(res) => res,
+            Err(error) if is_busy_error(&error) => {
+                return Ok(WalCheckpoint {
+                    busy: true,
+                    log_frames: 0,
+                    checkpointed_frames: 0,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+    let _guard = BusyTimeoutGuard::set(conn, Duration::ZERO, BUSY_TIMEOUT)?;
+    match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    }) {
+        Ok((busy, log_frames, checkpointed_frames)) => Ok(WalCheckpoint {
+            busy: busy != 0,
+            log_frames,
+            checkpointed_frames,
+        }),
+        Err(error) if is_busy_error(&error) => Ok(WalCheckpoint {
+            busy: true,
+            log_frames: passive_log,
+            checkpointed_frames: passive_ckpt,
+        }),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]

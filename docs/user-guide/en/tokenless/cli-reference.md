@@ -554,6 +554,9 @@ tokenless stats diff --session <session-id>
 tokenless stats status
 tokenless stats enable
 tokenless stats disable
+tokenless stats prune --older-than 30
+tokenless stats prune --older-than 7 --trim-text --compact
+tokenless stats compact
 tokenless stats clear --yes
 ```
 
@@ -590,7 +593,27 @@ tokenless stats diff --session <session-id> \
 
 Content diffing is omitted when either endpoint is unavailable or exceeds 1 MiB, and rendered hunks stop after 500 lines. Take care when using a shared terminal or collecting output because record and tool-use diffs can contain stored source text. See [Measuring savings](measuring-savings.md) and [Configuration and data privacy](configuration-and-privacy.md).
 
-`stats status` reports the local-statistics and SLS switches and their source. The current status path does not read the compression switch, so it does not display `compression_enabled`; inspect `TOKENLESS_COMPRESSION_ENABLED` and `~/.tokenless/config.json` for that setting.
+`stats status` reports the local-statistics and SLS switches plus the configured `stats.db` row and text retention policies and their source (`env override`, `config file`, or `default`). The current status path does not read the compression switch, so it does not display `compression_enabled`; inspect `TOKENLESS_COMPRESSION_ENABLED` and `~/.tokenless/config.json` for that setting.
+
+Prune old records or stored text payloads, and reclaim SQLite disk space:
+
+```bash
+tokenless stats prune --older-than 30 --json
+tokenless stats prune --older-than 7 --trim-text --compact
+tokenless stats prune
+tokenless stats compact --json
+```
+
+`stats prune` options:
+
+| Option | Behavior |
+|--------|----------|
+| `--older-than <days>` | Positive integer cutoff in days; omitting it applies the effective policy (default `30` days for rows, `7` days for text; exits `2` if both windows are disabled via `0`/`null`) |
+| `--trim-text` | Clear stored before/after text payloads and orphaned `compression_artifacts` while preserving numeric counts and `retrieve_events` |
+| `--compact` | Run best-effort `VACUUM` and non-blocking `PRAGMA wal_checkpoint(TRUNCATE)` after pruning |
+| `--json` | Output schema `1.0` JSON counts (and optional `reclaim` details when `--compact` is set) |
+
+`stats compact` runs best-effort `VACUUM` and non-blocking `PRAGMA wal_checkpoint(TRUNCATE)` while keeping `0600` permissions on `stats.db`. `stats clear --yes` also runs best-effort WAL truncation and `VACUUM` after clearing all tables.
 
 ## Errors and degradation
 

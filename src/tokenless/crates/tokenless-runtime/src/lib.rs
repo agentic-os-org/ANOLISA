@@ -18,8 +18,9 @@ use tokenless_protocol::{
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
-    CompressionMode, OperationType, SlsWriter, StatsRecord, StatsRecorder, ensure_state_dir,
-    estimate_tokens, get_home_dir, resolve_data_dir, validate_data_dir, validate_database_path,
+    CompressionMode, OperationType, SlsWriter, StatsRecord, StatsRecorder, TokenlessConfig,
+    ensure_state_dir, estimate_tokens, get_home_dir, resolve_data_dir, validate_data_dir,
+    validate_database_path,
 };
 
 mod entry;
@@ -298,7 +299,10 @@ impl TokenlessRuntime {
 
         let (stats_recorder, stats_error) = if config.stats_enabled {
             let stats_path = validate_database_path(&data_dir.join("stats.db"), &[&data_dir])?;
-            match StatsRecorder::new(&stats_path) {
+            match StatsRecorder::with_retention(
+                &stats_path,
+                TokenlessConfig::load().retention_policy(),
+            ) {
                 Ok(recorder) => (Some(recorder), None),
                 Err(error) => (
                     None,

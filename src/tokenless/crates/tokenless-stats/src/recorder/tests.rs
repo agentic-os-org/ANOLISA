@@ -498,6 +498,8 @@ fn opening_a_legacy_database_backfills_the_instant_key() {
         // stored text and let the reopen backfill derive the keys.
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute("DROP INDEX idx_stats_instant", []).unwrap();
+        conn.execute("DROP INDEX idx_stats_text_instant", [])
+            .unwrap();
         conn.execute("ALTER TABLE stats DROP COLUMN timestamp_ns", [])
             .unwrap();
         conn.execute(
@@ -988,7 +990,7 @@ fn failed_retrieve_migration_rolls_back_stats_columns() {
         .unwrap();
     assert_eq!(added, 0, "failed migration left stats partially upgraded");
 
-    for index in 0..3 {
+    for index in 0..4 {
         conn.execute(
             &format!("ALTER TABLE retrieve_events DROP COLUMN extra_{index}"),
             [],
@@ -1242,4 +1244,1541 @@ fn parse_busy_timeout_bounds_test_overrides() {
         Duration::from_millis(5000)
     );
     assert_eq!(parse_busy_timeout(Some("5001")), Duration::from_secs(5));
+}
+
+fn fixed_local_time(rfc3339: &str) -> DateTime<Local> {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .unwrap()
+        .with_timezone(&Local)
+}
+
+#[test]
+fn prune_older_than_removes_old_stats_artifacts_and_retrieve_events() {
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let now = fixed_local_time("2026-11-26T12:00:00+00:00");
+    let old_ts = fixed_local_time("2026-10-15T12:00:00+00:00"); // 42 days old
+    let recent_ts = fixed_local_time("2026-11-20T12:00:00+00:00"); // 6 days old
+
+    let old_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "s1",
+            )
+            .with_timestamp(old_ts)
+            .with_text("old-before".into(), "old-after".into()),
+        )
+        .unwrap();
+    let recent_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "s1",
+            )
+            .with_timestamp(recent_ts)
+            .with_text("new-before".into(), "new-after".into()),
+        )
+        .unwrap();
+
+    rec.record_artifacts(old_id, "json_truncation", &["a".repeat(24)])
+        .unwrap();
+    rec.record_artifacts(recent_id, "json_truncation", &["b".repeat(24)])
+        .unwrap();
+
+    let old_retrieve_id = rec
+        .record_retrieve_event(
+            &"a".repeat(24),
+            "hit",
+            "cli",
+            Some(50),
+            None,
+            None,
+            Some("s1"),
+            None,
+        )
+        .unwrap();
+    let recent_retrieve_id = rec
+        .record_retrieve_event(
+            &"b".repeat(24),
+            "hit",
+            "cli",
+            Some(25),
+            None,
+            None,
+            Some("s1"),
+            None,
+        )
+        .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let old_ns = old_ts.timestamp_nanos_opt().unwrap();
+        let recent_ns = recent_ts.timestamp_nanos_opt().unwrap();
+        conn.execute(
+            "UPDATE retrieve_events SET timestamp = ?1, timestamp_ns = ?2 WHERE id = ?3",
+            rusqlite::params![old_ts.to_rfc3339(), old_ns, old_retrieve_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE retrieve_events SET timestamp = ?1, timestamp_ns = ?2 WHERE id = ?3",
+            rusqlite::params![recent_ts.to_rfc3339(), recent_ns, recent_retrieve_id],
+        )
+        .unwrap();
+    }
+
+    let report = rec
+        .apply_retention_at(
+            now,
+            RetentionPolicy {
+                row_retention_days: Some(30),
+                text_retention_days: None,
+            },
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        report,
+        PruneReport {
+            stats_rows_deleted: 1,
+            text_rows_trimmed: 0,
+            artifacts_deleted: 1,
+            retrieve_events_deleted: 1,
+        }
+    );
+
+    assert!(rec.record_by_id(old_id).unwrap().is_none());
+    assert!(rec.record_by_id(recent_id).unwrap().is_some());
+    assert_eq!(rec.count().unwrap(), 1);
+    assert_eq!(
+        rec.retrieve_totals().unwrap(),
+        RetrieveTotals {
+            hits: 1,
+            retrieved_tokens: 25,
+            ..RetrieveTotals::default()
+        }
+    );
+    let conn = rec.lock_conn();
+    let remaining_artifacts: Vec<i64> = conn
+        .prepare("SELECT stats_id FROM compression_artifacts")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(remaining_artifacts, vec![recent_id]);
+}
+
+#[test]
+fn trim_text_older_than_clears_payloads_keeps_metrics_and_prunes_orphans() {
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let now = fixed_local_time("2026-11-26T12:00:00+00:00");
+    let old_ts = fixed_local_time("2026-11-10T12:00:00+00:00"); // 16 days old
+    let recent_ts = fixed_local_time("2026-11-25T12:00:00+00:00"); // 1 day old
+
+    let old_id = rec
+        .record(
+            &sample(
+                OperationType::RewriteCommand,
+                CompressionMode::Active,
+                "trim-s",
+            )
+            .with_timestamp(old_ts)
+            .with_tool_use_id("tool-old")
+            .with_text("old-before".into(), "old-after".into())
+            .with_output("old-out-before".into(), "old-out-after".into()),
+        )
+        .unwrap();
+    let recent_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "trim-s",
+            )
+            .with_timestamp(recent_ts)
+            .with_tool_use_id("tool-new")
+            .with_text("new-before".into(), "new-after".into()),
+        )
+        .unwrap();
+
+    rec.record_artifacts(old_id, "json_truncation", &["a".repeat(24)])
+        .unwrap();
+    rec.record_retrieve_event(
+        &"a".repeat(24),
+        "hit",
+        "cli",
+        Some(40),
+        None,
+        None,
+        Some("trim-s"),
+        None,
+    )
+    .unwrap();
+    {
+        // Simulate a pre-existing orphan artifact row whose stats row was previously deleted.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO compression_artifacts (stats_id, hash, compressor_id, emitted)
+             VALUES (999999, ?1, 'json_truncation', 1)",
+            ["f".repeat(24)],
+        )
+        .unwrap();
+    }
+
+    let report = rec
+        .apply_retention_at(
+            now,
+            RetentionPolicy {
+                row_retention_days: None,
+                text_retention_days: Some(7),
+            },
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        report,
+        PruneReport {
+            stats_rows_deleted: 0,
+            text_rows_trimmed: 1,
+            artifacts_deleted: 1,
+            retrieve_events_deleted: 0,
+        }
+    );
+
+    // Repeating the trim immediately finds zero remaining untrimmed rows.
+    let second = rec
+        .apply_retention_at(
+            now,
+            RetentionPolicy {
+                row_retention_days: None,
+                text_retention_days: Some(7),
+            },
+            true,
+        )
+        .unwrap();
+    assert!(second.is_empty());
+
+    let trimmed = rec.record_by_id(old_id).unwrap().unwrap();
+    assert_eq!(trimmed.before_chars, 1000);
+    assert_eq!(trimmed.before_tokens, 400);
+    assert_eq!(trimmed.after_chars, 500);
+    assert_eq!(trimmed.after_tokens, 200);
+    assert!(trimmed.before_text.is_none());
+    assert!(trimmed.after_text.is_none());
+    assert!(trimmed.before_output.is_none());
+    assert!(trimmed.after_output.is_none());
+
+    let recent = rec.record_by_id(recent_id).unwrap().unwrap();
+    assert_eq!(recent.before_text.as_deref(), Some("new-before"));
+    assert_eq!(recent.after_text.as_deref(), Some("new-after"));
+
+    // Surviving row's artifact and retrieve_events stay intact.
+    assert_eq!(rec.retrieve_totals().unwrap().hits, 1);
+    {
+        let conn = rec.lock_conn();
+        let artifact_ids: Vec<i64> = conn
+            .prepare("SELECT stats_id FROM compression_artifacts")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(artifact_ids, vec![old_id]);
+    }
+
+    // Query/formatting/diff/reader paths handle trimmed NULL text gracefully.
+    let show_out = crate::query::format_show(&trimmed);
+    assert!(show_out.contains("(no text content stored)"), "{show_out}");
+
+    let all = rec.all_records(None).unwrap();
+    let summary = StatsSummary::from_records(&all);
+    assert_eq!(summary.total_records, 2);
+    assert_eq!(summary.total_before_tokens, 800);
+    assert_eq!(summary.total_after_tokens, 400);
+
+    let single_diff = crate::diff::record_report(&trimmed, 3);
+    let single_diff_json = serde_json::to_value(single_diff).unwrap();
+    assert_eq!(single_diff_json["chains"][0]["diff"]["available"], false);
+    assert_eq!(
+        single_diff_json["chains"][0]["diff"]["omitted_reason"],
+        "missing-content"
+    );
+
+    let session_diff_records = rec.records_for_diff("trim-s", None).unwrap();
+    let session_diff = crate::diff::session_report(
+        &session_diff_records,
+        "trim-s",
+        20,
+        crate::diff::DiffSort::Time,
+    );
+    let session_diff_json = serde_json::to_value(session_diff).unwrap();
+    assert_eq!(session_diff_json["chains"].as_array().unwrap().len(), 2);
+
+    let reader = crate::reader::StatsReader::open(&db_path).unwrap();
+    let page = reader.list(&crate::reader::RecordQuery::default()).unwrap();
+    assert_eq!(page.records.len(), 2);
+    let fetched = reader.get(old_id, true).unwrap().unwrap();
+    assert!(fetched["before_text"].is_null());
+    assert_eq!(fetched["before_tokens"], 400);
+}
+
+#[test]
+fn apply_retention_combines_row_expiry_and_text_trimming() {
+    let (rec, _dir) = new_recorder();
+    let now = fixed_local_time("2026-11-26T12:00:00+00:00");
+    let expired_ts = fixed_local_time("2026-10-20T12:00:00+00:00"); // 37d old -> deleted
+    let mid_ts = fixed_local_time("2026-11-15T12:00:00+00:00"); // 11d old -> trimmed
+    let fresh_ts = fixed_local_time("2026-11-24T12:00:00+00:00"); // 2d old -> untouched
+
+    let expired_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "s",
+            )
+            .with_timestamp(expired_ts)
+            .with_text("exp".into(), "exp2".into()),
+        )
+        .unwrap();
+    let mid_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "s",
+            )
+            .with_timestamp(mid_ts)
+            .with_text("mid".into(), "mid2".into()),
+        )
+        .unwrap();
+    let fresh_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "s",
+            )
+            .with_timestamp(fresh_ts)
+            .with_text("fresh".into(), "fresh2".into()),
+        )
+        .unwrap();
+
+    let report = rec
+        .apply_retention_at(
+            now,
+            RetentionPolicy {
+                row_retention_days: Some(30),
+                text_retention_days: Some(7),
+            },
+            true,
+        )
+        .unwrap();
+    assert_eq!(report.stats_rows_deleted, 1);
+    assert_eq!(report.text_rows_trimmed, 1);
+    assert!(rec.record_by_id(expired_id).unwrap().is_none());
+
+    let mid = rec.record_by_id(mid_id).unwrap().unwrap();
+    assert!(mid.before_text.is_none());
+    assert_eq!(mid.before_tokens, 400);
+
+    let fresh = rec.record_by_id(fresh_id).unwrap().unwrap();
+    assert_eq!(fresh.before_text.as_deref(), Some("fresh"));
+}
+
+#[test]
+fn retention_queries_use_instant_and_partial_text_indexes() {
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    rec.record(
+        &sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "s",
+        )
+        .with_text("before".into(), "after".into()),
+    )
+    .unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let explain = |sql: &str| -> String {
+        conn.prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" | ")
+    };
+
+    let prune_plan = explain("EXPLAIN QUERY PLAN DELETE FROM stats WHERE timestamp_ns < 100");
+    assert!(
+        prune_plan.contains("idx_stats_instant"),
+        "expected idx_stats_instant in plan: {prune_plan}"
+    );
+    assert!(!prune_plan.contains("TEMP B-TREE"), "plan: {prune_plan}");
+
+    let trim_plan = explain(
+        "EXPLAIN QUERY PLAN
+         UPDATE stats
+         SET before_text = NULL,
+             after_text = NULL,
+             before_output = NULL,
+             after_output = NULL
+         WHERE timestamp_ns < 100
+           AND (before_text IS NOT NULL
+             OR after_text IS NOT NULL
+             OR before_output IS NOT NULL
+             OR after_output IS NOT NULL)",
+    );
+    assert!(
+        trim_plan.contains("idx_stats_text_instant"),
+        "expected idx_stats_text_instant in plan: {trim_plan}"
+    );
+    assert!(!trim_plan.contains("TEMP B-TREE"), "plan: {trim_plan}");
+
+    let retrieve_plan =
+        explain("EXPLAIN QUERY PLAN DELETE FROM retrieve_events WHERE timestamp_ns < 100");
+    assert!(
+        retrieve_plan.contains("idx_retrieve_events_instant"),
+        "expected idx_retrieve_events_instant in plan: {retrieve_plan}"
+    );
+
+    let backfill_stats_plan = explain(
+        "EXPLAIN QUERY PLAN
+         SELECT id, timestamp FROM stats
+         WHERE timestamp_ns IS NULL
+         ORDER BY id ASC
+         LIMIT 1000",
+    );
+    assert!(
+        backfill_stats_plan.contains("idx_stats_instant"),
+        "expected idx_stats_instant in plan: {backfill_stats_plan}"
+    );
+    assert!(
+        !backfill_stats_plan.contains("TEMP B-TREE"),
+        "plan: {backfill_stats_plan}"
+    );
+
+    let backfill_retrieve_plan = explain(
+        "EXPLAIN QUERY PLAN
+         SELECT id, timestamp FROM retrieve_events
+         WHERE timestamp_ns IS NULL
+         ORDER BY id ASC
+         LIMIT 1000",
+    );
+    assert!(
+        backfill_retrieve_plan.contains("idx_retrieve_events_instant"),
+        "expected idx_retrieve_events_instant in plan: {backfill_retrieve_plan}"
+    );
+    assert!(
+        !backfill_retrieve_plan.contains("TEMP B-TREE"),
+        "plan: {backfill_retrieve_plan}"
+    );
+}
+
+#[test]
+fn prune_handles_rtk_null_timestamp_ns_utc_offsets_corrupt_rows_and_max_days() {
+    let (rec, dir) = new_recorder();
+    let db_path = dir.path().join("stats.db");
+    let now = fixed_local_time("2026-11-26T06:00:00+00:00");
+
+    // Simulate RTK-written rows without timestamp_ns across UTC offsets:
+    // 2026-11-01T01:30:00-04:00 == 05:30Z (> 25 days old from 2026-11-26T06:00Z -> expired for 25d)
+    // 2026-11-01T01:15:00-05:00 == 06:15Z (< 25 days old from 2026-11-26T06:00Z -> kept for 25d)
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO stats (timestamp, timestamp_ns, operation, agent_id, before_chars, before_tokens, after_chars, after_tokens, before_text, after_text)
+         VALUES ('2026-11-01T01:30:00.000000-04:00', NULL, 'rewrite-command', 'rtk', 100, 25, 50, 12, 'b1', 'a1')",
+        [],
+    )
+    .unwrap();
+    let older_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO stats (timestamp, timestamp_ns, operation, agent_id, before_chars, before_tokens, after_chars, after_tokens, before_text, after_text)
+         VALUES ('2026-11-01T01:15:00.000000-05:00', NULL, 'rewrite-command', 'rtk', 100, 25, 50, 12, 'b2', 'a2')",
+        [],
+    )
+    .unwrap();
+    let newer_id = conn.last_insert_rowid();
+    // Corrupt timestamp must be preserved (UNPARSEABLE_INSTANT_NS == i64::MAX).
+    conn.execute(
+        "INSERT INTO stats (timestamp, timestamp_ns, operation, agent_id, before_chars, before_tokens, after_chars, after_tokens)
+         VALUES ('not-a-date', NULL, 'compress-response', 'cli', 100, 25, 50, 12)",
+        [],
+    )
+    .unwrap();
+    let corrupt_id = conn.last_insert_rowid();
+    drop(conn);
+
+    // u32::MAX days must not overflow or delete anything.
+    let no_overflow = rec
+        .apply_retention_at(
+            now,
+            RetentionPolicy {
+                row_retention_days: Some(u32::MAX),
+                text_retention_days: Some(u32::MAX),
+            },
+            true,
+        )
+        .unwrap();
+    assert!(no_overflow.is_empty());
+
+    let report = rec
+        .apply_retention_at(
+            now,
+            RetentionPolicy {
+                row_retention_days: Some(25),
+                text_retention_days: None,
+            },
+            false,
+        )
+        .unwrap();
+    assert_eq!(report.stats_rows_deleted, 1);
+    assert!(rec.record_by_id(older_id).unwrap().is_none());
+    assert!(rec.record_by_id(newer_id).unwrap().is_some());
+    assert!(rec.record_by_id(corrupt_id).unwrap().is_some());
+
+    // Zero days disables retention as a no-op.
+    assert!(rec.prune_older_than(0).unwrap().is_empty());
+    assert!(rec.trim_text_older_than(0).unwrap().is_empty());
+}
+
+#[test]
+fn periodic_sampled_retention_runs_on_interval_and_is_fail_soft() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let rec = StatsRecorder::with_retention(
+        &db_path,
+        RetentionPolicy {
+            row_retention_days: Some(30),
+            text_retention_days: Some(7),
+        },
+    )
+    .unwrap();
+
+    let expired_ts = Local::now() - chrono::Duration::days(45);
+    let mid_ts = Local::now() - chrono::Duration::days(10);
+    let expired_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "auto",
+            )
+            .with_timestamp(expired_ts)
+            .with_text("old".into(), "old2".into()),
+        )
+        .unwrap();
+    let mid_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "auto",
+            )
+            .with_timestamp(mid_ts)
+            .with_text("mid".into(), "mid2".into()),
+        )
+        .unwrap();
+
+    // Rows 3..63 must not trigger sampled cleanup yet.
+    for _ in 3..StatsRecorder::AUTO_RETENTION_INTERVAL {
+        rec.record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "auto",
+        ))
+        .unwrap();
+    }
+    assert!(rec.record_by_id(expired_id).unwrap().is_some());
+    assert!(
+        rec.record_by_id(mid_id)
+            .unwrap()
+            .unwrap()
+            .before_text
+            .is_some()
+    );
+
+    // Row 64 triggers sampled cleanup.
+    let trigger_id = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "auto",
+        ))
+        .unwrap();
+    assert_eq!(trigger_id, StatsRecorder::AUTO_RETENTION_INTERVAL);
+    assert!(rec.record_by_id(expired_id).unwrap().is_none());
+    let trimmed_mid = rec.record_by_id(mid_id).unwrap().unwrap();
+    assert!(trimmed_mid.before_text.is_none());
+
+    // Fail-soft: even if retention cleanup fails (e.g. blocked DELETE trigger),
+    // record() on the next interval still commits and returns Ok(row_id).
+    let another_expired_id = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "auto",
+            )
+            .with_timestamp(expired_ts),
+        )
+        .unwrap();
+    {
+        let conn = rec.lock_conn();
+        conn.execute_batch(
+            "CREATE TRIGGER block_retention_delete BEFORE DELETE ON stats
+             BEGIN SELECT RAISE(ABORT, 'blocked delete'); END;",
+        )
+        .unwrap();
+    }
+    for _ in (another_expired_id + 1)..(StatsRecorder::AUTO_RETENTION_INTERVAL * 2) {
+        rec.record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "auto",
+        ))
+        .unwrap();
+    }
+    let second_trigger_id = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "auto",
+        ))
+        .unwrap();
+    assert_eq!(
+        second_trigger_id,
+        StatsRecorder::AUTO_RETENTION_INTERVAL * 2
+    );
+    assert!(rec.record_by_id(another_expired_id).unwrap().is_some());
+}
+
+#[test]
+fn compact_and_clear_reclaim_disk_space_preserve_permissions_and_handle_busy_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let rec = StatsRecorder::new(&db_path).unwrap();
+
+    let big_before = "A".repeat(256 * 1024);
+    let big_after = "B".repeat(128 * 1024);
+    let old_ts = Local::now() - chrono::Duration::days(30);
+    for _ in 0..8 {
+        rec.record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "big",
+            )
+            .with_timestamp(old_ts)
+            .with_text(big_before.clone(), big_after.clone()),
+        )
+        .unwrap();
+    }
+    // Checkpoint WAL first so db_path reflects the full allocated footprint.
+    let pre_ckpt = rec.checkpoint_wal().unwrap();
+    assert!(pre_ckpt.wal_checkpoint_completed);
+    let size_with_payloads = db_bundle_size(&db_path);
+    assert!(size_with_payloads > 1_000_000, "size: {size_with_payloads}");
+
+    let trimmed = rec.trim_text_older_than(7).unwrap();
+    assert_eq!(trimmed.text_rows_trimmed, 8);
+    let compact = rec.compact().unwrap();
+    assert!(compact.vacuum_attempted);
+    assert!(compact.vacuum_completed);
+    assert!(compact.wal_checkpoint_completed);
+    assert!(!compact.wal_busy);
+    assert!(
+        compact.bytes_after < size_with_payloads / 4,
+        "expected compaction to reclaim freed pages: before={size_with_payloads}, after={}",
+        compact.bytes_after
+    );
+    assert_eq!(
+        sidecar_path(&db_path, "-wal")
+            .metadata()
+            .map(|m| m.len())
+            .unwrap_or(0),
+        0
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // Active read snapshot makes TRUNCATE report wal_busy=true without blocking.
+    let reader = rusqlite::Connection::open(&db_path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM stats;")
+        .unwrap();
+    rec.record(
+        &sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "big",
+        )
+        .with_text(big_before, big_after),
+    )
+    .unwrap();
+    let wal_report = rec.checkpoint_wal().unwrap();
+    assert!(!wal_report.wal_checkpoint_completed);
+    assert!(wal_report.wal_busy);
+    drop(reader);
+
+    // Active write lock makes VACUUM defer fail-soft (vacuum_completed == false, Ok).
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let busy_compact = rec.compact().unwrap();
+    assert!(busy_compact.vacuum_attempted);
+    assert!(!busy_compact.vacuum_completed);
+    assert!(!busy_compact.wal_checkpoint_completed);
+    assert!(busy_compact.wal_busy);
+    drop(writer);
+
+    // clear() deletes everything and reclaims space.
+    rec.clear().unwrap();
+    assert_eq!(rec.count().unwrap(), 0);
+    assert!(db_bundle_size(&db_path) < size_with_payloads / 4);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn mixed_external_and_recorder_writes_do_not_skip_retention_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let rec = StatsRecorder::with_retention(&db_path, RetentionPolicy::default_enabled()).unwrap();
+    let expired_ts = Local::now() - chrono::Duration::days(45);
+    let recent_ts = Local::now().to_rfc3339();
+
+    let first_expired = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "mix",
+            )
+            .with_timestamp(expired_ts)
+            .with_text("old-1".into(), "old-1-a".into()),
+        )
+        .unwrap();
+
+    // External writer (e.g. RTK) occupies rows 2..=64 including row 64.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for index in 2..=StatsRecorder::AUTO_RETENTION_INTERVAL {
+            conn.execute(
+                "INSERT INTO stats (timestamp, operation, agent_id, before_chars, before_tokens, after_chars, after_tokens)
+                 VALUES (?1, 'rewrite-command', 'rtk', 100, 25, 40, 10)",
+                [&recent_ts],
+            )
+            .unwrap();
+            let _ = index;
+        }
+    }
+    assert!(rec.record_by_id(first_expired).unwrap().is_some());
+
+    // Next recorder insert lands at row 65 (not % 64) and must still trigger cleanup.
+    let trigger_one = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "mix",
+        ))
+        .unwrap();
+    assert_eq!(trigger_one, StatsRecorder::AUTO_RETENTION_INTERVAL + 1);
+    assert!(rec.record_by_id(first_expired).unwrap().is_none());
+
+    // Repeat the second window: expired row at 66, external writer occupies row 128,
+    // recorder write at 129 triggers cleanup immediately (129 - 65 == 64).
+    let second_expired = rec
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "mix",
+            )
+            .with_timestamp(expired_ts),
+        )
+        .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for _ in (second_expired + 1)..=(StatsRecorder::AUTO_RETENTION_INTERVAL * 2) {
+            conn.execute(
+                "INSERT INTO stats (timestamp, operation, agent_id, before_chars, before_tokens, after_chars, after_tokens)
+                 VALUES (?1, 'rewrite-command', 'rtk', 100, 25, 40, 10)",
+                [&recent_ts],
+            )
+            .unwrap();
+        }
+    }
+    assert!(rec.record_by_id(second_expired).unwrap().is_some());
+    let trigger_two = rec
+        .record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "mix",
+        ))
+        .unwrap();
+    assert_eq!(trigger_two, StatsRecorder::AUTO_RETENTION_INTERVAL * 2 + 1);
+    assert!(rec.record_by_id(second_expired).unwrap().is_none());
+}
+
+#[test]
+fn maybe_run_periodic_retention_cleans_rtk_only_database_without_recorder_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let old_ts = (Local::now() - chrono::Duration::days(45)).to_rfc3339();
+    let mid_ts = (Local::now() - chrono::Duration::days(15)).to_rfc3339();
+    let recent_ts = Local::now().to_rfc3339();
+    let my_pid = 42_001_i64;
+    let other_pid = 42_002_i64;
+
+    // Nonexistent file is a fast default snapshot / Ok(None).
+    assert_eq!(
+        StatsRecorder::read_retention_snapshot(&db_path).unwrap(),
+        RetentionSnapshot::default()
+    );
+    assert_eq!(
+        StatsRecorder::maybe_run_periodic_retention(
+            &db_path,
+            RetentionPolicy::default_enabled(),
+            RetentionSnapshot::default(),
+            my_pid,
+        )
+        .unwrap(),
+        None
+    );
+
+    // Seed RTK-only schema (no timestamp_ns column, no stats_maintenance table).
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        StatsRecorder::read_retention_snapshot(&db_path).unwrap(),
+        RetentionSnapshot::default()
+    );
+    conn.execute_batch(
+        "CREATE TABLE stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            source_pid INTEGER,
+            session_id TEXT,
+            tool_use_id TEXT,
+            before_chars INTEGER NOT NULL,
+            before_tokens INTEGER NOT NULL,
+            after_chars INTEGER NOT NULL,
+            after_tokens INTEGER NOT NULL,
+            before_text TEXT,
+            after_text TEXT
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO stats (timestamp, operation, agent_id, source_pid, before_chars, before_tokens, after_chars, after_tokens, before_text, after_text)
+         VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20, 'rtk-old-b', 'rtk-old-a')",
+        rusqlite::params![old_ts, other_pid],
+    )
+    .unwrap();
+    let expired_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO stats (timestamp, operation, agent_id, source_pid, before_chars, before_tokens, after_chars, after_tokens, before_text, after_text)
+         VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20, 'rtk-mid-b', 'rtk-mid-a')",
+        rusqlite::params![mid_ts, other_pid],
+    )
+    .unwrap();
+    let mid_id = conn.last_insert_rowid();
+    for _ in 3..StatsRecorder::AUTO_RETENTION_INTERVAL {
+        conn.execute(
+            "INSERT INTO stats (timestamp, operation, agent_id, source_pid, before_chars, before_tokens, after_chars, after_tokens)
+             VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20)",
+            rusqlite::params![recent_ts, other_pid],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        StatsRecorder::read_retention_snapshot(&db_path).unwrap(),
+        RetentionSnapshot {
+            max_row_id: StatsRecorder::AUTO_RETENTION_INTERVAL - 1,
+            clear_epoch: 0,
+        }
+    );
+
+    // Before 64 rows, read-only probe returns Ok(None) without migrating schema.
+    assert_eq!(
+        StatsRecorder::maybe_run_periodic_retention(
+            &db_path,
+            RetentionPolicy::default_enabled(),
+            RetentionSnapshot {
+                max_row_id: StatsRecorder::AUTO_RETENTION_INTERVAL - 1,
+                clear_epoch: 0,
+            },
+            my_pid,
+        )
+        .unwrap(),
+        None
+    );
+
+    // Row 64 written by another PID must not trigger cleanup when `my_pid` did not write
+    // (simulating a read-only `tokenless rtk gain` after a pre-existing 64-row DB).
+    conn.execute(
+        "INSERT INTO stats (timestamp, operation, agent_id, source_pid, before_chars, before_tokens, after_chars, after_tokens)
+         VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20)",
+        rusqlite::params![recent_ts, other_pid],
+    )
+    .unwrap();
+    assert_eq!(
+        StatsRecorder::read_retention_snapshot(&db_path).unwrap(),
+        RetentionSnapshot {
+            max_row_id: StatsRecorder::AUTO_RETENTION_INTERVAL,
+            clear_epoch: 0,
+        }
+    );
+    assert_eq!(
+        StatsRecorder::maybe_run_periodic_retention(
+            &db_path,
+            RetentionPolicy::default_enabled(),
+            RetentionSnapshot {
+                max_row_id: StatsRecorder::AUTO_RETENTION_INTERVAL - 1,
+                clear_epoch: 0,
+            },
+            my_pid,
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        StatsRecorder::maybe_run_periodic_retention(
+            &db_path,
+            RetentionPolicy::default_enabled(),
+            RetentionSnapshot {
+                max_row_id: StatsRecorder::AUTO_RETENTION_INTERVAL,
+                clear_epoch: 0,
+            },
+            my_pid,
+        )
+        .unwrap(),
+        None
+    );
+    let has_ts_ns: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = 'timestamp_ns'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        > 0;
+    assert!(!has_ts_ns);
+    let intact_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM stats WHERE id IN (?1, ?2) AND before_text IS NOT NULL",
+            rusqlite::params![expired_id, mid_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(intact_rows, 2);
+
+    // Row 65 written by `my_pid` crosses the threshold, deletes row 1, and trims row 2.
+    conn.execute(
+        "INSERT INTO stats (timestamp, operation, agent_id, source_pid, before_chars, before_tokens, after_chars, after_tokens)
+         VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20)",
+        rusqlite::params![recent_ts, my_pid],
+    )
+    .unwrap();
+    let trigger_id = StatsRecorder::AUTO_RETENTION_INTERVAL + 1;
+    let report = StatsRecorder::maybe_run_periodic_retention(
+        &db_path,
+        RetentionPolicy::default_enabled(),
+        RetentionSnapshot {
+            max_row_id: StatsRecorder::AUTO_RETENTION_INTERVAL,
+            clear_epoch: 0,
+        },
+        my_pid,
+    )
+    .unwrap()
+    .expect("own write past 64 rows must trigger cleanup");
+    assert_eq!(report.stats_rows_deleted, 1);
+    assert_eq!(report.text_rows_trimmed, 1);
+
+    let remaining_expired: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM stats WHERE id = ?1",
+            [expired_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_expired, 0);
+    let (mid_before, mid_after): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT before_text, after_text FROM stats WHERE id = ?1",
+            [mid_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(mid_before.is_none());
+    assert!(mid_after.is_none());
+    let watermark: i64 = conn
+        .query_row(
+            "SELECT last_retention_row_id FROM stats_maintenance WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(watermark, trigger_id);
+
+    // Next 63 own rows (66..=128) stay below 64-row delta and skip cleanly.
+    for _ in 0..(StatsRecorder::AUTO_RETENTION_INTERVAL - 1) {
+        conn.execute(
+            "INSERT INTO stats (timestamp, operation, agent_id, source_pid, before_chars, before_tokens, after_chars, after_tokens)
+             VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20)",
+            rusqlite::params![recent_ts, my_pid],
+        )
+        .unwrap();
+    }
+    let below_next_window = trigger_id + StatsRecorder::AUTO_RETENTION_INTERVAL - 1;
+    assert_eq!(
+        StatsRecorder::maybe_run_periodic_retention(
+            &db_path,
+            RetentionPolicy::default_enabled(),
+            RetentionSnapshot {
+                max_row_id: below_next_window - 1,
+                clear_epoch: 0,
+            },
+            my_pid,
+        )
+        .unwrap(),
+        None
+    );
+
+    // Row 129 (delta == 64) triggers again and advances the watermark.
+    conn.execute(
+        "INSERT INTO stats (timestamp, operation, agent_id, source_pid, before_chars, before_tokens, after_chars, after_tokens)
+         VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20)",
+        rusqlite::params![recent_ts, my_pid],
+    )
+    .unwrap();
+    let second_trigger_id = trigger_id + StatsRecorder::AUTO_RETENTION_INTERVAL;
+    let second = StatsRecorder::maybe_run_periodic_retention(
+        &db_path,
+        RetentionPolicy::default_enabled(),
+        RetentionSnapshot {
+            max_row_id: below_next_window,
+            clear_epoch: 0,
+        },
+        my_pid,
+    )
+    .unwrap()
+    .expect("own write at next 64-row delta must advance watermark");
+    assert_eq!(second.total_changes(), 0);
+    let watermark: i64 = conn
+        .query_row(
+            "SELECT last_retention_row_id FROM stats_maintenance WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(watermark, second_trigger_id);
+}
+
+#[test]
+fn sampled_retention_bounds_timestamp_backfill_to_batch_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let policy = RetentionPolicy::default_enabled();
+    let old_ts = (Local::now() - chrono::Duration::days(45)).to_rfc3339();
+
+    drop(StatsRecorder::with_retention(&db_path, policy).unwrap());
+
+    // Insert 2,500 expired RTK-format rows with NULL timestamp_ns.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO stats (timestamp, timestamp_ns, operation, agent_id, before_chars, before_tokens, after_chars, after_tokens, before_text, after_text)
+             VALUES (?1, NULL, 'rewrite-command', 'rtk', 100, 25, 40, 10, 'old-b', 'old-a')",
+        )
+        .unwrap();
+    for _ in 0..2_500 {
+        stmt.execute([&old_ts]).unwrap();
+    }
+    drop(stmt);
+
+    // Opening with_retention must not run an unbounded open-time backfill.
+    let rec = StatsRecorder::with_retention(&db_path, policy).unwrap();
+    let unkeyed_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM stats WHERE timestamp_ns IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unkeyed_before, 2_500);
+
+    // One sampled retention pass (row 2,501) backfills and deletes only AUTO_RETENTION_BATCH_LIMIT (1,000) rows.
+    rec.record(&sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "batch",
+    ))
+    .unwrap();
+
+    let total_after: usize = rec.count().unwrap();
+    assert_eq!(
+        total_after,
+        2_500 - StatsRecorder::AUTO_RETENTION_BATCH_LIMIT + 1
+    );
+    let unkeyed_after: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM stats WHERE timestamp_ns IS NULL",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? as usize),
+        )
+        .unwrap();
+    assert_eq!(
+        unkeyed_after,
+        2_500 - StatsRecorder::AUTO_RETENTION_BATCH_LIMIT
+    );
+}
+
+#[test]
+fn out_of_order_rtk_maintenance_does_not_regress_watermark_or_retrigger_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let policy = RetentionPolicy::default_enabled();
+    let old_ts = (Local::now() - chrono::Duration::days(45)).to_rfc3339();
+    let recent_ts = Local::now().to_rfc3339();
+    let seed_pid = 40_000_i64;
+    let pid_a = 40_001_i64;
+    let pid_b = 40_002_i64;
+
+    // 1. Seed 2,500 expired RTK-format rows inside one transaction.
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                source_pid INTEGER,
+                session_id TEXT,
+                tool_use_id TEXT,
+                before_chars INTEGER NOT NULL,
+                before_tokens INTEGER NOT NULL,
+                after_chars INTEGER NOT NULL,
+                after_tokens INTEGER NOT NULL,
+                before_text TEXT,
+                after_text TEXT
+            );",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO stats (
+                        timestamp, operation, agent_id, source_pid,
+                        before_chars, before_tokens, after_chars, after_tokens,
+                        before_text, after_text
+                    ) VALUES (?1, 'rewrite-command', 'expired-seed', ?2, 200, 50, 80, 20, 'old-b', 'old-a')",
+                )
+                .unwrap();
+            for _ in 0..2_500 {
+                stmt.execute(rusqlite::params![old_ts, seed_pid]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    // 2. Process A appends row 2,501, 63 filler rows follow (2,502..=2,564),
+    //    then Process B appends row 2,565.
+    let before_a = StatsRecorder::read_retention_snapshot(&db_path).unwrap();
+    assert_eq!(
+        before_a,
+        RetentionSnapshot {
+            max_row_id: 2_500,
+            clear_epoch: 0,
+        }
+    );
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO stats (
+                timestamp, operation, agent_id, source_pid,
+                before_chars, before_tokens, after_chars, after_tokens
+            ) VALUES (?1, 'rewrite-command', 'rtk-recent', ?2, 200, 50, 80, 20)",
+            rusqlite::params![recent_ts, pid_a],
+        )
+        .unwrap();
+        let row_a = conn.last_insert_rowid();
+        assert_eq!(row_a, 2_501);
+
+        let tx = conn.transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO stats (
+                        timestamp, operation, agent_id, source_pid,
+                        before_chars, before_tokens, after_chars, after_tokens
+                    ) VALUES (?1, 'rewrite-command', 'rtk-recent', ?2, 200, 50, 80, 20)",
+                )
+                .unwrap();
+            for _ in 0..63 {
+                stmt.execute(rusqlite::params![recent_ts, seed_pid])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let before_b = StatsRecorder::read_retention_snapshot(&db_path).unwrap();
+        assert_eq!(
+            before_b,
+            RetentionSnapshot {
+                max_row_id: 2_564,
+                clear_epoch: 0,
+            }
+        );
+
+        conn.execute(
+            "INSERT INTO stats (
+                timestamp, operation, agent_id, source_pid,
+                before_chars, before_tokens, after_chars, after_tokens
+            ) VALUES (?1, 'rewrite-command', 'rtk-recent', ?2, 200, 50, 80, 20)",
+            rusqlite::params![recent_ts, pid_b],
+        )
+        .unwrap();
+        let row_b = conn.last_insert_rowid();
+        assert_eq!(row_b, 2_565);
+
+        // 3. Process B completes maintenance first: deletes 1,000 expired rows and sets watermark=2,565.
+        let report_b =
+            StatsRecorder::maybe_run_periodic_retention(&db_path, policy, before_b, pid_b)
+                .unwrap()
+                .expect("process B should run initial cleanup batch");
+        assert_eq!(
+            report_b.stats_rows_deleted,
+            StatsRecorder::AUTO_RETENTION_BATCH_LIMIT
+        );
+
+        let remaining_expired = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM stats WHERE agent_id = 'expired-seed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let current_watermark = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row(
+                "SELECT last_retention_row_id FROM stats_maintenance WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(remaining_expired(&conn), 1_500);
+        assert_eq!(current_watermark(&conn), 2_565);
+
+        // 4. Process A finishes maintenance late: must skip without regressing watermark or deleting more rows.
+        assert_eq!(
+            StatsRecorder::maybe_run_periodic_retention(&db_path, policy, before_a, pid_a).unwrap(),
+            None
+        );
+        assert_eq!(remaining_expired(&conn), 1_500);
+        assert_eq!(current_watermark(&conn), 2_565);
+
+        // 5. Direct in-transaction re-check with stale row_id 2,501 must also return Ok(None) and keep state intact.
+        let direct = StatsRecorder::with_retention(&db_path, policy).unwrap();
+        {
+            let mut direct_conn = direct.lock_conn();
+            assert_eq!(
+                direct
+                    .run_sampled_retention_inner(&mut direct_conn, row_a, before_a.clear_epoch)
+                    .unwrap(),
+                None
+            );
+        }
+        assert_eq!(remaining_expired(&conn), 1_500);
+        assert_eq!(current_watermark(&conn), 2_565);
+
+        // 6. Very next foreground write (row 2,566) must NOT trigger an immediate cleanup pass.
+        let row_next = direct
+            .record(&sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "after-race",
+            ))
+            .unwrap();
+        assert_eq!(row_next, 2_566);
+        assert_eq!(remaining_expired(&conn), 1_500);
+        assert_eq!(current_watermark(&conn), 2_565);
+
+        // 7. clear() resets the watermark and advances clear_epoch atomically so subsequent writes trigger cleanly again at row 64.
+        direct.clear().unwrap();
+        assert_eq!(direct.count().unwrap(), 0);
+        let maintenance: (i64, i64) = conn
+            .query_row(
+                "SELECT last_retention_row_id, clear_epoch FROM stats_maintenance WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(maintenance, (0, 1));
+
+        let cleared_expired = direct
+            .record(
+                &sample(
+                    OperationType::CompressResponse,
+                    CompressionMode::Active,
+                    "post-clear",
+                )
+                .with_timestamp(Local::now() - chrono::Duration::days(45)),
+            )
+            .unwrap();
+        assert_eq!(cleared_expired, 1);
+        for _ in 2..=StatsRecorder::AUTO_RETENTION_INTERVAL {
+            direct
+                .record(&sample(
+                    OperationType::CompressResponse,
+                    CompressionMode::Active,
+                    "post-clear",
+                ))
+                .unwrap();
+        }
+        assert!(direct.record_by_id(cleared_expired).unwrap().is_none());
+        assert_eq!(direct.count().unwrap(), 63);
+        assert_eq!(
+            current_watermark(&conn),
+            StatsRecorder::AUTO_RETENTION_INTERVAL
+        );
+    }
+}
+
+#[test]
+fn late_writer_after_clear_does_not_restore_pre_clear_watermark() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stats.db");
+    let policy = RetentionPolicy::default_enabled();
+    let old_ts = (Local::now() - chrono::Duration::days(45)).to_rfc3339();
+    let recent_ts = Local::now().to_rfc3339();
+    let pid_late = 41_001_i64;
+
+    // 1. Legacy stats_maintenance without `clear_epoch` column must remain
+    //    readable read-only and migrate cleanly while preserving the watermark.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stats_maintenance (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                last_retention_row_id INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO stats_maintenance (singleton, last_retention_row_id) VALUES (1, 128);",
+        )
+        .unwrap();
+        assert_eq!(
+            StatsRecorder::read_retention_snapshot(&db_path).unwrap(),
+            RetentionSnapshot {
+                max_row_id: 0,
+                clear_epoch: 0,
+            }
+        );
+    }
+
+    let recorder = StatsRecorder::with_retention(&db_path, policy).unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let read_state = |conn: &rusqlite::Connection| -> (i64, i64) {
+        conn.query_row(
+            "SELECT last_retention_row_id, clear_epoch FROM stats_maintenance WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(read_state(&conn), (128, 0));
+
+    // 2. Seed pre-clear rows up to id=3,000, snapshot before RTK runs, then
+    //    append pre-clear row id=3,001 by `pid_late`.
+    {
+        let mut seed_conn = rusqlite::Connection::open(&db_path).unwrap();
+        let tx = seed_conn.transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO stats (
+                        timestamp, operation, agent_id, source_pid,
+                        before_chars, before_tokens, after_chars, after_tokens
+                    ) VALUES (?1, 'rewrite-command', 'seed', 41000, 200, 50, 80, 20)",
+                )
+                .unwrap();
+            for _ in 0..3_000 {
+                stmt.execute([&recent_ts]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+    let before_late = StatsRecorder::read_retention_snapshot(&db_path).unwrap();
+    assert_eq!(
+        before_late,
+        RetentionSnapshot {
+            max_row_id: 3_000,
+            clear_epoch: 0,
+        }
+    );
+    conn.execute(
+        "INSERT INTO stats (
+            timestamp, operation, agent_id, source_pid,
+            before_chars, before_tokens, after_chars, after_tokens
+        ) VALUES (?1, 'rewrite-command', 'rtk', ?2, 200, 50, 80, 20)",
+        rusqlite::params![recent_ts, pid_late],
+    )
+    .unwrap();
+    let pre_clear_row_id = conn.last_insert_rowid();
+    assert_eq!(pre_clear_row_id, 3_001);
+
+    // 3. `clear()` empties stats, resets sqlite_sequence, zeroes the watermark,
+    //    and advances clear_epoch to 1.
+    recorder.clear().unwrap();
+    assert_eq!(read_state(&conn), (0, 1));
+    assert_eq!(
+        StatsRecorder::read_retention_snapshot(&db_path).unwrap(),
+        RetentionSnapshot {
+            max_row_id: 0,
+            clear_epoch: 1,
+        }
+    );
+
+    // 4. Window A: late RTK probe with pre-clear snapshot (3000, epoch=0) skips cleanly.
+    assert_eq!(
+        StatsRecorder::maybe_run_periodic_retention(&db_path, policy, before_late, pid_late)
+            .unwrap(),
+        None
+    );
+    assert_eq!(read_state(&conn), (0, 1));
+
+    // 5. Window B: late writer that already passed the probe with (row_id=3001, epoch=0)
+    //    enters the write transaction after `clear()` (even with an expired post-clear row
+    //    present) -> must return Ok(None), preserve the post-clear row, and NOT restore 3001!
+    let post_clear_expired = recorder
+        .record(
+            &sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "post-clear-expired",
+            )
+            .with_timestamp(Local::now() - chrono::Duration::days(45)),
+        )
+        .unwrap();
+    assert_eq!(post_clear_expired, 1);
+    {
+        let mut rec_conn = recorder.lock_conn();
+        assert_eq!(
+            recorder
+                .run_sampled_retention_inner(
+                    &mut rec_conn,
+                    pre_clear_row_id,
+                    before_late.clear_epoch
+                )
+                .unwrap(),
+            None
+        );
+    }
+    assert_eq!(read_state(&conn), (0, 1));
+    assert!(recorder.record_by_id(post_clear_expired).unwrap().is_some());
+
+    // 6. Normal post-clear writes in epoch 1 still trigger automatic retention on row 64.
+    for _ in 2..=StatsRecorder::AUTO_RETENTION_INTERVAL {
+        recorder
+            .record(&sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "post-clear-recent",
+            ))
+            .unwrap();
+    }
+    assert!(recorder.record_by_id(post_clear_expired).unwrap().is_none());
+    assert_eq!(
+        read_state(&conn),
+        (StatsRecorder::AUTO_RETENTION_INTERVAL, 1)
+    );
+
+    // 7. Even if post-clear row IDs surpass 3,001 AND the old PID appears again,
+    //    the stale epoch=0 snapshot and stale epoch=0 in-transaction call still skip!
+    {
+        let mut bulk_conn = rusqlite::Connection::open(&db_path).unwrap();
+        let tx = bulk_conn.transaction().unwrap();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO stats (
+                        timestamp, operation, agent_id, source_pid,
+                        before_chars, before_tokens, after_chars, after_tokens
+                    ) VALUES (?1, 'rewrite-command', 'epoch1', ?2, 200, 50, 80, 20)",
+                )
+                .unwrap();
+            for _ in 0..3_000 {
+                stmt.execute(rusqlite::params![old_ts, pid_late]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        StatsRecorder::maybe_run_periodic_retention(&db_path, policy, before_late, pid_late)
+            .unwrap(),
+        None
+    );
+    {
+        let mut rec_conn = recorder.lock_conn();
+        assert_eq!(
+            recorder
+                .run_sampled_retention_inner(
+                    &mut rec_conn,
+                    pre_clear_row_id,
+                    before_late.clear_epoch
+                )
+                .unwrap(),
+            None
+        );
+    }
+    assert_eq!(
+        read_state(&conn),
+        (StatsRecorder::AUTO_RETENTION_INTERVAL, 1)
+    );
+
+    // 8. Defense-in-depth: even if an external tool resets `sqlite_sequence`
+    //    without bumping `clear_epoch`, a stale row_id above `sqlite_sequence.seq`
+    //    cannot write a phantom watermark into `stats_maintenance`.
+    conn.execute_batch(
+        "DELETE FROM stats;
+         DELETE FROM sqlite_sequence WHERE name = 'stats';
+         UPDATE stats_maintenance SET last_retention_row_id = 0 WHERE singleton = 1;",
+    )
+    .unwrap();
+    {
+        let mut rec_conn = recorder.lock_conn();
+        assert_eq!(
+            recorder
+                .run_sampled_retention_inner(&mut rec_conn, pre_clear_row_id, 1)
+                .unwrap(),
+            None
+        );
+    }
+    assert_eq!(read_state(&conn), (0, 1));
+
+    // 9. A second `clear()` advances `clear_epoch` monotonically to 2.
+    recorder.clear().unwrap();
+    assert_eq!(read_state(&conn), (0, 2));
 }
