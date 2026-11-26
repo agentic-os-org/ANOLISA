@@ -162,7 +162,7 @@ async def task(index, mode, consumer="response", settings_origin=None, factory=N
         hooks={name: [HookMatcher(hooks=[hook])] for name in ("PreToolUse", "PostToolUse")},
         env={
             "ANTHROPIC_BASE_URL": endpoint,
-            "NO_PROXY": host,
+            "NO_PROXY": f"{host}:{server.server_port}" if host == "127.0.0.2" else host,
             "ANTHROPIC_API_KEY": "local-fixture",
             "AW_TEST_MODE": mode,
             "AW_TEST_TENANT": str(index),
@@ -359,4 +359,27 @@ async def main():
     await lifecycle()
 
 
-asyncio.run(main())
+async def check_proxy_bypass():
+    connections = 0
+
+    def reject_connection(reader, writer):
+        nonlocal connections
+        connections += 1
+        writer.close()
+
+    async with await asyncio.start_server(reject_connection, "127.0.0.1", 0) as proxy:
+        for key in ("http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "no_proxy"):
+            os.environ.pop(key, None)
+        os.environ["HTTP_PROXY"] = f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}"
+        await main()
+    assert connections == 0, f"unexpected proxy connections: {connections}"
+    report = ROOT / "result.json"
+    result = json.loads(report.read_text())
+    result["proxy_connections"] = connections
+    report.write_text(json.dumps(result))
+
+
+if os.environ.get("AW_TEST_SCENARIO") in {"settings", "cooperative-attach"}:
+    asyncio.run(check_proxy_bypass())
+else:
+    asyncio.run(main())

@@ -3,7 +3,11 @@
 import asyncio
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
+
+from claude_agent_sdk._internal.query import Query
 
 
 def configure(options, directory, origin, endpoint):
@@ -37,9 +41,29 @@ def configure(options, directory, origin, endpoint):
     return options, files
 
 
+async def retained_exclusion(task, index, origin, proxy, exclusion):
+    # Exercise native readback and model requests without installing a global
+    # managed-settings.json on the machine running this suite.
+    send = Query._send_control_request
+
+    async def retain(query, request, *args, **kwargs):
+        if request.get("subtype") == "apply_flag_settings":
+            env = {**request["settings"]["env"], "no_proxy": exclusion}
+            request = {**request, "settings": {**request["settings"], "env": env}}
+        return await send(query, request, *args, **kwargs)
+
+    probe = os.environ["HTTP_PROXY"]
+    with patch.dict(os.environ, {"HTTP_PROXY": "", proxy: probe}), patch.object(
+        Query, "_send_control_request", retain
+    ):
+        await task(index, "allow", settings_origin=origin)
+
+
 async def run(root, task, results):
     origins = ["inline", "file", "user", "project", "local", "default"]
-    for index, origin in enumerate(origins):
+    await retained_exclusion(task, 0, origins[0], "HTTP_PROXY", ".127.0.0.1")
+    await retained_exclusion(task, 1, origins[1], "ALL_PROXY", "example.invalid")
+    for index, origin in enumerate(origins[2:], start=2):
         await task(index, "allow", settings_origin=origin)
     # Separate native sources and upstreams must remain isolated in one host.
     await asyncio.gather(

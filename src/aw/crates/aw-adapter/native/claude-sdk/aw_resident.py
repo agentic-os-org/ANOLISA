@@ -309,7 +309,9 @@ class ManagedClient(ClaudeSDKClient):
                             allow_plaintext_http_hosts=self._aw_http_hosts,
                         )
                         endpoint = await self._aw_relay.start()
-                        await transport.route_model(self._query, endpoint)
+                        await transport.route_model(
+                            self._query, endpoint, self._aw_environment, environment,
+                        )
                     self.options = replace(
                         self.options, env={**self.options.env, "ANTHROPIC_BASE_URL": endpoint}
                     )

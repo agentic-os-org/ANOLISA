@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import os
 from typing import Any, AsyncGenerator, AsyncIterable, AsyncIterator
+from urllib.parse import SplitResult, urlsplit
 
 from claude_agent_sdk import ClaudeAgentOptions, Transport
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
@@ -44,6 +46,22 @@ async def single_input(prompt: AsyncIterable[dict[str, Any]]) -> dict[str, Any]:
                 await close()
 
 
+def _cli_bypasses_relay(relay: SplitResult, exclusions: str) -> bool:
+    # The bundled CLI accepts host suffixes at a dot boundary. With a port,
+    # only the full authority matches. A single leading dot is optional.
+    host = relay.hostname
+    if not host:
+        return False
+    for entry in exclusions.split(","):
+        rule = entry.strip(" \t\r\n\v\f")
+        if rule == "*":
+            return True
+        rule = rule.removeprefix(".")
+        if rule in (relay.netloc, host) or host.endswith("." + rule):
+            return True
+    return False
+
+
 class ManagedTransport(Transport):
     """Pin native transport, settings controls and callback dispatch identity."""
 
@@ -67,17 +85,39 @@ class ManagedTransport(Transport):
             raise CallbackFailure("AW requires the CLI effective settings environment")
         return dict(environment)
 
-    async def route_model(self, query: Any, endpoint: str) -> None:
+    async def route_model(
+        self, query: Any, endpoint: str, base_environment: dict[str, str] | None = None,
+        effective_environment: dict[str, str] | None = None,
+    ) -> None:
+        base = os.environ if base_environment is None else base_environment
+        if effective_environment is None:
+            effective_environment = await self.model_environment(query)
+        relay = urlsplit(endpoint)
+        flags = {
+            "ANTHROPIC_BASE_URL": endpoint,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+        # The bundled CLI accepts a port-specific exemption on a live connection.
+        # Preserve both sources even when native settings shadow an inherited list.
+        rules = dict.fromkeys(
+            rule.strip() for source in (base, effective_environment)
+            for name in ("NO_PROXY", "no_proxy")
+            for rule in source.get(name, "").split(",") if rule.strip()
+        )
+        rules[relay.netloc] = None
+        flags["NO_PROXY"] = flags["no_proxy"] = ",".join(rules)
         await query._send_control_request({
-            "subtype": "apply_flag_settings",
-            "settings": {"env": {
-                "ANTHROPIC_BASE_URL": endpoint,
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            }},
+            "subtype": "apply_flag_settings", "settings": {"env": flags},
         })
         environment = await self.model_environment(query)
         if environment.get("ANTHROPIC_BASE_URL") != endpoint:
             raise CallbackFailure("Native settings override the required AW model relay")
+        adopted = {**base, **environment}
+        # Native model requests select HTTP(S) proxies and ignore ALL_PROXY.
+        if any(adopted.get(key) for key in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY")):
+            bypass = adopted.get("no_proxy") or adopted.get("NO_PROXY", "")
+            if not _cli_bypasses_relay(relay, bypass):
+                raise CallbackFailure("Native settings override the required AW model relay proxy bypass")
 
     async def connect(self) -> None:
         if self._closed:
