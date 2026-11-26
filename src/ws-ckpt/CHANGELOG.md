@@ -2,6 +2,17 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.7.4
+
+### Changed
+- RPM builds now require Rust >= 1.91 (#10379)
+
+### Fixed
+- `ws-ckpt rollback --guarded --json` reports the daemon's rejection code and message for identity rejections instead of `PreflightFailed` (#10563)
+- Daemon startup stops if legacy index migration encounters an I/O error or fails to persist the new state; legacy `index.json` is removed only after the new state is saved (#10643)
+- Atomic writes no longer follow or overwrite stale `.tmp` symlinks (#10642)
+- Hermes and OpenClaw cron matching now handles workspace paths containing apostrophes, avoiding duplicate or orphaned crontab entries (#10469)
+
 ## 0.7.3
 
 ### Added

@@ -1,6 +1,6 @@
 [component]
 name = "ws-ckpt"
-version = "0.7.3"
+version = "0.7.4"
 layer = "runtime"
 domain = "state"
 display_name = "Workspace Checkpoint"
