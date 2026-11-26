@@ -130,9 +130,8 @@ pub struct LogFilter {
     pub operation_id: Option<String>,
     /// Match records whose severity is `>=` this value.
     pub severity_at_least: Option<Severity>,
-    /// Match if the value is in `objects[]`, or — for backward
-    /// compatibility with records that only carry `component` — if
-    /// `component == Some(value)`.
+    /// Match an object name, component name, operation id, or log source.
+    /// Older records that carry only `component` remain selectable.
     pub object: Option<String>,
     /// Inclusive RFC3339 lower bound on `started_at`, compared as an instant.
     /// Records with invalid timestamps do not match this filter.
@@ -575,8 +574,11 @@ fn record_matches(
     }
     if let Some(obj) = &filter.object {
         let in_objects = record.objects.iter().any(|candidate| candidate == obj);
-        let legacy_component_match = record.component.as_deref() == Some(obj.as_str());
-        if !in_objects && !legacy_component_match {
+        let selector = obj.as_str();
+        let component_match = record.component.as_deref() == Some(selector);
+        let operation_match = record.operation_id.as_deref() == Some(selector);
+        let source_match = record.source == selector;
+        if !in_objects && !component_match && !operation_match && !source_match {
             return false;
         }
     }
