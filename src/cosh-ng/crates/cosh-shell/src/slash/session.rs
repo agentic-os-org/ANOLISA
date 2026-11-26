@@ -2,6 +2,7 @@ mod command;
 mod compact;
 mod fresh;
 mod panel;
+mod resume;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -525,6 +526,9 @@ fn select_session_in_scope<W: Write>(
             vec![state.i18n().t(MessageId::SessionBusyBody).to_string()],
             None,
         );
+    }
+    if let Some(result) = resume::resume_acp_session(adapter, session_id, state, output) {
+        return result;
     }
     let Some(core) = core_adapter(adapter) else {
         return render_unavailable(state, output);

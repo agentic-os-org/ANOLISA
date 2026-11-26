@@ -975,3 +975,131 @@ async fn sse_failure_after_accepted_headers_is_never_replayed() {
     assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
     assert_eq!(access.failure().unwrap().dispatch, DispatchState::Accepted);
 }
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_grace_cancels_a_hanging_provider_future() {
+    let (mut client, mut reader, _writer, _) = io();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let cancel_notify = Arc::clone(&notify);
+    let cancel = move || cancel_notify.notify_one();
+    let pending = Mutex::new(VecDeque::new());
+    let shutdown_deadline = Mutex::new(None);
+    client
+        .write_all(b"{\"type\":\"control_request\",\"request_id\":\"s\",\"request\":{\"subtype\":\"shutdown\"}}\n")
+        .await
+        .unwrap();
+    drop(client);
+    let future = async {
+        notify.notified().await;
+        "cancelled"
+    };
+    let started = tokio::time::Instant::now();
+    let result = drive_provider(future, &mut reader, &cancel, &pending, &shutdown_deadline).await;
+    assert_eq!(result, "cancelled");
+    assert_eq!(
+        started.elapsed(),
+        SHUTDOWN_GRACE,
+        "a hanging provider future must be cancelled at the grace deadline"
+    );
+    assert!(pending
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line.contains("shutdown")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_lets_a_short_turn_finish_before_the_grace() {
+    let (mut client, mut reader, _writer, _) = io();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let cancel_notify = Arc::clone(&notify);
+    let cancel = move || cancel_notify.notify_one();
+    let pending = Mutex::new(VecDeque::new());
+    let shutdown_deadline = Mutex::new(None);
+    client
+        .write_all(b"{\"type\":\"control_request\",\"request_id\":\"s\",\"request\":{\"subtype\":\"shutdown\"}}\n")
+        .await
+        .unwrap();
+    let future = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        "finished"
+    };
+    let started = tokio::time::Instant::now();
+    let result = drive_provider(future, &mut reader, &cancel, &pending, &shutdown_deadline).await;
+    assert_eq!(result, "finished");
+    assert_eq!(started.elapsed(), Duration::from_millis(100));
+}
+
+#[tokio::test(start_paused = true)]
+async fn interrupt_during_shutdown_grace_cancels_early() {
+    let (mut client, mut reader, _writer, _) = io();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let cancel_notify = Arc::clone(&notify);
+    let cancel = move || cancel_notify.notify_one();
+    let pending = Mutex::new(VecDeque::new());
+    let shutdown_deadline = Mutex::new(None);
+    client
+        .write_all(b"{\"type\":\"control_request\",\"request_id\":\"s\",\"request\":{\"subtype\":\"shutdown\"}}\n")
+        .await
+        .unwrap();
+    client
+        .write_all(b"{\"type\":\"control_request\",\"request_id\":\"i\",\"request\":{\"subtype\":\"interrupt\"}}\n")
+        .await
+        .unwrap();
+    let future = async {
+        notify.notified().await;
+        "cancelled"
+    };
+    let started = tokio::time::Instant::now();
+    let result = drive_provider(future, &mut reader, &cancel, &pending, &shutdown_deadline).await;
+    assert_eq!(result, "cancelled");
+    assert!(
+        started.elapsed() < SHUTDOWN_GRACE,
+        "a later Interrupt must cancel before the grace deadline, took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_deadline_is_shared_across_provider_steps() {
+    let (mut client, mut reader, _writer, _) = io();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let cancel_notify = Arc::clone(&notify);
+    let cancel = move || cancel_notify.notify_one();
+    let pending = Mutex::new(VecDeque::new());
+    let shutdown_deadline = Mutex::new(None);
+    client
+        .write_all(b"{\"type\":\"control_request\",\"request_id\":\"s\",\"request\":{\"subtype\":\"shutdown\"}}\n")
+        .await
+        .unwrap();
+    drop(client);
+    let started = tokio::time::Instant::now();
+    // Step 1 (generate): a short step that completes after Shutdown is read but
+    // before the grace expires. It must leave the absolute deadline in place.
+    let step1 = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        "step1"
+    };
+    let r1 = drive_provider(step1, &mut reader, &cancel, &pending, &shutdown_deadline).await;
+    assert_eq!(r1, "step1");
+    assert_eq!(started.elapsed(), Duration::from_millis(100));
+    let deadline_after_step1 = *shutdown_deadline.lock().unwrap();
+    assert_eq!(
+        deadline_after_step1,
+        Some(started + SHUTDOWN_GRACE),
+        "the first Shutdown must set the shared absolute deadline"
+    );
+    // Step 2 (a later stream event): hangs, and must be cancelled at the SAME
+    // absolute deadline, not a fresh per-step grace and not forever.
+    let step2 = async {
+        notify.notified().await;
+        "cancelled"
+    };
+    let r2 = drive_provider(step2, &mut reader, &cancel, &pending, &shutdown_deadline).await;
+    assert_eq!(r2, "cancelled");
+    assert_eq!(
+        started.elapsed(),
+        SHUTDOWN_GRACE,
+        "a hanging later step must cancel at the first Shutdown's deadline, not an extended grace"
+    );
+}

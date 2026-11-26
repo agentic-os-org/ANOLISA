@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt;
 
+#[path = "raw_cli/acp_host_shell.rs"]
+mod acp_host_shell;
 #[path = "raw_cli/activity.rs"]
 mod activity;
 #[path = "raw_cli/agent_input.rs"]

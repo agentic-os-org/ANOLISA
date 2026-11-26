@@ -464,6 +464,13 @@ pub(super) fn core_adapter(adapter: &AdapterInstance) -> Option<&crate::adapter:
     }
 }
 
+pub(super) fn acp_adapter(adapter: &AdapterInstance) -> Option<&crate::adapter::AcpAgentAdapter> {
+    match adapter {
+        AdapterInstance::Acp(acp) => Some(acp),
+        _ => None,
+    }
+}
+
 pub(super) fn partition_protected(
     requested: Vec<String>,
     protected: &[String],

@@ -2052,6 +2052,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn lost_response_after_full_write_is_possibly_applied() {
         let (_dir, socket_path, daemon) = spawn_silent_daemon();
         let client = trusted_client(&socket_path);

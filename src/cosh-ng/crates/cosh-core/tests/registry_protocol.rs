@@ -271,12 +271,19 @@ fn registry_command_response(command: Command, request: Value) -> Value {
         });
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}")))
-        .next()
-        .expect("expected at least one response line")
+    // Report exit status and stderr when no response line arrives, so an
+    // occasional empty-stdout failure under load is diagnosable instead of a
+    // bare expectation panic. The response-line requirement is unchanged.
+    match stdout.lines().find(|l| !l.trim().is_empty()) {
+        Some(l) => {
+            serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}"))
+        }
+        None => panic!(
+            "expected at least one response line; exit={:?} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
 }
 
 #[test]

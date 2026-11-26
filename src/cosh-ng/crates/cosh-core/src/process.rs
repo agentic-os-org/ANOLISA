@@ -666,9 +666,15 @@ mod tests {
             .unwrap();
         assert!(out.stdout_truncated);
         assert_eq!(out.stdout.len(), 1024);
+        // The absolute deadline covers the run phase AND the post-truncation
+        // drain, so a descendant slow to release stderr may legitimately use
+        // the whole budget (issue #2841). Measured run phase is 48-159ms and
+        // kill/reap 0-1ms; the early-kill guarantee is carried by the truncated
+        // result and the process-gone assertions below, while the total only
+        // has to respect the deadline plus the kill/reap step outside it.
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "truncation must return before the deadline, took {:?}",
+            started.elapsed() < Duration::from_secs(2) + Duration::from_millis(250),
+            "truncation must respect the absolute deadline, took {:?}",
             started.elapsed()
         );
 
@@ -688,10 +694,13 @@ mod tests {
         let marker = dir.path().join("marker");
         let pid_file = dir.path().join("pids");
 
+        // Same startup margin as the shell-tool timeout fixture: the script
+        // must record its pids before the group is killed, and sleep 30 still
+        // outlives this budget so the timeout path is exercised.
         let err = output_with_limit(
             sh(&leak_script(&marker, &pid_file)),
             None,
-            Duration::from_millis(300),
+            Duration::from_millis(3000),
             MAX_PIPE_OUTPUT_BYTES,
         )
         .await

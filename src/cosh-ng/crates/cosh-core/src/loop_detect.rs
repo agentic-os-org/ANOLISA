@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 
 const MAX_HISTORY: usize = 10;
-const FINGERPRINT_PREFIX_LEN: usize = 200;
 const LOOP_THRESHOLD: usize = 3;
 
 pub struct LoopDetector {
@@ -16,11 +15,9 @@ impl LoopDetector {
     }
 
     pub fn record_action(&mut self, tool_name: &str, tool_input: &str) -> bool {
-        let fingerprint = format!(
-            "{}:{}",
-            tool_name,
-            utf8_prefix(tool_input, FINGERPRINT_PREFIX_LEN)
-        );
+        // A digest of the whole input keeps the fingerprint bounded without
+        // collapsing distinct actions that share a long prefix.
+        let fingerprint = format!("{}:{}", tool_name, input_digest(tool_input));
 
         self.history.push_back(fingerprint.clone());
         if self.history.len() > MAX_HISTORY {
@@ -40,20 +37,16 @@ impl LoopDetector {
     }
 }
 
-fn utf8_prefix(input: &str, max_bytes: usize) -> &str {
-    if input.len() <= max_bytes {
-        return input;
-    }
+fn input_digest(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
 
-    let mut end = 0;
-    for (idx, ch) in input.char_indices() {
-        let next = idx + ch.len_utf8();
-        if next > max_bytes {
-            break;
-        }
-        end = next;
+    let digest = Sha256::digest(input.as_bytes());
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
     }
-    &input[..end]
+    output
 }
 
 #[cfg(test)]
@@ -86,12 +79,16 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_uses_prefix_only() {
+    fn fingerprint_covers_the_whole_input() {
         let mut d = LoopDetector::new();
         let long_input = "x".repeat(500);
         let slightly_different = format!("{}y", "x".repeat(499));
+        for _ in 0..3 {
+            assert!(!d.record_action("shell", &long_input));
+            assert!(!d.record_action("shell", &slightly_different));
+        }
         assert!(!d.record_action("shell", &long_input));
-        assert!(!d.record_action("shell", &slightly_different));
+        assert!(!d.record_action("shell", &long_input));
         assert!(d.record_action("shell", &long_input));
     }
 

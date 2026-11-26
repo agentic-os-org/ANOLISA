@@ -243,7 +243,7 @@ fn nonempty_json_value(value: &serde_json::Value) -> bool {
 }
 
 fn valid_tool_content(value: &serde_json::Value) -> bool {
-    if serde_json::from_value::<agent_client_protocol::schema::v1::ToolCallContent>(value.clone())
+    if serde_json::from_value::<agent_client_protocol::v1::schema::ToolCallContent>(value.clone())
         .is_err()
     {
         return false;

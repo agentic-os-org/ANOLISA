@@ -133,6 +133,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub headless: bool,
 
+    /// Serve the official ACP v1 agent protocol over stdio
+    #[arg(long)]
+    pub acp: bool,
+
     /// Select the trusted runtime execution boundary.
     ///
     /// Gateway is the only supported caller of the brokered profile. Keeping

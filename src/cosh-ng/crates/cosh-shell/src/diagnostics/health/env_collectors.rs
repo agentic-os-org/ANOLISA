@@ -116,6 +116,10 @@ pub(crate) fn classify_provider(adapter: &str, has_credentials: bool) -> Provide
     match crate::adapter::AdapterKind::parse(adapter) {
         None => ProviderReadiness::UnknownAdapter,
         Some(crate::adapter::AdapterKind::Fake) => ProviderReadiness::Ready,
+        // The ACP peer owns its own credentials. Shell-side credential setup is
+        // not applicable, so the configure-credentials remediation would be
+        // wrong; `provider.credentials_present` still reports the Shell truth.
+        Some(crate::adapter::AdapterKind::Acp) => ProviderReadiness::Ready,
         Some(_) => {
             if has_credentials {
                 ProviderReadiness::Ready
@@ -168,6 +172,7 @@ fn env_credentials_present(kind: crate::adapter::AdapterKind, provider_type: &st
         },
         AdapterKind::ClaudeCode => env_non_empty("ANTHROPIC_API_KEY"),
         AdapterKind::QwenCli => env_non_empty("DASHSCOPE_API_KEY"),
+        AdapterKind::Acp => false,
     }
 }
 
@@ -204,6 +209,7 @@ fn config_credentials_present(
         AdapterKind::ClaudeCode | AdapterKind::QwenCli => {
             field("api_key").is_some_and(config_value_present)
         }
+        AdapterKind::Acp => false,
     }
 }
 

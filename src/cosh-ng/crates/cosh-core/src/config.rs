@@ -344,11 +344,11 @@ pub struct McpOAuthConfig {
     pub callback_port: Option<u16>,
 }
 
-fn default_mcp_timeout_ms() -> u64 {
+pub(crate) fn default_mcp_timeout_ms() -> u64 {
     10_000
 }
 
-fn default_mcp_startup_timeout_ms() -> u64 {
+pub(crate) fn default_mcp_startup_timeout_ms() -> u64 {
     30_000
 }
 

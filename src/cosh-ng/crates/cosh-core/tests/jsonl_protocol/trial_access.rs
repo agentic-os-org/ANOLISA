@@ -115,6 +115,11 @@ fn review5_configure_after_suppression_serves_the_next_question_without_restart(
                 }
                 Err(error) => panic!("{error}"),
             };
+            // A21: the accepted stream inherits the listener's O_NONBLOCK on
+            // macOS/Linux, so read() would return WouldBlock and the unwrap
+            // below would panic. Restore blocking mode so the read timeout
+            // applies and the request head is read to completion.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();

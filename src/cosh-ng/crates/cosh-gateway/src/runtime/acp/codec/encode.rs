@@ -43,45 +43,7 @@ impl AcpV1Codec {
     ) -> Result<Vec<String>, AcpV1CodecError> {
         match destination {
             InboundResponseDestination::Individual => Ok(vec![self.encode_raw(&response)?]),
-            InboundResponseDestination::Batch { batch_id, slot } => {
-                let pending = self
-                    .pending_inbound_batches
-                    .get_mut(&batch_id)
-                    .ok_or(AcpV1CodecError::UnknownInboundBatch(batch_id))?;
-                let target = pending
-                    .responses
-                    .get_mut(slot)
-                    .ok_or(AcpV1CodecError::UnknownInboundBatchSlot { batch_id, slot })?;
-                if target.replace(response).is_some() {
-                    return Err(AcpV1CodecError::InboundBatchSlotAlreadySettled { batch_id, slot });
-                }
-                self.take_completed_batch(batch_id)
-            }
         }
-    }
-
-    fn take_completed_batch(&mut self, batch_id: u64) -> Result<Vec<String>, AcpV1CodecError> {
-        let Some(pending) = self.pending_inbound_batches.get(&batch_id) else {
-            return Ok(Vec::new());
-        };
-        if pending.responses.iter().any(Option::is_none) {
-            return Ok(Vec::new());
-        }
-        let pending = self
-            .pending_inbound_batches
-            .remove(&batch_id)
-            .ok_or(AcpV1CodecError::UnknownInboundBatch(batch_id))?;
-        let responses = pending
-            .responses
-            .into_iter()
-            .map(|response| response.ok_or(AcpV1CodecError::UnknownInboundBatch(batch_id)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let batch = TransportBatch::from_messages(responses)
-            .ok_or(AcpV1CodecError::UnknownInboundBatch(batch_id))?;
-        let frame = TransportFrame::Batch(batch)
-            .to_json()
-            .map_err(|error| AcpV1CodecError::Sdk(error.to_string()))?;
-        self.validate_encoded_frame(frame).map(|frame| vec![frame])
     }
 
     fn encode_raw(&self, raw: &RawJsonRpcMessage) -> Result<String, AcpV1CodecError> {

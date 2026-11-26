@@ -888,3 +888,113 @@ fn insight_intercept_ai_off_preserves_health_ghost_routing() {
         AgentContextBinding::StartupHealthFollowUp
     );
 }
+
+fn intercept_block_with_end_cwd(end_cwd: &str) -> CommandBlock {
+    CommandBlock {
+        id: "cmd-live".to_string(),
+        session_id: "session-1".to_string(),
+        command: "cd somewhere".to_string(),
+        origin: Default::default(),
+        cwd: "/".to_string(),
+        end_cwd: end_cwd.to_string(),
+        started_at_ms: 0,
+        ended_at_ms: 0,
+        duration_ms: 0,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    }
+}
+
+fn reported_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "cosh-intercept-cwd-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("reported dir");
+    dir
+}
+
+fn placeholder_intercept_request() -> AgentRequest {
+    let event = prompt_ghost_event(Some("input intercepted"), Some("show status"));
+    let request = agent_request_from_intercepted_input(&event, 1, true).expect("intercept request");
+    assert_eq!(request.command_block.cwd, "<unknown>");
+    request
+}
+
+#[test]
+fn intercept_request_takes_the_shell_reported_directory_not_the_process_cwd() {
+    let reported = reported_dir("tracked");
+    let mut state = InlineState::default();
+    state.session_blocks.push(intercept_block_with_end_cwd(
+        &reported.display().to_string(),
+    ));
+    let mut request = placeholder_intercept_request();
+
+    fill_shell_reported_cwd(&mut request, &state);
+
+    let expected = reported.display().to_string();
+    assert_eq!(request.command_block.cwd, expected);
+    assert_eq!(request.command_block.end_cwd, expected);
+    assert_ne!(
+        request.command_block.cwd,
+        std::env::current_dir()
+            .expect("process cwd")
+            .display()
+            .to_string()
+    );
+    let _ = std::fs::remove_dir_all(&reported);
+}
+
+#[test]
+fn intercept_request_uses_the_prompt_report_before_any_command_activity() {
+    let reported = reported_dir("prompt");
+    let state = InlineState {
+        shell_prompt_cwd: Some(reported.display().to_string()),
+        ..InlineState::default()
+    };
+    let mut request = placeholder_intercept_request();
+
+    fill_shell_reported_cwd(&mut request, &state);
+
+    assert_eq!(request.command_block.cwd, reported.display().to_string());
+    let _ = std::fs::remove_dir_all(&reported);
+}
+
+#[test]
+fn intercept_request_keeps_the_placeholder_when_the_shell_never_reported() {
+    let state = InlineState::default();
+    let mut request = placeholder_intercept_request();
+
+    fill_shell_reported_cwd(&mut request, &state);
+
+    assert_eq!(request.command_block.cwd, "<unknown>");
+    assert_eq!(request.command_block.end_cwd, "<unknown>");
+}
+
+#[test]
+fn intercept_request_keeps_an_explicit_directory() {
+    let reported = reported_dir("explicit");
+    let mut state = InlineState::default();
+    state.session_blocks.push(intercept_block_with_end_cwd(
+        &reported.display().to_string(),
+    ));
+    let mut request = placeholder_intercept_request();
+    request.command_block.cwd = "/explicit-workspace".to_string();
+    request.command_block.end_cwd = "/explicit-workspace".to_string();
+
+    fill_shell_reported_cwd(&mut request, &state);
+
+    assert_eq!(request.command_block.cwd, "/explicit-workspace");
+    assert_eq!(request.command_block.end_cwd, "/explicit-workspace");
+    let _ = std::fs::remove_dir_all(&reported);
+}

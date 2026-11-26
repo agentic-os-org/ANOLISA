@@ -4,6 +4,26 @@ use crate::evidence::{
 };
 use crate::types::{AgentRequest, CommandStatus, CoshApprovalMode};
 
+mod contract;
+
+pub use contract::{
+    acp_prompt_contract, provider_prompt_contract, provider_prompt_contract_for_language,
+    provider_prompt_contract_for_request,
+    provider_prompt_contract_for_request_with_evidence_access,
+    provider_prompt_contract_with_evidence_access,
+};
+
+/// Which tool vocabulary the request preamble may name.
+///
+/// The process providers own `Bash` and `AskUserQuestion`; an ACP peer only has
+/// whatever it advertised itself, so naming those tools would instruct it to
+/// call something this invocation never negotiated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PreambleTools {
+    ProviderBash,
+    PeerAdvertised,
+}
+
 pub fn prompt_from_request(request: &AgentRequest) -> String {
     prompt_from_request_with_evidence_access(request, ShellEvidenceAccess::FencedRequestFallback)
 }
@@ -12,15 +32,16 @@ pub fn prompt_from_request_with_evidence_access(
     request: &AgentRequest,
     access: ShellEvidenceAccess,
 ) -> String {
-    prompt_from_request_with_evidence_policy(request, access, true)
+    prompt_from_request_with_evidence_policy(request, access, true, PreambleTools::ProviderBash)
 }
 
 pub fn prompt_from_request_with_evidence_policy(
     request: &AgentRequest,
     access: ShellEvidenceAccess,
     allow_output_requests: bool,
+    tools: PreambleTools,
 ) -> String {
-    let trigger = trigger_evidence_prompt(request, access, allow_output_requests);
+    let trigger = trigger_evidence_prompt(request, access, allow_output_requests, tools);
     let runtime = redact_sensitive_text(&runtime_frame_prompt(
         request,
         access,
@@ -107,8 +128,11 @@ fn trigger_evidence_prompt(
     request: &AgentRequest,
     access: ShellEvidenceAccess,
     allow_output_requests: bool,
+    tools: PreambleTools,
 ) -> String {
     let output_access = output_access_instruction(access, allow_output_requests);
+    let tool_result_access = tool_result_access_instruction(access);
+    let excerpt_access = excerpt_access_instruction(access);
     if request
         .context_hints
         .iter()
@@ -137,8 +161,7 @@ fn trigger_evidence_prompt(
                 "Continue the same Shell-first Agent session using this tool result.\n\
                  The native shell transcript has already printed the command and stdout/stderr. \
                  The tool_result payload is a bounded model view: use preview/ref fields, do not \
-                 assume it contains the full output. Use this tool_result first; call cosh_shell_evidence \
-                 only if this bounded view is missing output needed for the answer. \
+                 assume it contains the full output. Use this tool_result first; {tool_result_access} \
                  Any earlier pre-approval prose in this same session is obsolete. \
                  Analyze only the result below. Do not repeat that approval was needed, do not list \
                  commands for the user to run manually, do not describe pre-approval steps, and \
@@ -166,7 +189,7 @@ fn trigger_evidence_prompt(
             format!(
                  "Continue the same Shell-first Agent session using this user-requested shell evidence excerpt.\n\
                  The excerpt is bounded and may not contain the full command output. \
-                 Use this excerpt first; call cosh_shell_evidence only for an older output or a different/larger missing slice. \
+                 Use this excerpt first; {excerpt_access} \
                  terminal-output:// refs are cosh-shell evidence ids, not files; do not use provider file tools to read them. {output_access} \
                  Do not execute follow-up commands automatically unless the user asks for further live inspection.\n\
                  Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
@@ -179,20 +202,27 @@ fn trigger_evidence_prompt(
         {
             prompt
         } else {
+            let (do_action, prefer, question) = match tools {
+                PreambleTools::ProviderBash => (
+                    "use the Bash tool directly. cosh-shell has an approval system that reviews every tool request before execution.",
+                    "Prefer one bounded read-only Bash command at a time when that is enough. If shell syntax such as pipes, redirects, or command chains materially improves the task, use it as a Bash tool request and let cosh-shell ask for confirmation when required.",
+                    "If more user input is needed, request AskUserQuestion with the visible question text and 2-4 concrete options; allow free text for an Other answer when appropriate.\n",
+                ),
+                PreambleTools::PeerAdvertised => (
+                    "use the tools available in this invocation. cosh-shell has an approval system that reviews every tool request before execution.",
+                    "Prefer one bounded read-only command at a time when that is enough. If shell syntax such as pipes, redirects, or command chains materially improves the task, use it and let cosh-shell ask for confirmation when required.",
+                    "",
+                ),
+            };
             format!(
                 "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
                  Decide based on user intent:\n\
                  - If the user wants to DO something (view files, check status, run tests, inspect system, debug), \
-                 use the Bash tool directly. cosh-shell has an approval system that reviews every tool request \
-                 before execution.\n\
+                 {do_action}\n\
                  - If the user wants to KNOW something (ask a question, request explanation, compare options), \
                  answer in prose with example commands in code blocks.\n\
-                 Prefer one bounded read-only Bash command at a time when that is enough. \
-                 If shell syntax such as pipes, redirects, or command chains materially improves the task, \
-                 use it as a Bash tool request and let cosh-shell ask for confirmation when required.\n\
-                 If more user input is needed, request AskUserQuestion with the visible question text \
-                 and 2-4 concrete options; allow free text for an Other answer when appropriate.\n\
-                 history_access: {}\n\
+                 {prefer}\n\
+                 {question}history_access: {}\n\
                  Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
                  user_input: {}\n\
                  ",
@@ -376,156 +406,33 @@ fn bound_insight_prompt(
     ))
 }
 
-pub fn provider_prompt_contract(mode: CoshApprovalMode, shell_tool_name: &str) -> String {
-    provider_prompt_contract_for_language(
-        mode,
-        shell_tool_name,
-        crate::language_config_status().effective,
-    )
-}
-
-pub fn provider_prompt_contract_for_request(
-    request: &AgentRequest,
-    mode: CoshApprovalMode,
-    shell_tool_name: &str,
-) -> String {
-    provider_prompt_contract_for_request_with_evidence_access(
-        request,
-        mode,
-        shell_tool_name,
-        ShellEvidenceAccess::FencedRequestFallback,
-    )
-}
-
-pub fn provider_prompt_contract_for_request_with_evidence_access(
-    request: &AgentRequest,
-    mode: CoshApprovalMode,
-    shell_tool_name: &str,
-    access: ShellEvidenceAccess,
-) -> String {
-    if crate::types::request_is_analysis_only_continuation(request) {
-        return analysis_continuation_contract_prompt(request, mode, shell_tool_name, access);
+/// How to read further output after a bounded tool result. Only the evidence
+/// access this invocation wired may be named: an ACP peer has no
+/// `cosh_shell_evidence` tool, so it must be pointed at the fenced request the
+/// Shell parses out of its text instead.
+fn tool_result_access_instruction(access: ShellEvidenceAccess) -> &'static str {
+    match access {
+        ShellEvidenceAccess::ControlProtocolTool => {
+            "call cosh_shell_evidence only if this bounded view is missing output needed for the answer."
+        }
+        ShellEvidenceAccess::FencedRequestFallback => {
+            "for more captured output, emit exactly one fenced cosh-request block: ```cosh-request\noutput <output_id> tail\nlines <n>\n```."
+        }
     }
-    provider_prompt_contract_with_evidence_access(mode, shell_tool_name, access)
 }
 
-fn analysis_continuation_contract_prompt(
-    request: &AgentRequest,
-    mode: CoshApprovalMode,
-    shell_tool_name: &str,
-    access: ShellEvidenceAccess,
-) -> String {
-    let user_mode_name = request
-        .context_hints
-        .iter()
-        .find_map(|hint| hint.strip_prefix(crate::types::USER_APPROVAL_MODE_HINT_PREFIX))
-        .unwrap_or(match mode {
-            CoshApprovalMode::Recommend => "recommend",
-            CoshApprovalMode::Auto => "auto",
-            CoshApprovalMode::Trust => "trust",
-        });
-    let target_mode = if user_mode_name == "recommend" {
-        "recommend"
-    } else {
-        "agent"
-    };
-    let mode_instruction = format!(
-        "This invocation is an analysis-only continuation after a foreground shell handoff: \
-         the user's cosh-shell approval mode is {user_mode_name} and has not changed. \
-         Do not emit tool calls in this turn; analyze the completed command's shell evidence \
-         and state the conclusion. This restriction applies only to this turn; later turns may \
-         use tools again."
-    );
-    invariant_contract_prompt(
-        target_mode,
-        &mode_instruction,
-        shell_tool_name,
-        provider_language_hint(crate::language_config_status().effective),
-        access,
-        false,
-    )
-}
-
-pub fn provider_prompt_contract_for_language(
-    mode: CoshApprovalMode,
-    shell_tool_name: &str,
-    language: crate::Language,
-) -> String {
-    let target_mode = match mode {
-        CoshApprovalMode::Recommend => "recommend",
-        CoshApprovalMode::Auto | CoshApprovalMode::Trust => "agent",
-    };
-    let mode_instruction = if target_mode == "recommend" {
-        "This invocation is recommend mode: do not emit tool calls. Answer with concise guidance, explanations, and example commands in code blocks."
-    } else {
-        "This invocation is agent mode: when the user asks to inspect system, project, file, test, runtime, or command state, actively use tools for live evidence instead of only suggesting commands for the user to run."
-    };
-
-    let language_hint = provider_language_hint(language);
-
-    invariant_contract_prompt(
-        target_mode,
-        mode_instruction,
-        shell_tool_name,
-        language_hint,
-        ShellEvidenceAccess::FencedRequestFallback,
-        target_mode == "agent",
-    )
-}
-
-fn invariant_contract_prompt(
-    target_mode: &str,
-    mode_instruction: &str,
-    shell_tool_name: &str,
-    language_hint: &str,
-    access: ShellEvidenceAccess,
-    allow_output_requests: bool,
-) -> String {
-    let output_access = if allow_output_requests {
-        output_access_instruction(access, true)
-    } else {
-        RESTRICTED_OUTPUT_ACCESS_INSTRUCTION
-    };
-    format!(
-        "\n\ncosh-shell Agent contract:\n\
-         - User modes: recommend and agent.\n\
-         - Mode: {target_mode}. {mode_instruction}\n\
-         - Mode is an internal invocation contract; it does not change the user's cosh-shell \
-         approval mode, and you must never tell the user their approval mode changed.\n\
-         - Use `{shell_tool_name}` for live shell evidence when tool use is needed.\n\
-         - Always emit a provider permission request for `{shell_tool_name}` before any shell command executes, even read-only commands in auto approval mode. \
-         cosh-shell may auto-approve safe commands, but it still needs the request so the exact command can run in the foreground shell transcript. \
-         Shell syntax is supported after cosh-shell approval; do not avoid useful shell syntax by asking the user to run commands manually.\n\
-         - terminal-output:// refs are cosh-shell evidence ids, not files. Do not use provider file tools to read them. {output_access}\n\
-         - The approval system is handled by cosh-shell; do not downgrade to manual command suggestions only because approval may be needed.\n\
-         - State the diagnostic conclusion first, or state explicitly when evidence is insufficient. Emit at most one primary recommendation command and explain why it fits this case; do not emit a generic pwd, echo $PATH, or --help probe list without a scenario-specific reason.\n\
-         - {language_hint}\n\
-         - Keep provider-specific names out of visible responses unless already shown by cosh-shell."
-    )
-}
-
-pub fn provider_prompt_contract_with_evidence_access(
-    mode: CoshApprovalMode,
-    shell_tool_name: &str,
-    access: ShellEvidenceAccess,
-) -> String {
-    let target_mode = match mode {
-        CoshApprovalMode::Recommend => "recommend",
-        CoshApprovalMode::Auto | CoshApprovalMode::Trust => "agent",
-    };
-    let mode_instruction = if target_mode == "recommend" {
-        "This invocation is recommend mode: do not emit tool calls. Answer with concise guidance, explanations, and example commands in code blocks."
-    } else {
-        "This invocation is agent mode: when the user asks to inspect system, project, file, test, runtime, or command state, actively use tools for live evidence instead of only suggesting commands for the user to run."
-    };
-    invariant_contract_prompt(
-        target_mode,
-        mode_instruction,
-        shell_tool_name,
-        provider_language_hint(crate::language_config_status().effective),
-        access,
-        target_mode == "agent",
-    )
+/// How to read an older or larger slice after a bounded excerpt. The fenced
+/// form is already spelled out by `output_access` later in the same prompt, so
+/// this only points at it instead of repeating the block.
+fn excerpt_access_instruction(access: ShellEvidenceAccess) -> &'static str {
+    match access {
+        ShellEvidenceAccess::ControlProtocolTool => {
+            "call cosh_shell_evidence only for an older output or a different/larger missing slice."
+        }
+        ShellEvidenceAccess::FencedRequestFallback => {
+            "for an older output or a different/larger missing slice, use the fenced cosh-request block described below."
+        }
+    }
 }
 
 const RESTRICTED_OUTPUT_ACCESS_INSTRUCTION: &str = "In this turn, do not request shell output automatically; state when output evidence is needed for a reliable answer.";

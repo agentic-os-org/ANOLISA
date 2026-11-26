@@ -551,93 +551,6 @@ fn prompt_update_and_terminal_response_preserve_session_binding() {
 }
 
 #[test]
-fn mixed_batch_preserves_observation_order() {
-    let mut codec = codec();
-    initialize(&mut codec, json!({}));
-    open_session(&mut codec);
-    start_prompt(&mut codec);
-    let batch = json!([
-        {
-            "jsonrpc": "2.0",
-            "method": "session/update",
-            "params": {
-                "sessionId": SESSION_ID,
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": { "type": "text", "text": "batched" }
-                }
-            }
-        },
-        {
-            "jsonrpc": "2.0",
-            "id": "cosh-acp-3",
-            "result": { "stopReason": "end_turn" }
-        }
-    ]);
-
-    let decoded = codec
-        .decode_transport_frame(batch.to_string().as_bytes())
-        .unwrap();
-    assert!(decoded.outbound_frames.is_empty());
-    assert!(matches!(
-        decoded.observations.as_slice(),
-        [
-            AcpV1Observation::SessionUpdate { .. },
-            AcpV1Observation::PromptFinished {
-                stop_reason: AcpV1StopReason::EndTurn,
-                ..
-            }
-        ]
-    ));
-}
-
-#[test]
-fn batch_errors_notifications_and_requests_are_independent() {
-    let mut codec = codec();
-    initialize(&mut codec, json!({}));
-    open_session(&mut codec);
-    start_prompt(&mut codec);
-    let batch = json!([
-        17,
-        {
-            "jsonrpc": "2.0",
-            "id": 91,
-            "method": "fs/read_text_file",
-            "params": { "sessionId": SESSION_ID, "path": "/tmp/input" }
-        },
-        {
-            "jsonrpc": "2.0",
-            "method": "extension/progress",
-            "params": { "percent": 50 }
-        }
-    ]);
-
-    let decoded = codec
-        .decode_transport_frame(batch.to_string().as_bytes())
-        .unwrap();
-    assert!(decoded.outbound_frames.is_empty());
-    assert!(matches!(
-        decoded.observations.as_slice(),
-        [
-            AcpV1Observation::UnsupportedClientRequest { .. },
-            AcpV1Observation::UnsupportedNotification { .. }
-        ]
-    ));
-
-    let frames = codec
-        .reject_unsupported_request_frames(&AcpV1RequestId::Number(91))
-        .unwrap();
-    assert_eq!(frames.len(), 1);
-    let response: Value = serde_json::from_str(&frames[0]).unwrap();
-    let responses = response.as_array().unwrap();
-    assert_eq!(responses.len(), 2);
-    assert_eq!(responses[0]["id"], Value::Null);
-    assert_eq!(responses[0]["error"]["code"], -32600);
-    assert_eq!(responses[1]["id"], 91);
-    assert_eq!(responses[1]["error"]["code"], -32601);
-}
-
-#[test]
 fn empty_batch_gets_invalid_request_and_keeps_connection_ready() {
     let mut codec = codec();
     initialize(&mut codec, json!({}));
@@ -652,61 +565,16 @@ fn empty_batch_gets_invalid_request_and_keeps_connection_ready() {
 }
 
 #[test]
-fn batch_entry_count_is_bounded_independently_from_frame_bytes() {
-    let mut codec =
-        AcpV1Codec::new(AcpV1ClientConfig::new("cosh-ng", "0.15.0", 1024 * 1024)).unwrap();
-    initialize(&mut codec, json!({}));
-    let entries = (0..1025)
-        .map(|index| {
-            json!({
-                "jsonrpc": "2.0",
-                "method": "extension/progress",
-                "params": { "index": index }
-            })
-        })
-        .collect::<Vec<_>>();
-    let batch = serde_json::to_vec(&entries).unwrap();
-
-    assert!(matches!(
-        codec.decode_transport_frame(&batch),
-        Err(AcpV1CodecError::BatchTooLarge { limit: 1024 })
-    ));
-    assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
-}
-
-#[test]
-fn error_response_in_batch_is_correlated_independently() {
+fn non_empty_batch_is_rejected_as_malformed_and_makes_codec_terminal() {
     let mut codec = codec();
     initialize(&mut codec, json!({}));
-    open_session(&mut codec);
-    start_prompt(&mut codec);
-    let batch = json!([
-        {
-            "jsonrpc": "2.0",
-            "method": "extension/progress",
-            "params": { "percent": 50 }
-        },
-        {
-            "jsonrpc": "2.0",
-            "id": "cosh-acp-3",
-            "error": { "code": -32000, "message": "provider unavailable" }
-        }
-    ]);
 
-    let decoded = codec
-        .decode_transport_frame(batch.to_string().as_bytes())
-        .unwrap();
-    assert!(matches!(
-        decoded.observations.as_slice(),
-        [
-            AcpV1Observation::UnsupportedNotification { .. },
-            AcpV1Observation::RequestFailed {
-                request: AcpV1RequestKind::Prompt,
-                code: -32000,
-                ..
-            }
-        ]
-    ));
+    // SDK 5.x classifies a non-empty JSON-RPC batch array as a malformed frame;
+    // the dedicated supervised stream fails closed instead of decoding entries.
+    let frame = br#"[{"jsonrpc":"2.0","id":1,"method":"session/update","params":{}}]"#;
+    let error = codec.decode_transport_frame(frame).unwrap_err();
+    assert!(matches!(error, AcpV1CodecError::Sdk(_)), "{error:?}");
+    assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
 }
 
 #[test]
@@ -855,45 +723,6 @@ fn callback_digest_binds_extension_metadata_and_request_id_type() {
         first.callback_payload_digest,
         string_id.callback_payload_digest
     );
-}
-
-#[test]
-fn batched_permission_responses_are_emitted_once_in_source_order() {
-    let mut codec = codec();
-    initialize(&mut codec, json!({}));
-    open_session(&mut codec);
-    start_prompt(&mut codec);
-    let batch = json!([permission_request(json!(41)), permission_request(json!(42))]);
-    let decoded = codec
-        .decode_transport_frame(batch.to_string().as_bytes())
-        .unwrap();
-    assert_eq!(decoded.observations.len(), 2);
-    assert!(decoded.outbound_frames.is_empty());
-
-    let first = codec
-        .permission_response_frames(
-            &AcpV1RequestId::Number(41),
-            AcpV1PermissionDecision::Selected {
-                option_id: "allow-once".to_owned(),
-            },
-        )
-        .unwrap();
-    assert!(first.is_empty());
-    let second = codec
-        .permission_response_frames(
-            &AcpV1RequestId::Number(42),
-            AcpV1PermissionDecision::Selected {
-                option_id: "reject-once".to_owned(),
-            },
-        )
-        .unwrap();
-    assert_eq!(second.len(), 1);
-    let responses: Value = serde_json::from_str(&second[0]).unwrap();
-    let responses = responses.as_array().unwrap();
-    assert_eq!(responses[0]["id"], 41);
-    assert_eq!(responses[1]["id"], 42);
-    assert_eq!(responses[0]["result"]["outcome"]["optionId"], "allow-once");
-    assert_eq!(responses[1]["result"]["outcome"]["optionId"], "reject-once");
 }
 
 #[test]
@@ -1189,7 +1018,6 @@ fn pending_agent_callback_count_is_bounded() {
 fn bridge_runs_v1_exchange_over_supervised_stdio() {
     let workspace = tempfile::tempdir().unwrap();
     let log_path = workspace.path().join("requests.jsonl");
-    let batch_reply_path = workspace.path().join("batch-reply.json");
     let script = r#"
 step=0
 while IFS= read -r line; do
@@ -1203,9 +1031,7 @@ while IFS= read -r line; do
             printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-2","result":{"sessionId":"agent-session-1"}}'
             ;;
         3)
-            printf '%s\n' '[17,{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"agent-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}]'
-            IFS= read -r batch_reply
-            printf '%s\n' "$batch_reply" > "$2"
+            printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"agent-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}'
             printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-3","result":{"stopReason":"end_turn"}}'
             ;;
     esac
@@ -1217,7 +1043,6 @@ done
         script.into(),
         "acp-fake".into(),
         log_path.clone().into_os_string(),
-        batch_reply_path.clone().into_os_string(),
     ];
     let mut bridge = AcpV1RuntimeBridge::launch(
         &spec,
@@ -1263,12 +1088,6 @@ done
     assert_eq!(requests[0]["params"]["protocolVersion"], 1);
     assert_eq!(requests[1]["method"], "session/new");
     assert_eq!(requests[2]["method"], "session/prompt");
-    let batch_reply: Value =
-        serde_json::from_str(&std::fs::read_to_string(batch_reply_path).unwrap()).unwrap();
-    let batch_reply = batch_reply.as_array().unwrap();
-    assert_eq!(batch_reply.len(), 1);
-    assert_eq!(batch_reply[0]["id"], Value::Null);
-    assert_eq!(batch_reply[0]["error"]["code"], -32600);
 }
 
 #[cfg(unix)]

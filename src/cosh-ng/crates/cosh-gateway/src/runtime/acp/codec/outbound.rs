@@ -21,11 +21,9 @@ impl AcpV1Codec {
             config,
             phase: AcpV1ProtocolPhase::Created,
             next_request_sequence: 1,
-            next_inbound_batch_sequence: 1,
             pending_outbound: BTreeMap::new(),
             pending_permissions: BTreeMap::new(),
             pending_unsupported: BTreeMap::new(),
-            pending_inbound_batches: BTreeMap::new(),
             capabilities: None,
             session_id: None,
             prompt_request_id: None,
@@ -204,7 +202,7 @@ impl AcpV1Codec {
         for request_id in unsupported_ids {
             let raw = RawJsonRpcMessage::response(
                 to_sdk_request_id(&request_id),
-                Err(AcpError::method_not_found()),
+                Err(agent_client_protocol::Error::method_not_found()),
             );
             let destination = self
                 .pending_unsupported
@@ -303,7 +301,7 @@ impl AcpV1Codec {
             .ok_or_else(|| AcpV1CodecError::UnknownUnsupportedRequest(request_id.clone()))?;
         let raw = RawJsonRpcMessage::response(
             to_sdk_request_id(request_id),
-            Err(AcpError::method_not_found()),
+            Err(agent_client_protocol::Error::method_not_found()),
         );
         self.settle_inbound_response(destination, raw)
     }
