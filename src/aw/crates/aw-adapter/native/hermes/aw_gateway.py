@@ -9,9 +9,9 @@ from pathlib import Path
 import shlex
 import sys
 from threading import RLock
-from typing import Any
+from typing import Any, Callable
 
-from . import aw_skill
+from . import aw_result, aw_skill
 from .aw_gateway_lifecycle import admission_terminal, register_retirement
 
 
@@ -112,6 +112,8 @@ class Binding:
         from agent.shell_hooks import ShellHookSpec
 
         self.path, self.launch, self.ctx, self.load = path, launch, ctx, load
+        self.final_result = launch.get("final_result", False)
+        self.scope = scope or launch["binding"]
         self.identity = ""
         self.request_id = ""
         self.cwd = str(workspace) if workspace is not None else launch["cwd"]
@@ -122,11 +124,13 @@ class Binding:
             event, step, action, timeout = (
                 hook.get("event"), hook.get("step"), hook.get("on_error"), hook.get("timeout"))
             if (event not in ("tool.before", "tool.after") or not isinstance(step, str)
-                    or not step or action not in ("block", "report")
+                    or not step or (action not in ("block", "report") and not (event == "tool.after" and action == "withhold_result" and launch.get("final_result")))
                     or isinstance(timeout, bool) or not isinstance(timeout, int)
                     or not 1 <= timeout <= 300 or (event, step) in seen):
                 raise ValueError("invalid AW Hermes Gateway callback registration")
             seen.add((event, step))
+            if launch.get("final_result") and event == "tool.after":
+                continue
             command = shlex.join([
                 launch["binary"], "hook", "--binding", scope or launch["binding"],
                 "--adapter", "hermes", "--event", event, "--step", step,
@@ -143,6 +147,9 @@ class Binding:
                 self.before.append((hook, spec))
             else:
                 self.after.append((hook, spec))
+
+    def evaluate(self, payload):
+        return aw_result.evaluate(self.launch, self.scope, payload)
 
     def check(self) -> None:
         current = self.load(self.path)
@@ -161,10 +168,10 @@ class Binding:
         return _evaluate_result(spec, response), response
 
 
-def register(ctx: Any, load: Any, *, gateway_config: str | None = None) -> None:
-    """Install dormant Gateway callbacks; an authorized session RPC activates one launch."""
+def register(ctx: Any, load: Any, *, gateway_config: str | None = None) -> Callable | None:
+    """Install session callbacks and expose the dedicated-worker SDK entrypoint."""
     global _alive, _attachment
-    from hermes_cli.version_info import get_version_info
+    from .aw_identity import runtime_revision
     from hermes_constants import get_hermes_home
 
     _alive = True
@@ -177,10 +184,12 @@ def register(ctx: Any, load: Any, *, gateway_config: str | None = None) -> None:
                 or not isinstance(params["launch_path"], str)
                 or not isinstance(params["token"], str)):
             raise ValueError("invalid AW Hermes Gateway session registration")
+        if _attachment is not None:
+            raise ValueError("Hermes Gateway already has a process attachment")
         path = params["launch_path"]
         launch = load(path)
         if (launch["token"] != params["token"]
-                or get_version_info().commit != launch["revision"]
+                or runtime_revision() != launch["revision"]
                 or get_hermes_home().resolve() != Path(launch["profile"])):
             raise ValueError("AW Hermes Gateway launch identity differs")
         binding = Binding(path, launch, ctx, load)
@@ -285,6 +294,9 @@ def register(ctx: Any, load: Any, *, gateway_config: str | None = None) -> None:
             if binding is None:
                 return
             binding.check()
+            if binding.final_result:
+                aw_result.remember_post(**values)
+                return
             for hook, spec in binding.after:
                 binding.invoke(hook, spec, "post_tool_call", values)
         except (Exception, SystemExit) as error:
@@ -333,42 +345,53 @@ def register(ctx: Any, load: Any, *, gateway_config: str | None = None) -> None:
     ctx.register_rpc("prime", prime)
     register_retirement(ctx, _known, _active, _release, _lock, load)
     ctx.on_unload(_unload)
+
+    def verify_hooks():
+        manager = ctx._manager
+        with manager._discovery_lock:
+            if not _alive or any(not manager.has_hook(name) or
+                                 not any(fn is cb for fn in manager._hooks.get(name, ()))
+                                 for name, cb in bridge_hooks):
+                raise RuntimeError("AW Hermes Gateway callbacks are not active")
+
+    def start_sdk(runner, config_file, descriptor_file, target, timeout_ms):
+        from .aw_sdk_attach import SdkAttachment
+        if runner.config.multiplex_profiles or _attachment is not None or _known:
+            raise RuntimeError("AW requires an unattached dedicated Hermes Gateway")
+        verify_hooks()
+        attachment = SdkAttachment(ctx, verify_hooks, config_file, descriptor_file, target, timeout_ms)
+        activate(attachment)
+        return attachment
+
+    def activate(attachment):
+        global _attachment
+        _attachment = attachment
+        _guard_manager(ctx)
+        attachment.install(lambda: _install_guards(None), add_turn, remove_turn,
+                           lambda: not _deferred)
+
+    def add_turn(turn):
+        with _lock:
+            if turn.session in _deferred:
+                raise RuntimeError("AW Hermes Gateway turn is still active")
+            _install_guards(None)
+            _deferred[turn.session] = turn
+
+    def remove_turn(turn):
+        with _lock:
+            for session, active in list(_deferred.items()):
+                if active is turn:
+                    _deferred.pop(session)
+            for key in list(_checked):
+                if key[0] == turn.session:
+                    _checked.pop(key)
+
     if gateway_config is not None:
         from .aw_gateway_attach import Attachment
-
-        def verify_hooks() -> None:
-            manager = ctx._manager
-            with manager._discovery_lock:
-                if not _alive or any(
-                        not any(active is callback for active in manager._hooks.get(name, ()))
-                        for name, callback in bridge_hooks):
-                    raise RuntimeError("AW Hermes Gateway callbacks are not active")
-
-        _attachment = Attachment(gateway_config, ctx, load, verify_hooks)
-        _guard_manager(ctx)
-        def add_turn(turn):
-            with _lock:
-                if turn.session in _deferred:
-                    raise RuntimeError("AW Hermes Gateway turn is still active")
-                _install_guards(None)
-                _deferred[turn.session] = turn
-
-        def remove_turn(turn):
-            with _lock:
-                for session, active in list(_deferred.items()):
-                    if active is turn:
-                        _deferred.pop(session)
-                for key in list(_checked):
-                    if key[0] == turn.session:
-                        _checked.pop(key)
-
-        def idle():
-            with _lock:
-                return not _deferred
-
-        _attachment.install(lambda: _install_guards(None), add_turn, remove_turn, idle)
+        activate(Attachment(gateway_config, ctx, load, verify_hooks))
     else:
         _guard_turns()
+        return start_sdk
 
 
 def _guard_turns() -> None:
@@ -439,7 +462,10 @@ def _guard_manager(ctx: Any) -> None:
 def _install_guards(binding: Binding | None) -> None:
     global _skill_restore
     needs_skill = binding is not None and any(hook.get("skill_check") for hook, _ in binding.before)
-    if _restores:
+    if (_attachment is not None or (binding and binding.launch.get("final_result"))) and not any(
+            name == "_commit_tool_result" for _, name, _, _ in _restores):
+        _restores.extend(aw_result.install_bound(_bound))
+    if any(name == "handle_function_call" for _, name, _, _ in _restores):
         if _skill_restore is None and needs_skill:
             _skill_restore = aw_skill.install()
         return

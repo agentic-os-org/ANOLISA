@@ -51,7 +51,7 @@ const SDK_BUDGET_ERRORS: (&str, &str, &str) = (
     "SDK hook budgets must be integer milliseconds in 1..55000 ms",
 );
 
-fn sdk_worker_observed(source_id: &str) -> RouteOptions<'_> {
+pub(super) fn sdk_worker_observed(source_id: &str) -> RouteOptions<'_> {
     RouteOptions {
         events: super::lifecycle::QODER_SDK,
         observe_events: OBSERVED_TOOL_EVENTS,
@@ -176,10 +176,10 @@ const RESIDENT_DIALECTS: &[ResidentDialect] = &[
     },
     ResidentDialect {
         adapter: "hermes",
-        entrypoint: None,
-        options: None,
+        entrypoint: Some("sdk-worker"),
+        options: Some(super::hermes::sdk_routes),
         project_after_validation: false,
-        validate: None,
+        validate: Some(super::hermes::validate_sdk),
         budget_errors: SDK_BUDGET_ERRORS,
     },
     ResidentDialect {

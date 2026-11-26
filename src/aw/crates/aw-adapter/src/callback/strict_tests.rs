@@ -232,3 +232,29 @@ fn sdk_after_report_recovers_only_for_audited_recoverable_provider_faults() {
         .is_err());
     }
 }
+
+#[test]
+fn hermes_strict_step_withholds_an_unresolved_connector_batch() {
+    let adapter = adapter::select("hermes").unwrap();
+    let skipped = json!({"status":"ok","kind":"skipped","effects":[],"call":{"process":null}});
+    for (action, tool, expected) in [
+        ("report", "tool_call", json!({})),
+        ("withhold_result", "terminal", json!({})),
+        ("withhold_result", "tool_call", json!({"aw_withheld":true})),
+    ] {
+        let reply = response(
+            adapter,
+            "tool.after",
+            action,
+            skipped.clone(),
+            "hermes",
+            &json!({"tool_name": tool}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reply.stdout).unwrap(),
+            expected
+        );
+    }
+}

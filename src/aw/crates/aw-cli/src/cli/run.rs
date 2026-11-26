@@ -25,6 +25,8 @@ static SIGNAL: AtomicI32 = AtomicI32::new(0);
 pub(super) static CANCELLED: AtomicBool = AtomicBool::new(false);
 const HERMES_RETIRE_SCRIPT: &str = r#"import json, sys
 from pathlib import Path
+# The parent passes only the frozen source directory checked during preflight.
+sys.path[:0] = sys.argv[3:]
 from hermes_cli.gateway_connection import GatewayConnection
 
 launch_path = Path(sys.argv[1])
@@ -461,16 +463,40 @@ fn hermes_retired(artifacts: &Artifacts, command: &CommandSpec, deadline: Instan
     retire
         .environment
         .insert(OsString::from("HERMES_HOME"), OsString::from(profile));
+    let frozen_source = if command
+        .environment
+        .contains_key(&OsString::from("AW_HERMES_PYTHON"))
+    {
+        // Preflight prepends the verified stock launcher's directory to this parent-owned snapshot.
+        Some(
+            command
+                .environment
+                .get(&OsString::from("PYTHONPATH"))
+                .and_then(|path| std::env::split_paths(path).next())
+                .filter(|path| path.is_absolute())
+                .ok_or("Hermes retirement requires its verified source directory")?,
+        )
+    } else {
+        None
+    };
+    let cache = tempfile::tempdir_in(&artifacts.0)?;
+    let mut prefix = OsString::from("pycache_prefix=");
+    prefix.push(cache.path());
     let uncancelled = AtomicBool::new(false);
     for session in sessions {
         retire.args = vec![
             OsString::from("-I"),
             OsString::from("-B"),
+            OsString::from("-X"),
+            prefix.clone(),
             OsString::from("-c"),
             OsString::from(HERMES_RETIRE_SCRIPT),
             artifacts.0.join("hermes-launch.json").into_os_string(),
             OsString::from(session),
         ];
+        if let Some(source) = &frozen_source {
+            retire.args.push(source.as_os_str().into());
+        }
         loop {
             let attempt_deadline = (Instant::now() + Duration::from_secs(8)).min(deadline);
             if attempt_deadline <= Instant::now() {
@@ -558,6 +584,41 @@ mod tests {
         fs::set_permissions(&sessions, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&sessions, r#"[""]"#).unwrap();
         assert!(hermes_retired(&artifacts, &command, deadline()).is_err());
+    }
+
+    #[test]
+    fn hermes_frozen_retirement_imports_the_verified_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let package = root.join("source/hermes_cli");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("__init__.py"), "").unwrap();
+        fs::write(package.join("gateway_connection.py"),
+            "class GatewayConnection:\n    def call(self, *args, **kwargs): return {'retired': True}\n    def close(self): pass\n").unwrap();
+        let artifacts = Artifacts(root.to_path_buf(), true);
+        fs::write(
+            root.join("hermes-launch.json"),
+            r#"{"profile":"/tmp","token":"token"}"#,
+        )
+        .unwrap();
+        let sessions = root.join("hermes-sessions.json");
+        fs::write(&sessions, r#"["session"]"#).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o600)).unwrap();
+        let command = CommandSpec {
+            program: "/usr/bin/python3".into(),
+            args: vec![],
+            cwd: root.to_path_buf(),
+            environment: BTreeMap::from([
+                ("AW_HERMES_PYTHON".into(), "/usr/bin/python3".into()),
+                ("PYTHONPATH".into(), root.join("source").into_os_string()),
+            ]),
+        };
+        assert!(hermes_retired(
+            &artifacts,
+            &command,
+            Instant::now() + Duration::from_secs(3)
+        )
+        .unwrap());
     }
 
     #[test]

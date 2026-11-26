@@ -51,7 +51,10 @@ pub(super) fn checked_profile_command(
     trusted_native_path(cache.path())?;
     let mut installation = command.clone();
     installation.program = python.clone();
-    let script = r#"import json, sys, sysconfig, site as site_module
+    let script = concat!(
+        include_str!("../../../native/hermes/aw_identity.py"),
+        r#"
+import json, sys, sysconfig, site as site_module
 from importlib.metadata import Distribution
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -61,20 +64,50 @@ if any(key.strip().lower() == 'include-system-site-packages' and value.strip().l
     raise RuntimeError('Hermes requires a venv without system site packages')
 site = sysconfig.get_path('purelib', vars={'base': prefix, 'platbase': prefix})
 matches = list(Distribution.discover(name='hermes-agent', path=[site]))
-if len(matches) != 1:
-    raise RuntimeError('Hermes requires one installed editable distribution in its venv')
-origin = json.loads(matches[0].read_text('direct_url.json'))
-url = urlsplit(origin['url'])
-if origin.get('dir_info', {}).get('editable') is not True or url.scheme != 'file' or url.netloc not in ('', 'localhost'):
-    raise RuntimeError('Hermes requires a local editable checkout')
+source = sys.argv[1]
+if source:
+    if matches:
+        raise RuntimeError('frozen Hermes requires a dependency-only venv')
+    verified_revision(Path(source))
+else:
+    if len(matches) != 1:
+        raise RuntimeError('Hermes requires one installed editable distribution in its venv')
+    origin = json.loads(matches[0].read_text('direct_url.json'))
+    url = urlsplit(origin['url'])
+    if origin.get('dir_info', {}).get('editable') is not True or url.scheme != 'file' or url.netloc not in ('', 'localhost'):
+        raise RuntimeError('Hermes requires a local editable checkout')
+    source = unquote(url.path, errors='strict')
+frozen = not os.path.lexists(Path(source) / '.git')
+if frozen and not sys.argv[1]:
+    verified_revision(Path(source))
 sites = {site, *site_module.getsitepackages([prefix]),
          *(sysconfig.get_path(name, scheme='venv', vars={'base': prefix, 'platbase': prefix}) for name in ('purelib', 'platlib'))}
 with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
-    json.dump([unquote(url.path, errors='strict'), [path for path in sorted(sites) if Path(path).exists()]], stream)
-"#;
+    json.dump([source, frozen, [path for path in sorted(sites) if Path(path).exists()]], stream)
+"#
+    );
+    let frozen = command
+        .environment
+        .contains_key(&OsString::from("AW_HERMES_PYTHON"));
+    let frozen_source = if frozen {
+        command
+            .program
+            .parent()
+            .ok_or("missing Hermes source directory")?
+            .as_os_str()
+            .to_owned()
+    } else {
+        OsString::new()
+    };
     installation.args = python_args(
         cache.path(),
-        &["-I".into(), "-S".into(), "-c".into(), script.into()],
+        &[
+            "-I".into(),
+            "-S".into(),
+            "-c".into(),
+            script.into(),
+            frozen_source.clone(),
+        ],
     );
     adapter::isolate_python_environment(&mut installation)?;
     let (output, bytes) = adapter::Probe(cancelled).run_python(
@@ -85,22 +118,37 @@ with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
             stdout_bytes: 4 * 1024 * 1024,
             stderr_bytes: 4096,
         },
-        std::time::Instant::now() + Duration::from_secs(5),
+        std::time::Instant::now() + Duration::from_secs(30),
         aw_exec::CleanupMode::Immediate,
     )
     .map_err(|error| {
         format!(
-            "Hermes source discovery requires a local editable installation with UTF-8 paths in its venv: {error}"
+            "Hermes source discovery requires a verified frozen source or a local editable installation with UTF-8 paths in its venv: {error}"
         )
     })?;
     if !output.status.success() {
         return Err(
-            "Hermes source discovery requires a local editable installation with UTF-8 paths in its venv".into(),
+            "Hermes source discovery requires a verified frozen source or a local editable installation with UTF-8 paths in its venv".into(),
         );
     }
-    let (source, sites): (PathBuf, Vec<PathBuf>) = serde_json::from_slice(&bytes)?;
+    let (source, verified_frozen, sites): (PathBuf, bool, Vec<PathBuf>) =
+        serde_json::from_slice(&bytes)?;
     let source = trusted_native_path(&source)?;
-    let revision = checked_checkout(command, &source, cancelled)?;
+    if verified_frozen && profile.join("hermes-agent/.git").try_exists()? {
+        return Err(
+            "frozen Hermes cannot use a profile checkout for native version discovery".into(),
+        );
+    }
+    if frozen {
+        let mut imports = vec![source.clone()];
+        if let Some(existing) = command.environment.get(&OsString::from("PYTHONPATH")) {
+            imports.extend(std::env::split_paths(existing));
+        }
+        command
+            .environment
+            .insert("PYTHONPATH".into(), std::env::join_paths(imports)?);
+    }
+    let revision = checked_checkout(command, &source, verified_frozen, cancelled)?;
     checked_site_paths(sites, cancelled)?;
     super::install::dotenv(&source.join(".env"))?;
     // Use the native loader's dotenv precedence/interpolation, before native CLI
@@ -154,7 +202,7 @@ with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
             .map(|(key, value)| (OsString::from_vec(key), OsString::from_vec(value))),
     );
     checked_loader_environment(&after_dotenv)?;
-    if checked_checkout(&after_dotenv, &source, cancelled)? != revision {
+    if checked_checkout(&after_dotenv, &source, verified_frozen, cancelled)? != revision {
         return Err("Hermes checkout changed during native dotenv loading".into());
     }
     // Sticky directories protect the script inode, not sibling import names.
@@ -185,6 +233,7 @@ with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
 fn checked_checkout(
     command: &aw_exec::CommandSpec,
     source: &std::path::Path,
+    verified_frozen: bool,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<String> {
     // Native Git runs from both cwd and source; relative scopes select different files.
@@ -209,11 +258,34 @@ fn checked_checkout(
     }
     let mut identity = command.clone();
     // Native Git runs from both the launch directory and its installation checkout.
-    let launch_git = native_executable(command, std::path::Path::new("git"))?;
+    let frozen = match std::fs::symlink_metadata(source.join(".git")) {
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    if frozen != verified_frozen {
+        return Err("Hermes source identity changed during inspection".into());
+    }
+    let git = std::path::Path::new("git");
+    let launch_git = lookup_executable(command, git)?;
     identity.cwd = source.to_path_buf();
-    identity.program = native_executable(&identity, std::path::Path::new("git"))?;
-    if identity.program != launch_git {
+    let source_git = lookup_executable(&identity, git)?;
+    if source_git != launch_git {
         return Err("Hermes requires the same Git executable in cwd and checkout; use an absolute PATH entry".into());
+    }
+    let Some(program) = source_git else {
+        if verified_frozen {
+            return Ok(super::VERIFIED_GATEWAY.into());
+        }
+        return Err("Hermes executable was not found in PATH".into());
+    };
+    identity.program = program;
+    if frozen {
+        identity.environment.remove(&OsString::from("GIT_CONFIG"));
+        git::checked_configuration(&identity, cancelled)?;
+        identity.cwd = command.cwd.clone();
+        git::checked_configuration(&identity, cancelled)?;
+        return Ok(super::VERIFIED_GATEWAY.into());
     }
     trusted_native_path(&source.join(".git"))?;
     // GIT_CONFIG selects a file only for `git config`, not status/rev-parse.
@@ -394,6 +466,22 @@ pub(super) fn python_entrypoint(command: &mut aw_exec::CommandSpec) -> Result<Pa
         return Err("Hermes entrypoint exceeds 65536 bytes".into());
     }
     let script = std::str::from_utf8(&script)?;
+    if let Some(value) = command.environment.get(&OsString::from("AW_HERMES_PYTHON")) {
+        let python = PathBuf::from(value);
+        if !python.is_absolute()
+            || python
+                .file_name()
+                .is_none_or(|name| !name.to_string_lossy().starts_with("python"))
+            || executable.file_name().is_none_or(|name| name != "hermes")
+            || !script.starts_with("#!/usr/bin/env python3\n")
+        {
+            return Err(
+                "frozen Hermes requires its stock launcher and absolute venv Python".into(),
+            );
+        }
+        trusted_native_path(&python)?;
+        return Ok(python);
+    }
     let python = script
         .lines()
         .next()
@@ -416,6 +504,14 @@ pub(super) fn python_entrypoint(command: &mut aw_exec::CommandSpec) -> Result<Pa
 }
 
 fn native_executable(command: &aw_exec::CommandSpec, program: &std::path::Path) -> Result<PathBuf> {
+    lookup_executable(command, program)?
+        .ok_or_else(|| "Hermes executable was not found in PATH".into())
+}
+
+fn lookup_executable(
+    command: &aw_exec::CommandSpec,
+    program: &std::path::Path,
+) -> Result<Option<PathBuf>> {
     use std::os::unix::ffi::OsStrExt;
     let can_execute = |path: &std::path::Path| {
         let Ok(name) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -445,7 +541,10 @@ fn native_executable(command: &aw_exec::CommandSpec, program: &std::path::Path) 
                 break;
             }
         }
-        executable.ok_or("Hermes executable was not found in PATH")?
+        let Some(executable) = executable else {
+            return Ok(None);
+        };
+        executable
     };
     if !can_execute(&executable) {
         return Err(format!(
@@ -454,7 +553,7 @@ fn native_executable(command: &aw_exec::CommandSpec, program: &std::path::Path) 
         )
         .into());
     }
-    trusted_native_path(&executable)
+    Ok(Some(trusted_native_path(&executable)?))
 }
 
 fn checked_native_name(path: &std::path::Path) -> Result<()> {
@@ -516,4 +615,42 @@ fn trusted_native_path(path: &std::path::Path) -> Result<PathBuf> {
         }
     }
     Ok(resolved)
+}
+
+pub(super) fn callback_timeout(
+    command: &aw_exec::CommandSpec,
+    python: &std::path::Path,
+    selector: &std::ffi::OsStr,
+    cache: &std::path::Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<f64> {
+    let mut probe = command.clone();
+    probe.program = python.into();
+    // Importing the native CLI selects the profile and loads its dotenv before
+    // the native resolver applies YAML 1.1, environment expansion and limits.
+    let script = r#"import json, sys
+result = sys.argv[-1]
+sys.argv = [sys.argv[1], '--profile', sys.argv[2], 'config', 'get', 'plugins.hook_callback_timeout']
+from hermes_cli import main
+from hermes_cli.plugins import _resolve_hook_callback_timeout
+with open(result, 'w', encoding='utf-8') as stream:
+    json.dump(_resolve_hook_callback_timeout(), stream, allow_nan=False)
+"#;
+    probe.args = python_args(
+        cache,
+        &[
+            "-P".into(),
+            "-c".into(),
+            script.into(),
+            command.program.as_os_str().into(),
+            selector.into(),
+        ],
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let value = adapter::Probe(cancelled).python_text(probe, deadline)?;
+    let timeout: f64 = serde_json::from_str(&value)?;
+    if !timeout.is_finite() || timeout < 0.0 {
+        return Err("Hermes hook_callback_timeout must be nonnegative and finite".into());
+    }
+    Ok(timeout)
 }

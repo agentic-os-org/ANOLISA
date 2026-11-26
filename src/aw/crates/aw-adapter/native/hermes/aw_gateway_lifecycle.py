@@ -48,13 +48,13 @@ def register_retirement(ctx: Any, known: dict, active: dict, release: Any,
                 or not isinstance(params["launch_path"], str)
                 or not isinstance(params["token"], str)):
             raise ValueError("invalid AW Hermes Gateway session retirement")
-        from hermes_cli.version_info import get_version_info
+        from .aw_identity import runtime_revision
         from hermes_constants import get_hermes_home
 
         path = params["launch_path"]
         launch = load(path)
         if (launch["token"] != params["token"]
-                or get_version_info().commit != launch["revision"]
+                or runtime_revision() != launch["revision"]
                 or get_hermes_home().resolve() != Path(launch["profile"])):
             raise ValueError("AW Hermes Gateway launch identity differs")
         target = params["target_session_id"]

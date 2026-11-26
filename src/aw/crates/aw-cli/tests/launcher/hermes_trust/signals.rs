@@ -58,7 +58,7 @@ elif probe == 'dotenv':
 elif probe == 'discovery':
     assert os.environ['OTEL_SDK_DISABLED'] == 'true'
     assert 'PYTHONPATH' not in os.environ
-    Path(sys.argv[-1]).write_text(json.dumps([str(Path(__file__).parent), []]))
+    Path(sys.argv[-1]).write_text(json.dumps([str(Path(__file__).parent), False, []]))
 elif writer:
     path = Path(sys.argv[-3]) / 'config.yaml'
     value = json.loads(path.read_text())
@@ -101,6 +101,9 @@ else:
                 "aw_gateway.py",
                 "aw_gateway_attach.py",
                 "aw_gateway_lifecycle.py",
+                "aw_identity.py",
+                "aw_result.py",
+                "aw_sdk_attach.py",
                 "aw_skill.py",
             ] {
                 fs::copy(source.join(name), plugin.join(name)).unwrap();

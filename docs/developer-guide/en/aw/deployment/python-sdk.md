@@ -291,3 +291,65 @@ Native Skill, result/input rewriting, background offload and managed MCP
 combinations require separate acceptance before business rollout. The existing
 required entrypoint and its wider integration are documented in the
 [QwenPaw guide](../agents/qwenpaw.md).
+
+## Hermes Gateway workers
+
+A dedicated in-process Hermes 0.23.1 Gateway can start its own API and attach to
+AW by PID. Install the matching `anolisa-aw-sdk` wheel in the worker venv. Set
+the `hermes` target's argv to `[/opt/hermes-agent/hermes, chat, --cli]` and
+configure an AW service accessible to the worker's operating user. For a frozen
+deployment, keep the complete official source tree at revision
+`3b421578588243f920886e6fe79a6faa87ea026e` separate from the dependency-only
+venv built with `uv sync --frozen --no-install-project`. AW verifies the source
+contents, executable bits and permissions even when the image omits Git.
+
+Install the plugin into the worker's profile once and compile the descriptor
+from the exact configuration that the controller will use.
+
+```bash
+umask 077
+export AW_HERMES_PYTHON=/opt/hermes-venv/bin/python
+aw connect --config /srv/hermes/aw.yaml --agent hermes --native-profile /srv/hermes/profile
+aw config descriptor --config /srv/hermes/aw.yaml --agent hermes \
+  --profile hermes-installed-native-hooks > /srv/hermes/descriptor.json
+```
+
+At worker startup, set `HERMES_HOME=/srv/hermes/profile`, keep
+`aw-native-hooks` enabled and put the verified source on the Python import path.
+Before starting Python, use a read-only tree free of bytecode caches and set
+`PYTHONDONTWRITEBYTECODE=1`, or point `PYTHONPYCACHEPREFIX` to a new empty
+directory owned by the worker user with mode `0700`. Disable Gateway
+profile multiplexing. In the Gateway's async entrypoint, initialize the runner
+and session authority, then install the listener before publishing the API.
+Here `shutdown_requested` is the application's shutdown event. Drain active
+turns before closing control. The listener is installed once per worker process.
+To restart it after `close()`, start a new worker.
+
+```python
+from aw_sdk.hermes import listen
+from gateway.run_api import start_gateway_api, stop_gateway_api
+
+control = listen(runner, config_file="/srv/hermes/aw.yaml",
+                 descriptor_file="/srv/hermes/descriptor.json", attach_timeout_ms=15000)
+api = await start_gateway_api(runner)
+try:
+    await shutdown_requested.wait()
+finally:
+    await stop_gateway_api(api)
+    await control.close()
+```
+
+From the same OS user, select the PID of the Python process that owns the Gateway loop.
+
+```bash
+aw connect --config /srv/hermes/aw.yaml --sdk-pid "$WORKER_PID" --timeout-ms 30000
+```
+
+The first tool in each turn waits for verified callback installation and opens an
+AW Task in the session workspace. A missed attach deadline blocks tool dispatch.
+For `tool.before`, set Hermes' `plugins.hook_callback_timeout` to at least the
+AW event budget plus five seconds for cleanup, or to zero for unlimited time.
+This profile supports `observe` and `block` before a tool, and `observe` and
+`replace_result` after it. With `on_error: withhold_result`, a failed result
+check writes `AW result withheld` to the model-bound history. Existing tool
+side effects persist. Generate a new descriptor after changing the configuration.

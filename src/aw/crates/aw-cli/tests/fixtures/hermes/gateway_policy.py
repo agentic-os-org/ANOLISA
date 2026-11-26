@@ -16,6 +16,8 @@ if request["method"] == "describe":
     ]
 elif request["method"] == "invoke":
     event = request["event"]
+    if event["name"] == "tool.after" and (root / "fault").exists():
+        raise SystemExit(1)
     with (root / "provider.jsonl").open("a") as stream:
         stream.write(json.dumps({**event, "fixture_provider_cwd": str(Path.cwd()),
                                 "fixture_revision": request["config_revision"]}) + "\n")

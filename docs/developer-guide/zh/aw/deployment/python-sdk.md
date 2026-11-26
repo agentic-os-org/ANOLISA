@@ -232,3 +232,56 @@ Scope 固定同一策略修订，直到原生工作完成清理。
 
 原生 Skill、输入／结果改写、后台 offload 与托管 MCP 组合仍需单独验收后进入业务采用。
 现有 required 入口及其更完整接点见 [QwenPaw 指南](../agents/qwenpaw.md)。
+
+## Hermes Gateway 工作进程
+
+独占进程的 Hermes 0.23.1 Gateway 可以自行启动 API，再由 AW 按 PID 挂接。
+在工作进程的 venv 中安装同版本的 `anolisa-aw-sdk` wheel，将 `hermes` 目标的 argv
+设为 `[/opt/hermes-agent/hermes, chat, --cli]`，让 AW 服务与工作进程使用同一系统用户。
+冻结安装使用官方修订 `3b421578588243f920886e6fe79a6faa87ea026e` 的完整源码树，
+将 `uv sync --frozen --no-install-project` 生成的依赖 venv 放在源码目录之外。
+镜像可移除 Git，AW 通过文件内容、可执行位和权限核验源码身份。
+
+部署时将插件安装到工作进程的 profile，并用控制端实际使用的配置生成 descriptor。
+
+```bash
+umask 077
+export AW_HERMES_PYTHON=/opt/hermes-venv/bin/python
+aw connect --config /srv/hermes/aw.yaml --agent hermes --native-profile /srv/hermes/profile
+aw config descriptor --config /srv/hermes/aw.yaml --agent hermes \
+  --profile hermes-installed-native-hooks > /srv/hermes/descriptor.json
+```
+
+启动工作进程时设置 `HERMES_HOME=/srv/hermes/profile`，保留已启用的
+`aw-native-hooks`，将已校验的源码加入 Python 导入路径。启动 Python 前，使用没有字节码缓存的只读源码树并设置
+`PYTHONDONTWRITEBYTECODE=1`，或将 `PYTHONPYCACHEPREFIX` 指向新建的空目录，
+目录属主为运行工作进程的用户，权限为 `0700`。
+关闭 Gateway 的 profile 多路复用。在异步入口初始化 runner 和 session authority，
+安装监听器后再开放 API。示例中的 `shutdown_requested` 为应用的停机事件，关闭监听器前需等待活动轮次结束。
+每个工作进程只安装一次监听器，调用 `close()` 后需启动新的工作进程才能再次监听。
+
+```python
+from aw_sdk.hermes import listen
+from gateway.run_api import start_gateway_api, stop_gateway_api
+
+control = listen(runner, config_file="/srv/hermes/aw.yaml",
+                 descriptor_file="/srv/hermes/descriptor.json", attach_timeout_ms=15000)
+api = await start_gateway_api(runner)
+try:
+    await shutdown_requested.wait()
+finally:
+    await stop_gateway_api(api)
+    await control.close()
+```
+
+控制端使用同一系统用户，选择实际运行 Gateway 事件循环的 Python 进程 PID。
+
+```bash
+aw connect --config /srv/hermes/aw.yaml --sdk-pid "$WORKER_PID" --timeout-ms 30000
+```
+
+每轮的首次工具调用等待回调安装确认，然后在该会话的工作目录中打开 AW Task。
+挂接超时会阻断工具派发。启用 `tool.before` 时，将 Hermes 的 `plugins.hook_callback_timeout`
+设为至少覆盖 AW 事件预算加 5 秒清理时间，或设为 0 表示不限时。此 profile 支持工具前的 `observe`、`block` 和工具后的
+`observe`、`replace_result`。配置 `on_error: withhold_result` 后，结果检查失败会向模型历史写入
+`AW result withheld`。已发生的工具副作用仍然保留。更新配置后需重新生成 descriptor。

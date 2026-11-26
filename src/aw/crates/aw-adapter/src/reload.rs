@@ -421,6 +421,11 @@ pub fn adopt_step(
         }
     }
     let succeeded = matches!(output.exit, NativeExit::Code(0));
+    if adapter == "hermes" && event == "tool.after" && !succeeded && on_error == "withhold_result" {
+        output.exit = NativeExit::Code(0);
+        output.stdout = br#"{"aw_withheld":true}"#.to_vec();
+        return Ok(output);
+    }
     let mut value = serde_json::from_slice::<Value>(&output.stdout).ok();
     if adapter == "qoder" && succeeded && event == "tool.before" {
         if let Some(value) = value.as_mut() {

@@ -168,6 +168,12 @@ pub(super) fn invoke_bound(
                                     let block = matches!(event, "input.submit" | "tool.before")
                                         && step.on_error == "block";
                                     let mut output = adapter.reply(block);
+                                    if binding.adapter == "hermes"
+                                        && event == "tool.after"
+                                        && step.on_error == "withhold_result"
+                                    {
+                                        output.stdout = br#"{"aw_withheld":true}"#.to_vec();
+                                    }
                                     if block {
                                         // Keep native JSON vetoes visible to group scheduling.
                                         output.exit = NativeExit::Code(2);

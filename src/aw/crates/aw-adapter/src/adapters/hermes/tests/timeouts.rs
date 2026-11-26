@@ -39,6 +39,40 @@ fn action(event: &str) -> AdmittedStep {
 }
 
 #[test]
+fn strict_result_requires_the_verified_history_commit() {
+    let profile = Profile::new("plugins: {}\n");
+    let mut prepared = prepared(&profile, "auto");
+    assert!(!prepared
+        .capabilities()
+        .failure_actions
+        .contains_key("tool.after"));
+    prepared.revision = VERIFIED_GATEWAY.into();
+    for gateway in [false, true] {
+        prepared.gateway = gateway;
+        assert_eq!(
+            prepared.capabilities().failure_actions["tool.after"],
+            ["withhold_result"]
+        );
+    }
+    let directory = profile.0.join("strict");
+    fs::create_dir(&directory).unwrap();
+    let files = crate::test_support::Artifacts(directory);
+    let mut after = action("tool.after");
+    after.on_error = "withhold_result".into();
+    prepared
+        .configure(&LaunchContext {
+            files: &files,
+            binding_path: &profile.0.join("binding"),
+            executable: std::path::Path::new("/usr/bin/aw"),
+            steps: &[after],
+        })
+        .unwrap();
+    let launch: Value =
+        serde_json::from_slice(&fs::read(files.0.join("hermes-launch.json")).unwrap()).unwrap();
+    assert_eq!(launch["final_result"], true);
+}
+
+#[test]
 fn observation_only_timeout_admission_matches_registered_budget() {
     let profile = Profile::new("unknown: keep\n");
     let mut prepared = prepared(&profile, "auto");

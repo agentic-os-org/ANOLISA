@@ -32,13 +32,10 @@ class Attachment:
         self._preparations = set()
 
     def install(self, install_guards, add_turn, remove_turn, idle):
-        from gateway import run_runtime, session_finite, session_runtime_workers
-        from gateway.session_managed_worker import managed_policy
+        from gateway import run_runtime
 
         publish = run_runtime.publish_gateway_runtime_ready
         settle = run_runtime.settle_gateway_runtime
-        execute = session_finite.execute_finite_admission
-        start_worker = session_runtime_workers.start_turn_worker
 
         def ready(runner):
             if runner.config.multiplex_profiles:
@@ -52,42 +49,9 @@ class Attachment:
             await settle(runner, budget, reason)
             await asyncio.to_thread(self.close, idle)
 
-        def track_worker(runner, worker, holder, run_sync):
-            start_worker(runner, worker, holder, run_sync)
-            turn = _current_turn.get()
-            if turn is not None:
-                turn.workers.append(worker.worker_done)
-
-        async def protected(authority, ref, row):
-            # Keep refusal inside Hermes' native claim and settlement boundary.
-            if managed_policy(authority, ref) is not None:
-                raise RuntimeError("AW Hermes attach does not support out-of-process turns")
-            turn = Turn(self, ref.session_id, row.get("request_id") or row["admission_id"],
-                        row["admission_id"])
-            add_turn(turn)
-            token = _current_turn.set(turn)
-            try:
-                return await execute(authority, ref, row)
-            finally:
-                _current_turn.reset(token)
-
-                async def finish():
-                    # Cancelling a Gateway waiter does not stop its executor thread.
-                    while any(not worker.is_set() for worker in turn.workers):
-                        await asyncio.sleep(.05)
-                    await asyncio.to_thread(turn.finish)
-                    remove_turn(turn)
-
-                cleanup = session_runtime_workers.track_mutation(authority, finish())
-                try:
-                    await asyncio.wait_for(asyncio.shield(cleanup), 5)
-                except TimeoutError:
-                    LOG.warning("AW Hermes turn cleanup is still waiting for native completion")
-
+        install_turns(lambda *ids: Turn(self, *ids), add_turn, remove_turn)
         run_runtime.publish_gateway_runtime_ready = ready
         run_runtime.settle_gateway_runtime = shutdown
-        session_finite.execute_finite_admission = protected
-        session_runtime_workers.start_turn_worker = track_worker
 
     def prepare(self):
         started = time.monotonic_ns()
@@ -107,11 +71,11 @@ class Attachment:
 
     def register(self, cwd, timeout):
         from hermes_cli.plugins import _resolve_hook_callback_timeout
-        from hermes_cli.version_info import get_version_info
+        from .aw_identity import runtime_revision
         from hermes_constants import get_hermes_home
 
         profile = get_hermes_home().resolve()
-        revision = get_version_info().commit
+        revision = runtime_revision()
         with self._lock:
             if self._closing:
                 raise RuntimeError("AW Hermes Gateway is stopping")
@@ -191,6 +155,55 @@ class Attachment:
             self.release(self.launch[1]["binding"])
 
 
+def install_turns(make_turn, add_turn, remove_turn):
+    from gateway import session_finite, session_runtime_workers
+    from gateway.session_managed_worker import managed_policy
+
+    execute = session_finite.execute_finite_admission
+    start_worker = session_runtime_workers.start_turn_worker
+
+    def track_worker(runner, worker, holder, run_sync):
+        start_worker(runner, worker, holder, run_sync)
+        turn = _current_turn.get()
+        if turn is not None:
+            turn.workers.append(worker.worker_done)
+
+    async def protected(authority, ref, row):
+        # Keep refusal inside Hermes' native claim and settlement boundary.
+        if managed_policy(authority, ref) is not None:
+            raise RuntimeError("AW Hermes attach does not support out-of-process turns")
+        turn = make_turn(ref.session_id, row.get("request_id") or row["admission_id"],
+                         row["admission_id"])
+        add_turn(turn)
+        token = _current_turn.set(turn)
+        try:
+            return await execute(authority, ref, row)
+        finally:
+            _current_turn.reset(token)
+
+            async def finish():
+                # Cancelling a Gateway waiter does not stop its executor thread.
+                while any(not worker.is_set() for worker in turn.workers):
+                    await asyncio.sleep(.05)
+                try:
+                    await asyncio.to_thread(turn.finish)
+                except Exception:
+                    turn.owner.failed.set()
+                    LOG.exception("AW Hermes tool cleanup was not confirmed")
+                remove_turn(turn)
+
+            cleanup = session_runtime_workers.track_mutation(authority, finish())
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup), 5)
+            except TimeoutError:
+                LOG.warning("AW Hermes turn cleanup is still waiting for native completion")
+
+    session_finite.execute_finite_admission = protected
+    session_runtime_workers.start_turn_worker = track_worker
+    return lambda: (session_finite.execute_finite_admission is protected and
+                    session_runtime_workers.start_turn_worker is track_worker)
+
+
 class Turn:
     def __init__(self, owner, session, request, admission):
         self.owner, self.session, self.request, self.admission = owner, session, request, admission
@@ -257,8 +270,5 @@ class Turn:
             if self.scope is not None:
                 try:
                     self.owner.workspace("close", self.scope.name, 10)
-                except (OSError, subprocess.SubprocessError):
-                    self.owner.failed.set()
-                    LOG.exception("AW Hermes tool cleanup was not confirmed")
                 finally:
                     self.scope.close()
