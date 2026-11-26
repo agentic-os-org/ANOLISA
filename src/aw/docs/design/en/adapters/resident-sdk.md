@@ -52,6 +52,12 @@ Pi uses its public model stream and the produced tool object. Claude uses a priv
 loopback Anthropic Messages relay and the native SDK transport dispatch context.
 MCP `_meta.claudecode/toolUseId` links the native frame to that same identity before
 the SDK removes metadata from its public handler arguments.
+The relay accepts CRLF, LF and CR line endings in SSE streams and skips comments
+and blank data. It discards a trailing `[DONE]` only after `message_stop`.
+The relay warns once per request for each of these cases: a discarded marker,
+blank data, or accumulated whitespace-only deltas that use the initial tool input.
+Failures report the decoding or protocol stage and structural metadata in stderr.
+Message text, tool input and credentials stay out of these diagnostics.
 Qoder uses completed model tool blocks from the Worker's private partial
 output and verifies each Hook against its native control-dispatch context. For
 child tools, a private stream-start frame reserves the native ID under an active,
