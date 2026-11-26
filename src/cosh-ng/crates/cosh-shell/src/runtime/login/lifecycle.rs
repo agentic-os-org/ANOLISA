@@ -253,6 +253,32 @@ fn audit(
     Ok(records)
 }
 
+fn unmanaged_package_audit(
+    store: &Store,
+    nss_accounts: impl FnOnce() -> Result<Vec<Account>>,
+    local_accounts: impl FnOnce() -> Result<Vec<Account>>,
+) -> Result<Vec<Record>> {
+    let records = store.settled_records()?;
+    if !records.is_empty() {
+        return Err(Error::new(
+            "login records remain on a platform without managed login support",
+        ));
+    }
+    let mut accounts = nss_accounts()?;
+    accounts.extend(local_accounts()?);
+    check_state(&records, &accounts, false)?;
+    Ok(records)
+}
+
+fn package_audit(store: &Store, compatible: bool) -> Result<Vec<Record>> {
+    match account::require_package_platform()? {
+        account::PackagePlatform::Alinux2 => {
+            unmanaged_package_audit(store, account::nss_accounts, account::local_accounts)
+        }
+        account::PackagePlatform::Alinux4 => audit(store, compatible, account::nss_accounts),
+    }
+}
+
 fn prepare_transaction(
     store: &Store,
     compatible: bool,
@@ -378,13 +404,15 @@ fn inspect_target(path: &Path) -> Result<(PathBuf, bool)> {
 
 fn run(action: Action, euid: u32) -> Result<()> {
     admit(&action, euid)?;
+    if !matches!(action, Action::CheckProtocol | Action::CheckErase) {
+        account::require_platform()?;
+    }
     let downgrade = matches!(action, Action::Downgrade(_));
     let store = Store::system();
     match action {
-        Action::VerifyInstalled | Action::CheckProtocol => {
-            audit(&store, true, account::nss_accounts).map(|_| ())
-        }
-        Action::CheckErase => require_erase_cleanup(&audit(&store, false, account::nss_accounts)?),
+        Action::VerifyInstalled => audit(&store, true, account::nss_accounts).map(|_| ()),
+        Action::CheckProtocol => package_audit(&store, true).map(|_| ()),
+        Action::CheckErase => require_erase_cleanup(&package_audit(&store, false)?),
         Action::Reconcile { apply } => reconcile(&store, apply, account::nss_accounts),
         Action::CheckTarget(path) => {
             let (_, compatible) = inspect_target(&path)?;

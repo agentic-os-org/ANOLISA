@@ -31,6 +31,32 @@ cargo build --bin cosh-core
 cargo build --bin cosh-shell
 ```
 
+### RPM Build Profiles
+
+From the repository root, `./scripts/rpm-build.sh cosh-ng` uses the default
+RPM profile. `COSH_RPM_PROFILE=alinux2 ./scripts/rpm-build.sh cosh-ng` explicitly
+selects the Alibaba Cloud Linux 2.1903 profile and defaults its dist suffix to
+`.alinux2`; `DIST_TAG` may override the suffix without changing the profile.
+The old-system profile omits the Gateway service unit and the ALinux4-qualified
+login capability. It keeps the runtime binaries and read-only upgrade/erase
+guards, but does not grant managed login-shell operations or qualify Gateway
+service containment on systemd 219.
+Replacement by a profile without the service is refused while the installed
+Gateway unit remains. Explicitly erase the service-containing package first;
+its existing erase guard stops the instances before removing the unit.
+
+Both profiles use the same spec, source archive and lifecycle backend. The
+spec builds into its own `target` directory and installs from that same
+directory, even when the caller exports another `CARGO_TARGET_DIR`. The build
+environment must provide the declared prerequisites; the script does not
+install a new Rust toolchain. Run `make test-packaging` in `src/cosh-ng` and
+`bash tests/test-cosh-rpm-profile.sh` from the repository root for fixture
+checks, then validate a clean SRPM rebuild and real RPM transactions on the
+intended target before declaring that delivery profile supported.
+
+This source/RPM profile does not change the official precompiled archive's
+glibc compatibility profile.
+
 ## Validation
 
 Use checks proportional to the change:

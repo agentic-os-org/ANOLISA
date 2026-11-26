@@ -7,6 +7,9 @@ use super::super::generation::LineSubmitCounter;
 const BASH_SLASH_SUBMISSION_GUARD: &[u8] = b"\x1b[99~";
 const BASH_PRIVATE_SLASH_SUBMISSION_GUARD: &[u8] = b"\x1b[100~";
 const BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD: &[u8] = b"\x1b[101~";
+const LEGACY_BASH_SLASH_SUBMISSION_GUARD: &[u8] = b"\x18\x1d";
+const LEGACY_BASH_PRIVATE_SLASH_SUBMISSION_GUARD: &[u8] = b"\x18\x1e";
+const LEGACY_BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD: &[u8] = b"\x18\x1f";
 
 pub(super) fn observe_untracked_readline_binding(
     bytes: &[u8],
@@ -131,10 +134,21 @@ pub(super) fn guarded_bash_submission(
             exact_slash
         };
         if needs_guard {
+            let legacy = input_classifier.bash_legacy_readline();
             let guard = if index == 0 && history_recoverable {
-                BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD
+                if legacy {
+                    LEGACY_BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD
+                } else {
+                    BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD
+                }
             } else if index == 0 && history_private {
-                BASH_PRIVATE_SLASH_SUBMISSION_GUARD
+                if legacy {
+                    LEGACY_BASH_PRIVATE_SLASH_SUBMISSION_GUARD
+                } else {
+                    BASH_PRIVATE_SLASH_SUBMISSION_GUARD
+                }
+            } else if legacy {
+                LEGACY_BASH_SLASH_SUBMISSION_GUARD
             } else {
                 BASH_SLASH_SUBMISSION_GUARD
             };
@@ -211,6 +225,9 @@ pub(super) fn bash_submission_needs_guard(
     let Ok(line) = std::str::from_utf8(line) else {
         return true;
     };
+    if input_classifier.bash_legacy_readline() && !line.trim().is_empty() {
+        return true;
+    }
     let first_word = line.split_whitespace().next().unwrap_or_default();
     input_classifier.is_exact_slash_control_command(first_word)
 }

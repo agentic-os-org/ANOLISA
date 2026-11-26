@@ -62,6 +62,23 @@ pub(super) fn require_platform() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PackagePlatform {
+    Alinux2,
+    Alinux4,
+}
+
+pub(super) fn require_package_platform() -> Result<PackagePlatform> {
+    if !cfg!(target_os = "linux") {
+        return Err(Error::new(
+            "package lifecycle auditing is supported only on Linux RPM systems",
+        ));
+    }
+    let release = String::from_utf8(read_trusted(Path::new("/etc/os-release"), 64 * 1024)?)
+        .map_err(|_| Error::new("invalid operating system identity"))?;
+    validate_package_platform(&release)
+}
+
 pub(super) fn lookup(name: Option<&str>, euid: u32) -> Result<Account> {
     require_platform()?;
     let account = lookup_nss(name, euid)?;
@@ -218,6 +235,15 @@ fn resolve_trusted_path(
 }
 
 pub(super) fn validate_platform(release: &str) -> Result<()> {
+    if validate_package_platform(release)? != PackagePlatform::Alinux4 {
+        return Err(Error::new(
+            "login management supports Alibaba Cloud Linux 4 RPM installations only",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_package_platform(release: &str) -> Result<PackagePlatform> {
     let mut id = None;
     let mut version = None;
     for line in release.lines() {
@@ -234,14 +260,16 @@ pub(super) fn validate_platform(release: &str) -> Result<()> {
         }
         *slot = Some(value.trim_matches('"'));
     }
-    if id != Some("alinux")
-        || !version.is_some_and(|version| version == "4" || version.starts_with("4."))
-    {
-        return Err(Error::new(
-            "login management supports Alibaba Cloud Linux 4 RPM installations only",
-        ));
+    if id == Some("alinux") {
+        match version {
+            Some("2.1903") => return Ok(PackagePlatform::Alinux2),
+            Some(version) if version == "4" || version.starts_with("4.") => {
+                return Ok(PackagePlatform::Alinux4);
+            }
+            _ => {}
+        }
     }
-    Ok(())
+    Err(Error::new("package lifecycle auditing supports Alibaba Cloud Linux 2.1903 and 4 RPM installations only"))
 }
 
 pub(super) fn read_trusted(path: &Path, limit: usize) -> Result<Vec<u8>> {

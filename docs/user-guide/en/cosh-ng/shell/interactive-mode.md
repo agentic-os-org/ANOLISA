@@ -23,6 +23,15 @@ Integration is selected at startup. Enhanced is the default. Set
 `shell.integration = "native"` in the user config for persistent hook-free
 sessions, or use the environment variable for one launch.
 
+Bash 4.2 and 4.3 retain slash controls and eligible natural-language requests,
+but cannot report precise command-start boundaries because they lack `PS0`.
+Cosh prints a startup notice and does not claim an ordinary-command ledger or
+automatic failure insights on those versions. It does not install a global
+`DEBUG` observer or replace the user's traps. These old Bash sessions reserve
+`Ctrl-X Ctrl-]`, `Ctrl-X Ctrl-^`, and `Ctrl-X Ctrl-_` for private Readline guards;
+modern Bash keeps its existing transport and native shortcuts. Native
+integration remains unchanged.
+
 `--ask` selects Enhanced for this session even when Native is configured; it does
 not change the saved integration preference. The question is Agent input, not a
 Shell command. After the answer, continue with commands or natural language.

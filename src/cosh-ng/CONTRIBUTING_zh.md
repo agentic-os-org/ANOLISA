@@ -31,6 +31,27 @@ cargo build --bin cosh-core
 cargo build --bin cosh-shell
 ```
 
+### RPM 构建 Profile
+
+在仓库根运行 `./scripts/rpm-build.sh cosh-ng` 使用默认 RPM profile。
+`COSH_RPM_PROFILE=alinux2 ./scripts/rpm-build.sh cosh-ng` 显式选择
+Alibaba Cloud Linux 2.1903 profile，发行后缀默认是 `.alinux2`；
+`DIST_TAG` 可覆盖后缀，但不会改变 profile。旧系统 profile 不安装 Gateway
+服务单元，也不声明经过 ALinux4 资格验证的登录能力。运行二进制和只读升级、
+卸载守卫保留，但不授予受管登录 Shell 修改能力，也不代表 systemd 219 上的
+Gateway 服务隔离已经验收。
+已安装的 Gateway 服务单元仍存在时，不能直接替换为不含服务的 profile；
+需要先显式卸载原包，由现有卸载守卫停止实例后移除单元。
+
+两个 profile 共用 spec、源码归档和生命周期 backend。spec 在自身 `target`
+目录构建，并从同一目录安装，即使调用者导出了其他 `CARGO_TARGET_DIR`。
+构建环境仍需提供声明的依赖；脚本不会安装新 Rust 工具链。在 `src/cosh-ng`
+运行 `make test-packaging`，在仓库根运行 `bash tests/test-cosh-rpm-profile.sh`
+做 fixture 检查；宣称目标交付 profile 受支持之前，仍需验证干净 SRPM 重建和
+真实 RPM 安装、升级、卸载事务。
+
+此源码/RPM profile 不改变官方预编译归档的 glibc 兼容 profile。
+
 ## 验证
 
 按改动范围选择检查。

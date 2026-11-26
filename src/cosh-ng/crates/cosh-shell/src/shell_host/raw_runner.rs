@@ -412,6 +412,7 @@ where
         && config.integration.uses_markers()
         && config.slash_via_shell
         && config.native_mode;
+    let legacy_bash_readline = bounded_bash_handoff && session.parser.legacy_bash_readline();
     session.parser.publish_quiescent_prompt_snapshot();
     let (mut wake_reader, wake_writer, mut resize_reader, _resize_wake) =
         RelayWake::new()?.into_parts();
@@ -428,7 +429,8 @@ where
             .with_bash_readline_history_privacy(
                 bounded_bash_handoff && config.integration.uses_markers(),
             )
-            .with_bash_slash_submission_guard(slash_route_enabled),
+            .with_bash_slash_submission_guard(slash_route_enabled || legacy_bash_readline)
+            .with_bash_legacy_readline(legacy_bash_readline),
         Arc::clone(&input_mode),
         input_generation.clone(),
         RawInputShellRoute::new(

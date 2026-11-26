@@ -78,6 +78,7 @@ pub(super) struct OscParser {
     pub(super) clean: Transcript,
     pub(super) display: Transcript,
     marker_token: Option<String>,
+    legacy_bash_readline: bool,
     pending: Vec<u8>,
     /// Leading pending bytes inherited from a discarded private candidate;
     /// tentative continuation bytes after this boundary remain terminal output.
@@ -139,6 +140,10 @@ pub(super) struct OscParser {
 }
 
 impl OscParser {
+    pub(crate) fn legacy_bash_readline(&self) -> bool {
+        self.legacy_bash_readline
+    }
+
     /// Shares the main-prompt gate with the raw input relay (#1721 D16).
     pub(crate) fn set_main_prompt_gate(&mut self, gate: crate::raw_input::MainPromptGate) {
         self.main_prompt_gate = gate;
@@ -337,6 +342,10 @@ impl OscParser {
                 .observe(marker.history_file.as_deref());
         }
         if marker.event == "history_file" {
+            return Ok(());
+        }
+        if marker.event == "shell_capabilities" {
+            self.legacy_bash_readline = marker.legacy_bash_readline.unwrap_or(false);
             return Ok(());
         }
 

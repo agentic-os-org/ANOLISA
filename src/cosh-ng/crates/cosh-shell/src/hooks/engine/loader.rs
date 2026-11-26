@@ -403,18 +403,21 @@ fn frozen_executable(
 #[cfg(target_os = "linux")]
 fn sealed_snapshot(content: &[u8]) -> Option<fs::File> {
     use nix::fcntl::{fcntl, FcntlArg, SealFlag};
-    use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
     use std::io::Write;
-    use std::os::fd::AsRawFd;
 
-    let owned = memfd_create(
-        c"cosh-project-hook",
-        MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING,
-    )
-    .ok()?;
+    let descriptor = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_memfd_create,
+            c"cosh-project-hook".as_ptr(),
+            nix::libc::MFD_CLOEXEC | nix::libc::MFD_ALLOW_SEALING,
+        )
+    };
+    if descriptor < 0 {
+        return None;
+    }
     // Wrapping the owned descriptor makes the File close it on drop, which is the
     // only lifetime an anonymous snapshot needs.
-    let mut file = fs::File::from(owned);
+    let mut file = unsafe { fs::File::from_raw_fd(descriptor as nix::libc::c_int) };
     file.write_all(content).ok()?;
     file.set_permissions(fs::Permissions::from_mode(0o500))
         .ok()?;
@@ -437,3 +440,7 @@ pub(super) fn parse_timeout(s: &str) -> u64 {
         s.parse::<u64>().unwrap_or(5000)
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "loader/tests.rs"]
+mod tests;

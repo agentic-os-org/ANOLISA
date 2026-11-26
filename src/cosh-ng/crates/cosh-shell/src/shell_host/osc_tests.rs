@@ -17,6 +17,18 @@ use std::sync::{Arc, Mutex};
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
 
 #[test]
+fn legacy_bash_transport_capability_requires_the_authenticated_marker() {
+    let mut parser = parser_for_test("legacy-capability");
+    assert!(!parser.legacy_bash_readline());
+    parser.feed(b"\x1b]1337;COSH;{\"event\":\"shell_capabilities\",\"token\":\"wrong-token\",\"session_id\":\"legacy-capability\",\"legacy_bash_readline\":true}\x07").expect("untrusted capability");
+    assert!(!parser.legacy_bash_readline());
+    parser.feed(b"\x1b]1337;COSH;{\"event\":\"shell_capabilities\",\"token\":\"test-marker-token\",\"session_id\":\"other-session\",\"legacy_bash_readline\":true}\x07").expect("foreign capability");
+    assert!(!parser.legacy_bash_readline());
+    parser.feed(b"\x1b]1337;COSH;{\"event\":\"shell_capabilities\",\"token\":\"test-marker-token\",\"session_id\":\"legacy-capability\",\"legacy_bash_readline\":true}\x07").expect("trusted capability");
+    assert!(parser.legacy_bash_readline());
+}
+
+#[test]
 fn bounded_raw_session_spools_output_without_materializing_result() {
     // Serialize with process-wide PATH rewrites so a concurrent env-guard
     // holder cannot change PATH while this test spawns bash.

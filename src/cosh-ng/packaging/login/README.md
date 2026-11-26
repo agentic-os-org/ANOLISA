@@ -4,6 +4,15 @@ The Cosh RPM installs the Bash support module and login-management assets. The i
 
 `/usr/libexec/cosh/login-preflight` calls the single login backend. Its read-only operations are `--verify-installed --entry /usr/bin/cosh --record-version 1`, `check-protocol 1 --record-version 1 --entry /usr/bin/cosh`, `check-erase`, `check-target /absolute/target.rpm`, and `reconcile`. Only the installed capability audit is available without root. Scriptlets never acquire the transaction lock or query RPM recursively.
 
+The ALinux2.1903 RPM profile uses this same backend for `check-protocol` and
+`check-erase`, without enabling managed login operations. Both checks require
+settled empty state and no Cosh login reference in either bounded NSS or local
+account enumeration. Retained records, unfinished temporary entries and failed
+account enumeration are refused without cleanup. Other lifecycle actions and
+login-shell mutation retain the ALinux4 platform qualification. An incoming
+RPM without the login capability runs `check-erase` before replacing an
+installed package, so it cannot strand managed accounts or completed records.
+
 Records are keyed by UID, so `usermod -l` retires the recorded name while keeping the UID, and `userdel` leaves the record behind. The audit resolves each record by its UID and refuses a record whose UID now belongs to a different name or to no account, naming the record path, both identities, and the recovery command. Every gate keeps its nonzero exit for those records, including the compatible ones, so a drifted record never crosses an upgrade unreviewed. `reconcile` lists the pending actions and exits nonzero while any remain; `reconcile --yes` applies them under the Store lock. It re-binds a record to the account that now owns its UID, or removes a record whose UID has no account, and refuses a current name that a record cannot represent. Reconcile changes records only, never an account's shell, and a re-bound record still passes the existing conflict checks before `restore` may change a shell. A rename and a reused UID are indistinguishable from the record alone, so nothing is applied without the administrator's explicit `--yes`. After a re-bind, `cosh login restore --user CURRENT_NAME` restores the recorded Bash; after an orphan removal, the erase guards see only the remaining records.
 
 The controlled root frontdoor accepts `replace /absolute/target.rpm`, `downgrade /absolute/target.rpm`, or `erase` (fixed `dnf remove cosh-ng`). Local target RPMs must be administrator controlled. Compatibility requires package `cosh-ng`, version at least `0.27.0`, and the exact RPM Provide `cosh-login-lifecycle-v1`; the same version without that Provide is unknown. Unknown targets and controlled erase require restored records and no remaining Cosh login references. Under the same lock, they remove only those completed restoration records and retain the state directory and lock inode. This changes no account: the verified current Bash is authoritative. Compatible upgrades keep all records. No separate history log is created. Cleanup precedes DNF, so cancellation can leave the completed restoration record removed while the actual Bash remains unchanged. Direct downgrade to arbitrary old packages is outside this controlled route.
@@ -17,3 +26,9 @@ The frontdoor audits under the existing login transaction lock, then execs fixed
 `%preun` guards final erase without acquiring a lock or mutating records; completed records still present require the controlled `erase` frontdoor. New-package `%pre` without an installed backend accepts only absent or safely empty state (including its safe private lock), and rejects UID records, unknown residues, links, and unsafe permissions. It does not protect replacement by an old package that lacks a compatible preflight.
 
 The `login_lifecycle` RPM build condition defaults on. Standard builds install the capability declaration and advertise `cosh-login-lifecycle-v1`; packaging may explicitly omit it with `--without login_lifecycle`. Installation does not change any account's login shell. Set still validates the supported ALinux4 platform, native package versions, trusted assets and transaction locks; the declaration does not bypass those checks. Installed-product qualification covers current and named users, new and existing sessions, vipw lock inheritance after parent termination, concurrent Restore, upgrades, erase guards, controlled transactions and interruption recovery.
+
+`--with alinux2` selects the old RPM profile, disables `login_lifecycle` and
+`gateway_service` by default, and refuses explicitly enabling either unsupported
+capability. The default profile remains unchanged. See the component
+[build guide](../../CONTRIBUTING.md#rpm-build-profiles) for the public entrypoint
+and clean-rebuild validation boundary.

@@ -96,6 +96,7 @@ impl OscParser {
                 &work_dir.join(format!("display-{spool_suffix}.transcript")),
             )?,
             marker_token,
+            legacy_bash_readline: false,
             pending: Vec::new(),
             abandoned_prefix_len: 0,
             pending_clean_control: Vec::new(),

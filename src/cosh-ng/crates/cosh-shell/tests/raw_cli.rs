@@ -25,6 +25,9 @@ mod audit_system_config;
 mod auth;
 #[path = "raw_cli/auth_ecs.rs"]
 mod auth_ecs;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/bash_legacy.rs"]
+mod bash_legacy;
 #[path = "raw_cli/cancellation.rs"]
 mod cancellation;
 #[path = "raw_cli/compaction.rs"]
@@ -66,6 +69,9 @@ mod host_executed;
 mod i18n;
 #[path = "raw_cli/log_budget.rs"]
 mod log_budget;
+#[cfg(target_os = "linux")]
+#[path = "raw_cli/memfd.rs"]
+mod memfd;
 #[path = "raw_cli/memory_hook.rs"]
 mod memory_hook;
 #[path = "raw_cli/mode.rs"]
