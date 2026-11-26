@@ -1,0 +1,37 @@
+{
+  "name": "@anolisa/aw-sdk-deepseek-harness",
+  "version": "0.2.2",
+  "description": "Cooperative Cordis Bridge integration for DeepSeek Harness",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "os": [
+    "linux"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs"
+    },
+    "./preload": "./dist/native/deepseek-harness/result-preload.mjs"
+  },
+  "peerDependencies": {
+    "@anolisa/aw-sdk": "0.2.2",
+    "@deepseek-ai/cordis": "4.0.5"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  }
+}

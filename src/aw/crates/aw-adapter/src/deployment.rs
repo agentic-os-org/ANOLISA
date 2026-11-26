@@ -48,6 +48,26 @@ const PROFILES: &[ProfileDefinition] = &[
             }
         },
     },
+    ProfileDefinition {
+        name: "deepseek-cordis-hooks",
+        build: || {
+            let mut capabilities = catalog::DEEPSEEK.capabilities("cordis-hooks/v1", "cordis");
+            capabilities.events.retain(|event, _| {
+                matches!(
+                    event.as_str(),
+                    "input.submit" | "tool.before" | "tool.after"
+                )
+            });
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+            DeploymentProfile {
+                capabilities,
+                requires_service: true,
+                session_start_hint: false,
+            }
+        },
+    },
     // Cooperative resident workers reuse the managed bridges and their fail-closed
     // cleanup, so AW must be available for every admitted Task.
     ProfileDefinition {

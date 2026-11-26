@@ -34,6 +34,10 @@ const ctx = {
     ready = true;
   },
 };
+// Emulate the registry publication point; pinned npm acceptance exercises the preload.
+const config = JSON.parse(readFileSync(process.env.AW_NATIVE_CONFIG));
+const slot = { current: null };
+if (config.result_gate) ctx.tools[Symbol.for("aw.deepseek.resultGate")] = slot;
 plugin.apply(ctx);
 if (!ready) throw Error("unready runner");
 const mode = process.env.DSH_TEST_MODE ?? "allow";
@@ -67,10 +71,11 @@ const result = {
 const decision = await waterfall("tools/post-execute", [exec, result], () => ({
   kind: "accept",
 }));
-const final = {
+let final = {
   ...result,
   ...(decision.content ? { content: decision.content } : {}),
 };
+if (config.result_gate) final = await slot.current.after(exec, final);
 for (const callback of listeners.get("tools/result") ?? [])
   callback(exec, final);
 console.log(JSON.stringify({ executed: !reason, result: final }));

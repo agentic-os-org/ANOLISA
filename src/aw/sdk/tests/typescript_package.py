@@ -43,7 +43,7 @@ def assert_core_tarball_boundary(artifact: Path) -> None:
         name
         for name in names
         if name.startswith(
-            ("package/dist/native/qoder-sdk/", "package/dist/native/pi/")
+            ("package/dist/native/qoder-sdk/", "package/dist/native/pi/", "package/dist/native/deepseek-harness/")
         )
     ]
     assert not forbidden, f"core npm package must not bundle framework adapters: {forbidden}"
@@ -60,7 +60,7 @@ def assert_core_tarball_boundary(artifact: Path) -> None:
         assert required in names, f"core npm package missing {required}"
 
 
-def main(binary: str, packages: tuple[Path, Path, Path] | None = None) -> None:
+def main(binary: str, packages: tuple[Path, Path, Path, Path] | None = None) -> None:
     sdk = Path(__file__).resolve().parents[1]
     core_package = sdk / "typescript"
     adapters = sdk / "typescript-adapters"
@@ -77,6 +77,7 @@ def main(binary: str, packages: tuple[Path, Path, Path] | None = None) -> None:
                 core_package / "tests",
                 adapters / "qoder/tests",
                 adapters / "pi/tests",
+                adapters / "deepseek-harness/tests",
             )
         ]
         for future in test_futures:
@@ -90,11 +91,13 @@ def main(binary: str, packages: tuple[Path, Path, Path] | None = None) -> None:
                 core_f = pool.submit(pack, core_package, root / "pack-core", environment)
                 qoder_f = pool.submit(pack, adapters / "qoder", root / "pack-qoder", environment)
                 pi_f = pool.submit(pack, adapters / "pi", root / "pack-pi", environment)
+                dsh_f = pool.submit(pack, adapters / "deepseek-harness", root / "pack-dsh", environment)
+                dsh_artifact = dsh_f.result()
                 core_artifact = core_f.result()
                 qoder_artifact = qoder_f.result()
                 pi_artifact = pi_f.result()
         else:
-            core_artifact, qoder_artifact, pi_artifact = packages
+            core_artifact, qoder_artifact, pi_artifact, dsh_artifact = packages
         assert_core_tarball_boundary(core_artifact)
         core_root = root / "core-app"
         core_root.mkdir(mode=0o700)
@@ -174,6 +177,7 @@ await assert.rejects(
                 str(core_root),
                 str(qoder_artifact),
                 str(pi_artifact),
+                str(dsh_artifact),
             ],
             core_root,
             environment,
@@ -238,6 +242,9 @@ await assert.rejects(
             """import assert from 'node:assert/strict';
 import { Instance } from '@anolisa/aw-sdk';
 import { runPiWorker } from '@anolisa/aw-sdk/pi';
+import { createDeepSeekBridge } from '@anolisa/aw-sdk-deepseek-harness';
+import '@anolisa/aw-sdk-deepseek-harness/preload';
+assert.equal(typeof createDeepSeekBridge, 'function');
 import { runPiWorker as directPiWorker } from '@anolisa/aw-sdk-pi';
 import { qoderOptions, createQoderBridge } from '@anolisa/aw-sdk/qoder';
 import {

@@ -83,48 +83,7 @@ export function transport(config) {
           if (failure) return reject(failure);
           if (code !== 0) return reject(Error(`callback_exit_${code}`));
           try {
-            const directive = stdout.length
-              ? JSON.parse(stdout.toString("utf8"))
-              : {};
-            if (
-              !directive ||
-              Array.isArray(directive) ||
-              typeof directive !== "object" ||
-              Object.keys(directive).some(
-                (key) => !["block", "reason", "aw_replacement"].includes(key),
-              ) ||
-              (directive.block !== undefined &&
-                typeof directive.block !== "boolean") ||
-              (directive.reason !== undefined &&
-                typeof directive.reason !== "string") ||
-              (hook.event === "tool.after" && directive.block === true)
-            )
-              throw Error("invalid_native_directive");
-            if (Object.hasOwn(directive, "aw_replacement")) {
-              if (
-                hook.event !== "tool.after" ||
-                hook.step !== config.replacement_step
-              )
-                throw Error("unauthorized_replacement");
-              const original = payload.tool_response;
-              const replacement = directive.aw_replacement;
-              const text = replacement?.content?.[0]?.text;
-              if (
-                original.isError ||
-                payload.nested ||
-                original.content?.length !== 1 ||
-                original.content[0].type !== "text" ||
-                typeof text !== "string" ||
-                !text ||
-                Buffer.byteLength(text) > 1024 * 1024
-              )
-                throw Error("invalid_replacement_slot");
-              const expected = structuredClone(original);
-              expected.content[0].text = text;
-              if (!isDeepStrictEqual(expected, replacement))
-                throw Error("replacement_changed_metadata");
-            }
-            resolve(directive);
+            resolve(parseDirective(stdout, hook, payload, config.replacement_step));
           } catch (error) {
             reject(error);
           }
@@ -133,4 +92,59 @@ export function transport(config) {
       });
     },
   };
+}
+
+export function parseDirective(stdout, hook, payload, replacementStep) {
+  const directive = stdout.length
+    ? JSON.parse(stdout.toString("utf8"))
+    : {};
+  if (directive?.aw_withheld === true && Object.keys(directive).length === 1 &&
+      hook.event === "tool.after" && hook.on_error === "withhold_result") return directive;
+  if (
+    !directive ||
+    Array.isArray(directive) ||
+    typeof directive !== "object" ||
+    Object.keys(directive).some(
+      (key) => !["block", "reason", "aw_replacement"].includes(key),
+    ) ||
+    (directive.block !== undefined &&
+      typeof directive.block !== "boolean") ||
+    (directive.reason !== undefined &&
+      typeof directive.reason !== "string") ||
+    (hook.event === "tool.after" && directive.block === true)
+  )
+    throw Error("invalid_native_directive");
+  if (Object.hasOwn(directive, "aw_replacement")) {
+    if (
+      hook.event !== "tool.after" ||
+      hook.step !== replacementStep
+    )
+      throw Error("unauthorized_replacement");
+    const original = payload.tool_response;
+    const replacement = directive.aw_replacement;
+    const text = replacement?.content?.[0]?.text;
+    if (
+      original.isError !== false ||
+      payload.nested ||
+      original.content?.length !== 1 ||
+      original.content[0].type !== "text" ||
+      typeof original.content[0].text !== "string" ||
+      typeof text !== "string" ||
+      !text ||
+      Buffer.byteLength(text) > 1024 * 1024
+    )
+      throw Error("invalid_replacement_slot");
+    const expected = structuredClone(original);
+    expected.content[0].text = text;
+    if (payload.tool_call.name === "bash" && original.value &&
+        (Object.hasOwn(original.value, "kind") || Object.hasOwn(original.value, "stdout"))) {
+      if (payload.aw_result_gate !== true || payload.nested !== false || original.value.kind !== "foreground" ||
+          original.value.stdout?.text !== original.content[0].text)
+        throw Error("invalid_bash_result_projection");
+      expected.value.stdout.text = text;
+    }
+    if (!isDeepStrictEqual(expected, replacement))
+      throw Error("replacement_changed_metadata");
+  }
+  return directive;
 }

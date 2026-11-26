@@ -52,10 +52,10 @@ make -C distribution aw-integration-backends BACKENDS='sec-core tokenless'
 ## 匹配候选 SDK
 
 从同一完整 Git commit 构建核心与可选框架适配 npm 和 wheel 制品：`@anolisa/aw-sdk`、
-`@anolisa/aw-sdk-qoder`、`@anolisa/aw-sdk-pi`、`anolisa-aw-sdk`、
+`@anolisa/aw-sdk-qoder`、`@anolisa/aw-sdk-pi`、`@anolisa/aw-sdk-deepseek-harness`、`anolisa-aw-sdk`、
 `anolisa-aw-sdk-claude` 和 `anolisa-aw-sdk-qwenpaw`。构建器使用 Git archive，输入不受本地
 修改影响，并显式拒绝任何混入核心包内的框架私有桥接代码。需要 Node 22+、Python 3.11+，并已安装 pip、setuptools 和 wheel；SDK
-构建离线执行。收据对六包布局使用 `aw-sdk-candidate/v2` schema，并记录 node、npm、Python、pip、
+构建离线执行。收据对七包布局使用 `aw-sdk-candidate/v3` schema，并记录 node、npm、Python、pip、
 setuptools 和 wheel 的版本；历史双包 `aw-sdk-candidate/v1` 收据需使用对应的拆包前候选版本
 脚本核验。核验时使用收据中的解释器和构建工具版本；校验会比较包文件名与内容，工具版本
 是否相同由操作者确认。输出目录必须为空。制品与收据先暂存再发布；失败或取消时

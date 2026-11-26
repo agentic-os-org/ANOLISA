@@ -234,6 +234,7 @@ are outside the final-input guarantee. See [native configuration](../../../devel
 
 ## Boundaries
 
+- DeepSeek Harness 0.2.1-rc.5 can mask both foreground bash stdout copies and withhold the entire result on a strict output fault before tool observers and model delivery. [DeepSeek Harness](../../../developer-guide/en/aw/agents/deepseek-harness.md)
 - Ordinary Qoder SDK and QwenPaw accept Post failure action `withhold_result`, withholding delivery and stopping subsequent dispatch. Existing tool side effects remain.
 - AgentScope 2.0.6+ accepts Post failure action `withhold_result` for tool.after: a failed strict check replaces the unchecked native result with an error-state placeholder at the end of the middleware chain, so other after hooks still observe the original result. Admitted only when the bridge supports result replacement.
 - Pi managed tool.after steps with `on_error: report` keep the checked original result when a Provider or transport fault occurs, and the same session continues with its next prompt. Before-tool faults, post-tool `block`/`withhold_result` faults, cancellation, identity and cleanup failures still stop the task. Input refusal and blocking input-check faults reject that prompt and allow another prompt after cleanup.

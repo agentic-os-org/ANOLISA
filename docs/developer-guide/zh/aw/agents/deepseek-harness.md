@@ -83,13 +83,13 @@ AW 启动时调用 Provider 的 `describe` 和 `validate_config`，核对操作�
 | --- | --- | --- |
 | `input.submit` | `agent/pre-step` | 检查本次提交的用户文本；`block` 拒绝该次提交 |
 | `tool.before` | `tools/pre-execute` | 检查工具名和参数；`block` 阻止执行 |
-| `tool.after` | `tools/post-execute` | 观察工具结果，或用 `replace_result` 替换可采用的文本 |
+| `tool.after` | 执行后回调或经验证的 rc.5 结果发布点 | 观察结果、替换可采用的文本，或在严格检查失败时扣留结果 |
 | `security.violation` | 最终处理后、顶层 Session 提交前 | 检查最终结果；`block` 暂扣交付 |
 
 需要最终结果阻断时，Provider 应检查 `security.violation` 收到的完整结果并在违规时
 返回 `block`；`on_error: block` 使检查故障也暂扣结果。`tool.after` 的替换只适用于
-成功的根调用单文本结果。DSH 的 `finalizeContent` 可能在该事件之后继续修改内容，
-因此最终检查使用独立的 `security.violation` 步骤。
+成功的根调用单文本结果。rc.5 受管模式在 `finalizeContent` 后检查原生 bash 替换和
+严格扣留策略。其他受管替换在更早的 `tools/post-execute` 中执行。
 
 DSH 插件还注册原生 `tools.guard`：它在执行前同步复核 `tool.before` 已得到的决定，
 阻止其他插件绕过前置回调后放行工具，不会再次调用 Provider。AW 的
@@ -110,6 +110,57 @@ target/debug/aw service status --config ./aw.yaml
 不应执行；headless 顶层最终结果被阻断时，模型和 CLI 只接收暂扣错误结果。
 需要停止按需启动的 AW 服务时运行 `target/debug/aw service stop --config ./aw.yaml`。
 
+## 应用自主管理的 Cordis Bridge
+
+使用同一候选版本构建 AW、sec-core Provider、核心 npm SDK 与可选包
+`@anolisa/aw-sdk-deepseek-harness`。沿用 Bridge 的工作区和业务凭据，将
+`AW_CONFIG` 和 `AW_DESCRIPTOR` 设为 Bridge 用户自有目录中的绝对路径。
+部署阶段生成 Descriptor，Node 加载 DSH 前先加载预检模块。Bridge 打包时保留
+rc.5 发布包中的独立 tools 模块，供启动时校验。
+
+```bash
+umask 077
+aw config descriptor --config "$AW_CONFIG" --agent dsh \
+  --profile deepseek-cordis-hooks > "$AW_DESCRIPTOR"
+node --import @anolisa/aw-sdk-deepseek-harness/preload bridge.mjs
+```
+
+在现有 Profile 初始化回调中安装插件，并在 agent-loop 条目注入 `awDeepseek`。
+插件安装后异步监听 SDK 控制请求，Bridge 可以先报告应用就绪。
+
+```js
+import { createDeepSeekBridge } from "@anolisa/aw-sdk-deepseek-harness";
+
+const aw = await createDeepSeekBridge({
+  configFile: process.env.AW_CONFIG,
+  descriptorFile: process.env.AW_DESCRIPTOR,
+});
+const context = await bootProfile(ctx => ctx.plugin(aw.plugin));
+```
+
+控制器使用 Node Bridge 的 PID 挂接。
+
+```bash
+aw connect --config "$AW_CONFIG" --sdk-pid "$BRIDGE_PID" --timeout-ms 5000
+```
+
+用 `aw.runTask(sessionId, work, { cwd, signal })` 包装完整的异步运行。
+在 `work` 内提交受保护输入，等待工具和会话结束后再返回。多轮 Bridge 应覆盖
+`followup()`、`whenIdle()` 和子任务收尾。SDK 等待 AW 挂接的期限由
+`attachTimeoutMs` 指定，默认 5000 ms。每个会话同时接受一个运行，并发会话分别绑定策略快照。
+缺少活动 Task 的会话会被拒绝，独立 ID 的子会话需要单独绑定。Cordis 卸载时关闭监听。
+
+协作 Profile 支持文本 `input.submit`、`tool.before` 和 `tool.after`。
+应用自身的脱敏插件沿用 `tools/post-execute`。DSH 先采用插件返回的文本或结构化值，
+完成工具自身的最终渲染。AW 在 `tools/result`、会话记录和模型交付前检查此时的完整结果。
+rc.5 受管启动中匹配的原生 bash 结果替换也采用这个顺序。
+
+前台 `bash` 根调用成功、结果仅含一个文本块，且 `content[0].text` 与
+`value.stdout.text` 完全相同时，AW 将两处文本关联。sec-core 扫描包括 stderr、元数据和附加上下文在内的完整结果，
+两处同时采用经复核的脱敏文本。为 `tool.after` 配置 `on_error: withhold_result` 后，
+扫描故障、含敏感信息的两处文本不一致，或严格检查未完成，均交付固定错误，原值、元数据和附加上下文随原结果一起扣留。
+`on_error: report` 下 Provider 故障可以放行原结果。工具此前产生的外部副作用仍然保留。
+
 ## 适用范围
 
 启用 `security.violation` 时，Adapter 检查已发布的 DSH 0.2.1-rc.5 Agent loop 构建；
@@ -119,5 +170,5 @@ target/debug/aw service status --config ./aw.yaml
 
 最终检查覆盖已验证的 headless 顶层模型、Session 和 CLI 交付。嵌套/PTC 结果及
 直接调用 `ToolRuntime.execute` 的消费者不经过该提交点；同进程的 `tools/result`
-观察插件会在终检前看到原始结果。DSH 的 `skill` 工具只向 Hook 提供名称，无法提供
+观察插件会在该终检前收到 tool.after 的处理结果。DSH 的 `skill` 工具只向 Hook 提供名称，无法提供
 解析后的 Skill 对象，`check_skill` 步骤会在准入时被拒绝。

@@ -35,7 +35,10 @@ CASES = [
     "final-pii-deny",
     "final-pii-replace",
     "final-pii-error",
-    "strict-output-rejected",
+    "pii-backend-error",
+    "pii-bash-mask",
+    "pii-bash-divergent",
+    "pii-cordis-sdk",
     "submit-allow",
     "submit-deny",
     "submit-error",
@@ -125,8 +128,11 @@ if 'scan-pii' in sys.argv:
  with (pathlib.Path(__file__).parent/'pii-scanned.jsonl').open('a') as output:
   output.write(json.dumps({{'source':source,'text':text}})+'\\n')
  if mode in ('pii-backend-error','final-pii-error') and source=='tool_output': sys.exit(7)
- print(json.dumps({{'ok':True,'verdict':'deny' if {SECRET!r} in text else 'pass',
-  'summary':{{'source':source,'truncated':False,'bytes_scanned':len(text.encode())}}}}))
+ risk={SECRET!r} in text
+ report={{'ok':True,'verdict':'deny' if risk else 'pass',
+  'summary':{{'source':source,'truncated':False,'bytes_scanned':len(text.encode()),'ruleset_id':'fixture'}}}}
+ if '--redact-output' in sys.argv and risk: report['redacted_text']=text.replace({SECRET!r},'[MASKED]')
+ print(json.dumps(report))
  sys.exit(0)
 command=sys.argv[sys.argv.index('--code')+1]
 with (pathlib.Path(__file__).parent/'scanned.jsonl').open('a') as output: output.write(json.dumps(command)+'\\n')
@@ -172,7 +178,7 @@ raise SystemExit(result.returncode)
 
     tools = {
         name: {"language": "bash", "input_pointer": "/command"}
-        for name in ("execute_shell_command", "aw_inner")
+        for name in ("execute_shell_command", "aw_inner", "bash")
     }
     before = [
         {
@@ -207,7 +213,7 @@ raise SystemExit(result.returncode)
             "id": "pii-output", "provider": "security", "operation": "scan_tool_output",
             "effects": ["observe", "replace_result"], "on_error": "report",
         }]
-    if case == "strict-output-rejected":
+    if case in {"pii-backend-error", "pii-bash-mask", "pii-bash-divergent", "pii-cordis-sdk"}:
         after[0]["on_error"] = "withhold_result"
     events = {
         "tool.before": {"enabled": True, "steps": before},
@@ -262,7 +268,7 @@ raise SystemExit(result.returncode)
                     {"version": 1, "mode": "block", "tools": tools,
                      **({"prompt": {"mode": "block", "scan_mode": "fast"}}
                         if case.startswith("submit-") else {}),
-                     **({"pii": {"input_mode": "block", "output_mode": "replace_result"}}
+                     **({"pii": {"input_mode": "block", "output_mode": "mask" if case.startswith("pii-bash-") or case == "pii-cordis-sdk" else "replace_result"}}
                         if case.startswith("pii-") or case.startswith("final-pii-") else {})},
                 ),
                 "tokenless": provider(
@@ -329,12 +335,34 @@ def verify(state: Path, case: str, stdout: str) -> None:
         "native-override",
         "pii-input-deny",
     }
+    if case.startswith("pii-bash-") or case == "pii-backend-error":
+        assert (state / "bash-executed").is_file(), results
+        result = results[0]["result"]
+        models = rows(state / "model.jsonl")
+        if case == "pii-bash-mask":
+            expected = "platform: left [MASKED] right"
+            assert result["content"][0]["text"] == result["value"]["stdout"]["text"] == expected
+            assert expected in json.dumps(models)
+        else:
+            assert result["isError"] and "value" not in result and "meta" not in result
+            assert result["content"] == [{"type": "text", "text": "AW withheld the tool result"}]
+            assert "AW withheld the tool result" in json.dumps(models)
+        assert SECRET not in json.dumps(results) + json.dumps(models) + stdout
+        assert (state / "disposed").exists()
+        return
     assert len(executed) == (
         0 if denied or case == "retry-denied" else 2 if case == "parallel" else 1
     ), (case, executed)
     assert not (state / "inner-executed.jsonl").exists()
     if denied:
         assert all(row["result"]["isError"] for row in results), results
+        if case == "native-deny":
+            result = results[0]["result"]
+            assert result["error"]["message"] == "native permission denied", result
+            content = [{"type": "text", "text": "Error: native permission denied"}]
+            assert result["content"] == content
+            assert any(message.get("role") == "tool" and message["content"] == content
+                       for turn in rows(state / "model.jsonl") for message in turn)
     elif case == "pii-output-replace":
         assert not results[0]["result"]["isError"]
         assert "content withheld" in results[0]["result"]["content"][0]["text"]
@@ -416,6 +444,8 @@ def main() -> None:
         for case in CASES:
             with tempfile.TemporaryDirectory(prefix="awdsh-") as temporary:
                 state = Path(temporary)
+                if case.startswith("pii-bash-") or case == "pii-backend-error":
+                    (state / "sample.txt").write_text(f"left {SECRET} right")
                 config = state / "aw.json"
                 config.write_text(json.dumps(configuration(state, args, case, model)))
                 env = {
@@ -432,8 +462,15 @@ def main() -> None:
                 if case == "final-pii-deny":
                     env["NODE_OPTIONS"] = "--no-warnings"
                 try:
+                    argv = [str(args.bin / "aw"), "run", "--config", str(config), "--agent", "dsh"]
+                    if case == "pii-cordis-sdk":
+                        config.chmod(0o600)
+                        fixture = Path(__file__).resolve().parent
+                        preload = fixture.parents[3] / "aw-adapter/native/deepseek-harness/result-preload.mjs"
+                        argv = ["node", "--import", str(preload), str(fixture / "cordis.mjs"),
+                                str(args.bin / "aw"), str(args.npm)]
                     code, out, err = call(
-                        [str(args.bin / "aw"), "run", "--config", str(config), "--agent", "dsh"],
+                        argv,
                         state,
                         env,
                         cancel=case == "cancel",
@@ -444,16 +481,11 @@ def main() -> None:
                     # drains; AW forwards its zero or signal exit code unchanged.
                     expected_codes = (
                         {0, 143} if case == "cancel" else
-                        {1} if case in {"submit-deny", "submit-error", "strict-output-rejected"} else {0}
+                        {1} if case in {"submit-deny", "submit-error"} else {0}
                     )
                     assert code in expected_codes, (case, code, err, out)
-                    if case == "strict-output-rejected":
-                        assert "failure action is not supported" in err, err
-                        assert not rows(state / "model.jsonl")
-                        assert not rows(state / "results.jsonl")
-                        reports.append({"case": case, "passed": True})
-                        continue
-                    verify(state, case, out)
+                    if case != "pii-cordis-sdk":
+                        verify(state, case, out)
                     code, out, err = call(
                         [str(args.bin / "aw"), "service", "status", "--config", str(config)], state, env
                     )

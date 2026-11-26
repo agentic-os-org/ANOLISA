@@ -57,16 +57,16 @@ See the [source guide](../../../contribute/en/aw/building.md) and
 ## Matched SDK candidates
 
 Build core and optional framework-adapter npm and wheel artifacts from one full
-Git commit: `@anolisa/aw-sdk`, `@anolisa/aw-sdk-qoder`, `@anolisa/aw-sdk-pi`,
+Git commit: `@anolisa/aw-sdk`, `@anolisa/aw-sdk-qoder`, `@anolisa/aw-sdk-pi`, `@anolisa/aw-sdk-deepseek-harness`,
 `anolisa-aw-sdk`, `anolisa-aw-sdk-claude`, and `anolisa-aw-sdk-qwenpaw`. The
 builder uses a Git archive, so local edits cannot change its inputs, and
 rejects any framework-private bridge code bundled inside the core packages. Node
 22+ and Python 3.11+ with pip, setuptools and wheel already installed are
 required; SDK builds are offline.
-The receipt uses schema `aw-sdk-candidate/v2` for the six-package layout and
+The receipt uses schema `aw-sdk-candidate/v3` for the seven-package layout and
 records node, npm, Python, pip, setuptools and wheel versions. Historical
-two-package `aw-sdk-candidate/v1` receipts must be verified with the matching
-pre-split candidate revision. Use those interpreter and build-tool versions when
+v1 (two-package) and v2 (six-package) receipts use the verifier from their
+original candidate revisions. Use those interpreter and build-tool versions when
 verifying it; verification compares package filenames and payloads, and does not
 enforce tool-version equality.
 The output directory must be empty. Artifacts and the receipt are staged before
