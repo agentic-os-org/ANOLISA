@@ -15,19 +15,21 @@ pub(super) struct Invocation {
     pub bypass_hook_trust: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(super) enum Entrypoint {
     Tui,
     Exec,
     AppServer,
+    Gateway(String),
 }
 
 impl Entrypoint {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Tui => "tui",
             Self::Exec => "exec",
             Self::AppServer => "app-server",
+            Self::Gateway(_) => "app-server-gateway",
         }
     }
 }
@@ -37,16 +39,9 @@ pub(super) fn arguments(args: &[OsString]) -> Result<Invocation> {
         .iter()
         .map(|arg| arg.to_str().ok_or("non-UTF-8 Codex argument"))
         .collect::<std::result::Result<_, _>>()?;
-    // shortcut: stdio assumes fixed-config RPCs; filter requests for untrusted clients.
-    if args.first() == Some(&"app-server") {
-        if !matches!(
-            &args[1..],
-            [] | ["--listen", "stdio://"] | ["--listen=stdio://"]
-        ) {
-            return Err("Codex app-server requires local stdio and no startup overrides".into());
-        }
+    if let ["app-server", options @ ..] = args.as_slice() {
         return Ok(Invocation {
-            entrypoint: Entrypoint::AppServer,
+            entrypoint: app_server_options(options)?,
             bypass_hook_trust: false,
         });
     }
@@ -90,6 +85,113 @@ pub(super) fn arguments(args: &[OsString]) -> Result<Invocation> {
     })
 }
 
+// Keep the gateway address dynamic while all permission and Hook settings stay in
+// the reviewed native configuration. Pass the same argv to inventory and launch.
+fn app_server_options(mut args: &[&str]) -> Result<Entrypoint> {
+    args = match args {
+        ["--listen", "stdio://", rest @ ..] | ["--listen=stdio://", rest @ ..] => rest,
+        _ => args,
+    };
+    if args.is_empty() {
+        return Ok(Entrypoint::AppServer);
+    }
+    if args.len() != 12 {
+        return Err("Codex app-server requires local stdio and six gateway overrides".into());
+    }
+    let mut settings = BTreeMap::new();
+    for pair in args.chunks_exact(2) {
+        let (key, value) = pair[1]
+            .split_once('=')
+            .ok_or("invalid Codex local stdio gateway override")?;
+        if pair[0] != "-c" || settings.insert(key, value).is_some() {
+            return Err("invalid or duplicate Codex local stdio gateway override".into());
+        }
+    }
+    let provider = settings
+        .remove("model_provider")
+        .and_then(quoted)
+        .filter(|id| {
+            id.len() <= 64
+                && id.starts_with(|c: char| c.is_ascii_lowercase())
+                && id.bytes().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-')
+                })
+        })
+        .ok_or("invalid Codex local stdio gateway provider ID")?;
+    let prefix = format!("model_providers.{provider}.");
+    for (key, value) in settings {
+        let admitted = match key.strip_prefix(&prefix) {
+            Some("name") => gateway_name(value),
+            Some("env_key") => quoted(value).is_some_and(gateway_env_key),
+            Some("wire_api") => value == r#""responses""#,
+            Some("supports_websockets") => value == "false",
+            Some("base_url") => value
+                .strip_prefix(r#""http://127.0.0.1:"#)
+                .and_then(|url| url.strip_suffix(r#"/v1""#))
+                .is_some_and(|port| {
+                    port.parse::<u16>()
+                        .is_ok_and(|n| n > 0 && n.to_string() == port)
+                }),
+            _ => false,
+        };
+        if !admitted {
+            return Err("invalid Codex local stdio gateway override".into());
+        }
+    }
+    Ok(Entrypoint::Gateway(provider.into()))
+}
+
+fn quoted(value: &str) -> Option<&str> {
+    value.strip_prefix('"')?.strip_suffix('"')
+}
+
+fn gateway_name(value: &str) -> bool {
+    let Ok(name) = serde_json::from_str::<String>(value) else {
+        return false;
+    };
+    // Canonical string literals keep the SDK, JSON and native TOML escape rules aligned.
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '\''))
+        && serde_json::to_string(&name).is_ok_and(|literal| literal == value)
+}
+
+fn gateway_env_key(key: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "HOME",
+        "PATH",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "PWD",
+        "OLDPWD",
+        "TMPDIR",
+        "ENV",
+        "IFS",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "LANG",
+        "TERM",
+        "SHLVL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+    ];
+    const PREFIXES: &[&str] = &[
+        "AW_", "BASH_", "CODEX_", "DYLD_", "GIT_", "LC_", "LD_", "NODE_", "PYTHON", "SSH_", "SSL_",
+        "XDG_",
+    ];
+    key.len() <= 64
+        && key.starts_with(|c: char| c.is_ascii_uppercase())
+        && key
+            .bytes()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+        && !RESERVED.contains(&key)
+        && !PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+}
+
 pub(super) fn hooks(
     command: &CommandSpec,
     events: &[&str],
@@ -115,6 +217,11 @@ pub(super) fn hooks(
         command.program.clone().into_os_string(),
         serde_json::to_string(&expected)?.into(),
     ];
+    if command.args.first().is_some_and(|arg| arg == "app-server") {
+        probe.args.extend_from_slice(&command.args);
+    } else {
+        probe.args.push("app-server".into());
+    }
     crate::adapter::isolate_python_environment(&mut probe)?;
     let (output, bytes) = crate::adapter::Probe(cancelled).run_python(
         probe,

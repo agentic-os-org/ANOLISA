@@ -47,7 +47,10 @@ impl Adapter for Codex {
             );
         }
         let invocation = preflight::arguments(&input.command.args)?;
-        if invocation.entrypoint == preflight::Entrypoint::AppServer {
+        if matches!(
+            invocation.entrypoint,
+            preflight::Entrypoint::AppServer | preflight::Entrypoint::Gateway(_)
+        ) {
             // Codex consumes this before resolving persisted remote-control state.
             input.command.environment.insert(
                 "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED".into(),
@@ -60,6 +63,11 @@ impl Adapter for Codex {
             .strip_prefix("codex-cli ")
             .ok_or_else(|| format!("unexpected Codex version output: {version:?}"))?;
         let version = crate::version::reported(version, "Codex CLI")?;
+        if matches!(invocation.entrypoint, preflight::Entrypoint::Gateway(_))
+            && version != "0.166.0"
+        {
+            return Err("Codex gateway stdio requires CLI 0.166.0".into());
+        }
         let requirements =
             aw_config::requirements::project_document(&input.document, &input.target)
                 .map_err(|_| "could not project native Hook requirements")?;
@@ -219,6 +227,22 @@ impl PreparedLaunch for Prepared {
                 .insert("AW_CODEX_BINARY".into(), context.executable.into());
         }
         let provider_environment = command.environment.clone();
+        if let preflight::Entrypoint::Gateway(provider) = &self.invocation.entrypoint {
+            let guard = context.files.write(
+                "codex-stdio.py",
+                include_bytes!("../../native/codex/stdio.py"),
+            )?;
+            let codex = std::mem::replace(&mut command.program, "python3".into());
+            command.args.splice(
+                0..0,
+                [
+                    "-I".into(),
+                    guard.into_os_string(),
+                    provider.into(),
+                    codex.into_os_string(),
+                ],
+            );
+        }
         Ok(LaunchPlan {
             command,
             provider_environment,

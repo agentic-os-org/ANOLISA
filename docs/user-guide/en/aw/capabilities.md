@@ -47,7 +47,9 @@ Qoder CLI has no failed-tool Post callback integration. Codex CLI 0.163.0 and
 PostToolUse with Code Mode disabled
 and no peer PostToolUse Hooks; this does not protect prior capture, telemetry or
 Hook failures. Local app-server stdio has the same verified effects when its
-trusted client keeps thread and turn cwd and configuration unchanged. See the
+trusted client keeps thread and turn cwd and configuration unchanged. The 0.166.0
+gateway launch enforces fresh fixed-cwd threads and supports a separate credential
+check at model egress. Shell and MCP notifications can contain raw output. See the
 [Codex guide](../../../developer-guide/en/aw/agents/codex.md). See each Agent
 page for result types and callback limits.
 Required Codex `tool.before` rejects other native PreToolUse Hooks because they

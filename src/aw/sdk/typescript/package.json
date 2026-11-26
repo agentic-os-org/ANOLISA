@@ -21,6 +21,11 @@
       "import": "./dist/sources.mjs",
       "default": "./dist/sources.mjs"
     },
+    "./codex-gateway": {
+      "types": "./dist/codex-gateway.d.ts",
+      "import": "./dist/codex-gateway.mjs",
+      "default": "./dist/codex-gateway.mjs"
+    },
     "./configuration": {
       "types": "./dist/configuration.d.ts",
       "import": "./dist/configuration.mjs",

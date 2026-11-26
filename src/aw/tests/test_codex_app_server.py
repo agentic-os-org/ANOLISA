@@ -105,17 +105,19 @@ def trust_hooks(codex, workspace, environment, home, output):
             for hook in hooks:
                 config.write(f'\n[hooks.state.{json.dumps(hook["key"])}]\n')
                 config.write(f'trusted_hash = {json.dumps(hook["currentHash"])}\n')
+        return {hook["key"].rsplit(":", 3)[1]: hook["currentHash"] for hook in hooks}
     finally:
         stop_child(child)
 
 
-def turn(rpc, request_id, prompt):
-    thread = rpc.call(request_id, "thread/start", {"ephemeral": True})["thread"]["id"]
+def turn(rpc, request_id, prompt, **thread_options):
+    thread = rpc.call(request_id, "thread/start", {"ephemeral": True, **thread_options})["thread"]["id"]
     rpc.call(request_id + 1, "turn/start", {"threadId": thread,
-                                            "input": [{"type": "text", "text": prompt}]})
+                                            "input": [{"type": "text", "text": prompt, "text_elements": []}]})
     done = rpc.receive(lambda frame: frame.get("method") == "turn/completed"
                        and frame.get("params", {}).get("threadId") == thread, timeout=60)
     assert done["params"]["turn"]["status"] == "completed", done
+    return thread
 
 
 def main():
@@ -156,7 +158,7 @@ def main():
         run([str(args.aw), "config", "validate", "--config", str(config)], workspace, environment, args.output)
         run([str(args.aw), "connect", "--config", str(config), "--agent", "codex"],
             workspace, environment, args.output)
-        trust_hooks(args.codex, workspace, environment, home, args.output)
+        pins = trust_hooks(args.codex, workspace, environment, home, args.output)
         child = start_child([str(args.aw), "run", "--config", str(config), "--agent", "codex"],
                             workspace, environment, args.output / "aw-stderr.log")
         try:
@@ -187,9 +189,12 @@ def main():
                 stop_child(child)
             finally:
                 run([str(args.aw), "service", "stop", "--config", str(config)], workspace, environment, args.output)
+        if args.expected_version == "0.166.0":
+            from codex_gateway import exercise_gateway
+            exercise_gateway(args, root, workspace, environment, pins, model)
     (args.output / "result.json").write_text(json.dumps({
         "version": version, "entrypoint": "app-server stdio", "output_replaced": True,
-        "code_blocked": True, "prompt_blocked": True,
+        "gateway_checked": args.expected_version == "0.166.0", "code_blocked": True, "prompt_blocked": True,
         "cleaned": not root.exists()}, indent=2))
     print(f"{version} app-server stdio: output replaced, code and prompt blocked, cleaned")
 

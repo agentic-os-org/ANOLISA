@@ -53,6 +53,10 @@ class Model:
                 command = "printf CANDIDATE > AW_MUST_NOT_EXIST"
             if self.mode in ("long", "replace-long"):
                 command = "sleep 1.2; printf AW_LONG_DONE"
+            if self.mode == "gateway-provider-failure":
+                command = "printf AW_SCAN_UNAVAILABLE"
+            if self.mode == "replace-gateway":
+                command = "printf 'left sample-%s sample-%s right\\n' credential pii"
             if self.mode == "replace-parallel":
                 command = "printf AW_SECRET_A"
         elif self.mode == "retry" and self.calls == 1:

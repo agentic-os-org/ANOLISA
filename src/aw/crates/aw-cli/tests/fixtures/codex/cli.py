@@ -24,9 +24,10 @@ if sys.argv[1:] == ["--version"]:
     print("codex-cli " + os.environ.get("FAKE_CODEX_VERSION", "0.163.0"))
     sys.exit(0)
 hooks = json.loads((home / "hooks.json").read_text())["hooks"]
-if sys.argv[1:] == ["app-server"] and "AW_CODEX_CONFIG" not in os.environ:
+if sys.argv[1:2] == ["app-server"] and "AW_CODEX_CONFIG" not in os.environ:
     (root / "codex-probe-remote-control").write_text(
         os.environ.get("CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED", ""))
+    (root / "codex-probe-args").write_text(json.dumps(sys.argv[1:]))
     if os.environ.get("FAKE_CODEX_PROBE_HOLD") == "1":
         write_pid("codex-probe.pid")
         time.sleep(30)
@@ -41,7 +42,7 @@ if sys.argv[1:] == ["app-server"] and "AW_CODEX_CONFIG" not in os.environ:
             result = {"data": [{"cwd": os.getcwd(), "errors": [], "warnings": [], "hooks": [
                 {"eventName": {"UserPromptSubmit": "userPromptSubmit",
                                "PreToolUse": "preToolUse", "PostToolUse": "postToolUse"}[event],
-                 "command": hook["command"], "enabled": True, "async": False,
+                 "handlerType": hook["type"], "command": hook.get("command"), "enabled": True, "async": False,
                  "matcher": group.get("matcher"), "timeoutSec": hook["timeout"],
                  "trustStatus": os.environ.get("FAKE_CODEX_TRUST", "trusted")}
                 for event, groups in hooks.items() for group in groups for hook in group["hooks"]
