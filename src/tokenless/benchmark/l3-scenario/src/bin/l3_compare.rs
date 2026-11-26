@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokenless_l3_bench::l3::{
     asset::{self, Applicability},
-    headroom_side::{self, HeadroomWorker, Variant},
+    headroom_side::{self, HeadroomResult, HeadroomWorker, Variant},
     probe::{self, Probe},
-    report::{GroupRow, Report, RunSummary, ScenarioRow, keep, pct},
+    report::{GroupRow, LifecycleSummary, Report, RunSummary, ScenarioRow, keep, pct},
     retention,
     stats::{self, Latency},
     tokenizer::{Tokenizers, compression_rate},
@@ -37,6 +37,8 @@ use tokenless_l3_bench::l3::{
 /// over the variable.
 struct Options {
     no_probe: bool,
+    tokenless_only: bool,
+    recovery: bool,
     report_dir: Option<PathBuf>,
 }
 
@@ -50,17 +52,23 @@ struct Options {
 fn parse_args() -> Result<Options> {
     let mut opts = Options {
         no_probe: false,
+        tokenless_only: false,
+        recovery: false,
         report_dir: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--no-probe" => opts.no_probe = true,
+            "--tokenless-only" => opts.tokenless_only = true,
+            "--recovery" => opts.recovery = true,
             "--report-dir" => {
                 let value = args.next().context("--report-dir requires a value")?;
                 opts.report_dir = Some(PathBuf::from(value));
             }
-            other => anyhow::bail!("unknown argument {other:?} (accepts --no-probe, --report-dir)"),
+            other => anyhow::bail!(
+                "unknown argument {other:?} (accepts --no-probe, --tokenless-only, --recovery, --report-dir)"
+            ),
         }
     }
     Ok(opts)
@@ -79,31 +87,40 @@ fn main() -> Result<()> {
     // A missing worker degrades to a one-sided run: tokenless-only numbers still
     // answer part of the question, and aborting would discard them.
     let python = headroom_side::python_binary();
-    let mut worker = match HeadroomWorker::start(&python, &headroom_side::worker_path()) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            degradations.push(format!("the reference side unavailable: {e}"));
-            None
+    let mut worker = if opts.tokenless_only {
+        None
+    } else {
+        match HeadroomWorker::start(&python, &headroom_side::worker_path()) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                degradations.push(format!("the reference side unavailable: {e}"));
+                None
+            }
         }
     };
     let headroom_provenance = worker.as_ref().map(|w| w.provenance().clone());
 
     // The semantic probe needs an API key; without one it degrades so the
     // report cannot be read as if the L3 gate had been evaluated.
-    let probe = match Probe::from_env() {
-        Ok(p) => Some(p),
-        Err(e) => {
-            degradations.push(format!(
-                "semantic probe skipped ({e}): the four-layer plan's L3 gate \
-                 (probe success-rate drop < 5%) is NOT evaluated in this run"
-            ));
-            None
+    let probe_disabled =
+        opts.tokenless_only || opts.no_probe || std::env::var("L3_NO_PROBE").is_ok();
+    let probe = if probe_disabled {
+        None
+    } else {
+        match Probe::from_env() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                degradations.push(format!(
+                    "semantic probe skipped ({e}): the four-layer plan's L3 gate \
+                     (probe success-rate drop < 5%) is NOT evaluated in this run"
+                ));
+                None
+            }
         }
     };
-    let probe_disabled = opts.no_probe || std::env::var("L3_NO_PROBE").is_ok();
     if probe_disabled {
         degradations.push(
-            "semantic probe disabled by --no-probe/L3_NO_PROBE: the L3 gate is NOT evaluated"
+            "semantic probe disabled by --tokenless-only/--no-probe/L3_NO_PROBE: the L3 gate is NOT evaluated"
                 .to_string(),
         );
     }
@@ -113,9 +130,35 @@ fn main() -> Result<()> {
     let mut rows = Vec::with_capacity(scenarios.len());
     let mut tl_times = Vec::new();
     let mut hr_times = Vec::new();
+    let mut lifecycle_evidence = Vec::new();
+    let mode_id = if opts.recovery {
+        "recovery"
+    } else {
+        "no-recovery"
+    };
 
     for s in &scenarios {
-        let tl = tokenless_side::run(s, &tk);
+        let tl = tokenless_side::run_with_recovery(s, &tk, opts.recovery)?;
+        let tl_summary = tl.lifecycle_summary();
+        lifecycle_evidence.push(serde_json::json!({
+            "suite": s.suite,
+            "scenario": s.scenario,
+            "content_type": s.content_type,
+            "side": "tokenless",
+            "mode": if opts.recovery { "production Runtime/in-memory recovery" } else { "production Runtime/no recovery" },
+            "mode_id": mode_id,
+            "runtime_final_acceptance_measured": !tl.runtime_outcomes.is_empty() && tl.runtime_outcomes.iter().all(|outcome| outcome["runtime_final_acceptance_measured"] == true),
+            "runtime_outcomes": tl.runtime_outcomes,
+            "before_model": tl.before_model,
+            "recovered_references": tl.recovered_references,
+            "actual_agent_retrieval_cost": null,
+            "input": {"messages": s.messages, "tools": s.tools},
+            "output": {"messages": tl.messages, "tools": tl.tools},
+            "lifecycle": tl.lifecycle,
+            "lifecycle_summary": tl_summary,
+            // Key to original; retrieval probes serve these without rerunning Runtime.
+            "stash": tl.stash,
+        }));
         let before = tl.before.o200k;
         let tl_rate = compression_rate(before, tl.after.o200k);
         tl_times.push(tl.compress_ms);
@@ -125,10 +168,17 @@ fn main() -> Result<()> {
         let items = retention::critical_items(s);
         let tl_keep = retention::check(&items, &tl.messages, tl.tools.as_deref());
 
-        let applicability = s.tokenless_applicability();
+        let applicability = s.applicability_from_entry_points(tl.entry_points.clone());
         let (entry_points, gap_reason) = match applicability {
             Applicability::Applicable { entry_points } => (entry_points, None),
-            Applicability::NoEntryPoint { reason } => (Vec::new(), Some(reason)),
+            Applicability::NoEntryPoint { reason } => (
+                Vec::new(),
+                Some(if tl.gap_reasons.is_empty() {
+                    reason
+                } else {
+                    tl.gap_reasons.join("; ")
+                }),
+            ),
         };
 
         let mut row = ScenarioRow {
@@ -137,16 +187,19 @@ fn main() -> Result<()> {
             scenario: s.scenario.clone(),
             size_label: s.size_label.clone(),
             headroom_native: s.source.headroom_native,
+            capability_overlay: !s.source.headroom_native,
             tokens_before: before,
             headroom_target_ms: s.headroom_target_ms,
             tokenless_rate: tl_rate,
             tokenless_entry_points: entry_points,
             tokenless_gap_reason: gap_reason,
-            tokenless_retention: Some((tl_keep.passed, tl_keep.total)),
+            tokenless_retention: (tl_keep.total > 0).then_some((tl_keep.passed, tl_keep.total)),
             tokenless_missing: tl_keep.missing,
             tokenless_ms: tl.compress_ms,
+            tokenless_lifecycle: tl_summary,
             headroom_pure_rate: None,
             headroom_router_rate: None,
+            headroom_ccr_entries: None,
             headroom_retention: None,
             headroom_missing: Vec::new(),
             headroom_ms: None,
@@ -157,6 +210,7 @@ fn main() -> Result<()> {
             headroom_probe: None,
         };
         let mut headroom_output: Option<Vec<tokenless_l3_bench::l3::asset::Message>> = None;
+        let mut headroom_runs: Vec<HeadroomResult> = Vec::new();
 
         if let Some(w) = worker.as_mut() {
             for variant in Variant::all() {
@@ -165,27 +219,42 @@ fn main() -> Result<()> {
                 }
                 match w.run(s, variant) {
                     Ok(Ok(r)) => {
+                        degradations.extend(r.warnings.iter().map(|warning| {
+                            format!("reference {} {}: {warning}", variant.wire(), s.scenario)
+                        }));
                         let after = tokenless_side::conversation_tokens(
                             &r.messages,
                             s.tools.as_deref(),
                             &tk,
                         );
                         let rate = compression_rate(before, after.o200k);
+                        // Unverified private-backend evidence is unknown, not a product deletion.
+                        for entry in r.ccr.iter().filter(|entry| entry.original.is_none()) {
+                            degradations.push(format!(
+                                "the reference {} {}: CCR marker {} original availability unverified in backend evidence",
+                                variant.wire(),
+                                s.scenario,
+                                entry.key
+                            ));
+                        }
                         match variant {
                             Variant::PureStage => row.headroom_pure_rate = rate,
                             Variant::Router => {
                                 row.headroom_router_rate = rate;
+                                row.headroom_ccr_entries = Some(r.ccr.len());
                                 let k = retention::check(&items, &r.messages, s.tools.as_deref());
-                                row.headroom_retention = Some((k.passed, k.total));
+                                row.headroom_retention =
+                                    (k.total > 0).then_some((k.passed, k.total));
                                 row.headroom_missing = k.missing;
                                 row.headroom_ms = Some(r.compress_ms);
                                 row.headroom_strategies = strategies(&r.transforms_applied);
                                 row.headroom_self_tokens =
                                     r.self_tokens_before.zip(r.self_tokens_after);
                                 hr_times.push(r.compress_ms);
-                                headroom_output = Some(r.messages);
+                                headroom_output = Some(r.messages.clone());
                             }
                         }
+                        headroom_runs.push(r);
                     }
                     Ok(Err(reason)) => row.headroom_error = Some(reason),
                     Err(e) => {
@@ -218,6 +287,18 @@ fn main() -> Result<()> {
             }
         }
 
+        for run in headroom_runs {
+            lifecycle_evidence.push(serde_json::json!({
+                "suite": s.suite, "scenario": s.scenario, "content_type": s.content_type,
+                "side": "headroom", "mode": run.variant.wire(), "mode_id": run.variant.wire(),
+                "input": {"messages": s.messages, "tools": s.tools},
+                "output": {"messages": run.messages, "tools": s.tools},
+                "transforms_applied": run.transforms_applied,
+                "actual_agent_retrieval_cost": null,
+                // Hash to original, read from the reference's own CompressionStore.
+                "ccr": run.ccr,
+            }));
+        }
         rows.push(row);
     }
 
@@ -231,6 +312,14 @@ fn main() -> Result<()> {
             untracked_build_inputs: untracked,
             headroom: headroom_provenance,
             probe_model,
+            tokenless_mode: mode_id.to_owned(),
+            comparison_status: if opts.tokenless_only {
+                "not_executed"
+            } else {
+                "requested"
+            }
+            .to_owned(),
+            schema_recovery_tool: opts.recovery.then(|| "fixture_retrieve".to_owned()),
             degradations,
             tokenless_latency: stats::latency(&mut tl_times),
             headroom_latency: stats::latency(&mut hr_times),
@@ -246,14 +335,32 @@ fn main() -> Result<()> {
     let json_path = report_dir.join("report.json");
     std::fs::write(&json_path, serde_json::to_string_pretty(&report)?)
         .with_context(|| format!("writing {}", json_path.display()))?;
-    let md_path = report_dir.join("L3_SCENARIO_COMPARISON_REPORT.md");
-    std::fs::write(&md_path, render(&report))
-        .with_context(|| format!("writing {}", md_path.display()))?;
+    let lifecycle_path = report_dir.join("lifecycle.json");
+    std::fs::write(
+        &lifecycle_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 2,
+            "mode": if opts.tokenless_only { "tokenless-only" } else { "paired-comparison" },
+            "tokenless_mode": mode_id,
+            "comparison_status": if opts.tokenless_only { "not_executed" } else { "requested" },
+            "billing_tokens": null,
+            "rows": lifecycle_evidence,
+        }))?,
+    )
+    .with_context(|| format!("writing {}", lifecycle_path.display()))?;
+    let md_path = report_dir.join(if opts.tokenless_only {
+        "TOKENLESS_L3_REPORT.md"
+    } else {
+        "L3_SCENARIO_COMPARISON_REPORT.md"
+    });
+    let rendered = render(&report);
+    std::fs::write(&md_path, rendered).with_context(|| format!("writing {}", md_path.display()))?;
 
     println!(
-        "wrote {} and {}\n{} scenarios, {} gate signals, {} degradations",
+        "wrote {}, {} and {}\n{} scenarios, {} gate signals, {} degradations",
         json_path.display(),
         md_path.display(),
+        lifecycle_path.display(),
         report.scenarios.len(),
         report.gate.len(),
         report.summary.degradations.len()
@@ -263,17 +370,17 @@ fn main() -> Result<()> {
 
 /// Aggregate rows by the reference's content type.
 fn group_rows(rows: &[ScenarioRow]) -> Vec<GroupRow> {
-    let mut by_type: BTreeMap<&str, Vec<&ScenarioRow>> = BTreeMap::new();
+    let mut by_type: BTreeMap<(&str, bool), Vec<&ScenarioRow>> = BTreeMap::new();
     for row in rows {
         by_type
-            .entry(row.content_type.as_str())
+            .entry((row.content_type.as_str(), row.capability_overlay))
             .or_default()
             .push(row);
     }
 
     by_type
         .into_iter()
-        .map(|(content_type, group)| {
+        .map(|((content_type, capability_overlay), group)| {
             // Only scenarios where a side actually acted contribute to that
             // side's mean; a scenario with no entry point is a capability gap,
             // not a zero-rate observation, and averaging it in would understate
@@ -302,6 +409,7 @@ fn group_rows(rows: &[ScenarioRow]) -> Vec<GroupRow> {
 
             GroupRow {
                 content_type: content_type.to_string(),
+                capability_overlay,
                 scenarios: group.len(),
                 tokenless_applicable: group
                     .iter()
@@ -389,7 +497,17 @@ fn render(report: &Report) -> String {
     let mut out = String::new();
     let s = &report.summary;
 
-    out.push_str("# L3 Scenario Comparison Report\n\n");
+    if s.comparison_status == "not_executed" {
+        out.push_str("# Tokenless L3 Report\n\nHeadroom comparison: not_executed; blank comparator columns are not failures.\n\n");
+    } else {
+        out.push_str("# L3 Scenario Comparison Report\n\n");
+    }
+    out.push_str(&format!(
+        "- Tokenless mode: {}\n- Comparison status: {}\n- Declared schema recovery tool: {}\n",
+        s.tokenless_mode,
+        s.comparison_status,
+        s.schema_recovery_tool.as_deref().unwrap_or("none")
+    ));
     out.push_str(&format!("- Date: {}\n- Platform: {}\n", s.date, s.platform));
     out.push_str(&format!(
         "- anolisa: {} (tracked-dirty: {}, untracked under src: {})\n",
@@ -461,7 +579,11 @@ fn render(report: &Report) -> String {
     for g in &report.groups {
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            g.content_type,
+            if g.capability_overlay {
+                format!("{} [capability overlay]", g.content_type)
+            } else {
+                g.content_type.clone()
+            },
             g.scenarios,
             g.tokenless_applicable,
             group_cell(g.tokenless.as_ref()),
@@ -474,19 +596,23 @@ fn render(report: &Report) -> String {
     }
 
     out.push_str("\n## Every scenario\n\n");
-    out.push_str("| type | scenario | tokens | tl | tl keep | hr pure | hr router | hr keep | hr ms | strategies |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| type | scenario | tokens | tl | tl keep | tl disposition | hr pure | hr router | hr keep | hr ccr | hr ms | strategies |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for r in &report.scenarios {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.content_type,
             r.scenario,
             r.tokens_before,
             pct(r.tokenless_rate),
             keep(r.tokenless_retention),
+            disposition_cell(&r.tokenless_lifecycle),
             pct(r.headroom_pure_rate),
             pct(r.headroom_router_rate),
             keep(r.headroom_retention),
+            r.headroom_ccr_entries
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".into()),
             r.headroom_ms
                 .map(|v| format!("{v:.1}"))
                 .unwrap_or_else(|| "—".into()),
@@ -513,18 +639,36 @@ fn render(report: &Report) -> String {
     out.push_str("\n## Latency\n\n");
     out.push_str(
         "Bases differ and are not cross-comparable: tokenless is timed in \
-         process around its compress calls, the reference inside its worker around \
+         process around production Runtime lifecycle calls (including domain detection and arbitration), the reference inside its worker around \
          `pipeline.apply`.\n\n",
     );
     out.push_str("| side | p50 ms | p95 ms | p99 ms |\n|---|---|---|---|\n");
     for (name, l) in [
-        ("tokenless (in-process)", s.tokenless_latency),
+        (
+            "tokenless (in-process Runtime lifecycle)",
+            s.tokenless_latency,
+        ),
         ("the reference (worker-internal)", s.headroom_latency),
     ] {
         out.push_str(&format!("| {} | {} |\n", name, latency_cells(l)));
     }
 
     out
+}
+
+/// `disposition [recoverability] operations`, the per-row explanation of a rate.
+fn disposition_cell(summary: &LifecycleSummary) -> String {
+    if summary.dispositions.is_empty() {
+        return "—".to_string();
+    }
+    let mut cell = summary.dispositions.join(",");
+    if !summary.recoverability.is_empty() {
+        cell.push_str(&format!(" [{}]", summary.recoverability.join(",")));
+    }
+    if !summary.operations.is_empty() {
+        cell.push_str(&format!(" {}", summary.operations.join("+")));
+    }
+    cell
 }
 
 /// `mean [lo, hi]` for a group, or a dash.

@@ -88,12 +88,18 @@ impl RetentionScore {
 const MAX_MISSING_REPORTED: usize = 5;
 
 /// Check every critical item against the compressed conversation.
+///
+/// Text first matches verbatim within one decoded unit, never across messages.
+/// Ordinary content then allows Markdown-escape and whitespace retries; diagnostics,
+/// tool/parameter identity and path-like needles stay exact, a conservative false-negative class.
 pub fn check(
     items: &[CriticalItem],
     messages: &[Message],
     tools: Option<&[Value]>,
 ) -> RetentionScore {
     let haystack = haystack(messages, tools);
+    let decoded = decoded_text(messages, tools);
+    let mut normalized: Option<Vec<String>> = None;
     // Numbers are scanned once: a payload can hold thousands of them and each
     // item would otherwise rescan the whole text.
     let numbers = if items.iter().any(|i| matches!(i.check, Check::Number(_))) {
@@ -108,7 +114,16 @@ pub fn check(
     };
     for item in items {
         let found = match &item.check {
-            Check::Text(needle) => haystack.contains(needle.as_str()),
+            Check::Text(needle) => {
+                decoded.iter().any(|unit| unit.contains(needle.as_str()))
+                    || (format_retry_allowed(item.kind, needle)
+                        && normalized
+                            .get_or_insert_with(|| {
+                                decoded.iter().map(|unit| normalize_format(unit)).collect()
+                            })
+                            .iter()
+                            .any(|unit| unit.contains(normalize_format(needle).as_str())))
+            }
             Check::Number(value) => numbers.iter().any(|n| close_enough(*n, *value)),
         };
         if found {
@@ -118,6 +133,12 @@ pub fn check(
         }
     }
     score
+}
+
+fn format_retry_allowed(kind: &str, needle: &str) -> bool {
+    // Raw diagnostics and file/parameter identities are not Markdown; format changes may name another object.
+    !matches!(kind, "error_entry" | "tool_name" | "required_param")
+        && !needle.contains(['/', '\\', '.'])
 }
 
 /// Relative tolerance absorbing float re-rendering without matching a
@@ -187,13 +208,78 @@ fn haystack(messages: &[Message], tools: Option<&[Value]>) -> String {
     out
 }
 
+/// The conversation as the model reads it: each string `content` decoded from
+/// its JSON string form, followed by the remaining fields and the tools array
+/// serialized. Used for verbatim and normalized checks, never for token counts.
+fn decoded_text(messages: &[Message], tools: Option<&[Value]>) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in messages {
+        let mut rest = m.clone();
+        if let Some(content) = rest.remove("content") {
+            collect_decoded_strings(&content, &mut out);
+        }
+        if let Ok(text) = serde_json::to_string(&Value::Object(rest)) {
+            out.push(text);
+        }
+    }
+    for tool in tools.unwrap_or(&[]) {
+        if let Ok(text) = serde_json::to_string(tool) {
+            out.push(text);
+        }
+    }
+    out
+}
+
+fn collect_decoded_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => out.push(text.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_decoded_strings(item, out);
+            }
+        }
+        Value::Object(fields) => {
+            for item in fields.values() {
+                collect_decoded_strings(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Normalizes Markdown escapes and whitespace within one unit, never joining messages.
+/// Case and every other character are kept, so no content can appear that was
+/// not there.
+pub(crate) fn normalize_format(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\\'
+            && chars
+                .peek()
+                .is_some_and(|next| "\\`*_{}[]()#+-.!|<>~".contains(*next))
+        {
+            continue;
+        }
+        unescaped.push(character);
+    }
+    unescaped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Derive the critical items of a scenario from its own payload.
 ///
 /// Selection is deliberately conservative: only facts an agent would plausibly
 /// need and that can be located unambiguously in the original. Anything fuzzier
 /// belongs to the semantic probe, not here.
 pub fn critical_items(scenario: &Scenario) -> Vec<CriticalItem> {
-    let mut items = Vec::new();
+    let mut items: Vec<CriticalItem> = scenario
+        .critical_facts
+        .iter()
+        .map(|fact| CriticalItem {
+            kind: "capability_overlay_fact",
+            check: Check::Text(fact.clone()),
+        })
+        .collect();
 
     // The date CacheAligner is meant to stabilise. Losing it changes the
     // model's answer outright, so it is critical wherever it appears.
@@ -466,6 +552,7 @@ mod tests {
             model_limit: 200_000,
             messages,
             tools,
+            critical_facts: Vec::new(),
         }
     }
 
@@ -710,5 +797,133 @@ mod tests {
         let text = "\u{4f60}\u{597d}".repeat(40);
         let needle = truncate_needle(&text);
         assert!(text.starts_with(&needle));
+    }
+
+    #[test]
+    fn markdown_escaping_json_escaping_and_rewrapping_are_not_losses() {
+        let items = vec![
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("required_heading".into()),
+            },
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("said \"stop\" twice".into()),
+            },
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("complete explanatory evidence".into()),
+            },
+        ];
+        let rendered = vec![msg(
+            "tool",
+            "# required\\_heading\n\nThe operator said \"stop\" twice.\nComplete\n  complete\n explanatory   evidence",
+        )];
+        let score = check(&items, &rendered, None);
+        assert_eq!(score.passed, score.total, "missing: {:?}", score.missing);
+    }
+
+    #[test]
+    fn normalization_does_not_create_facts_across_message_boundaries() {
+        let items = vec![CriticalItem {
+            kind: "text",
+            check: Check::Text("required {} evidence".into()),
+        }];
+        let split = vec![
+            serde_json::from_value::<Message>(serde_json::json!({"content": "required"})).unwrap(),
+            serde_json::from_value::<Message>(serde_json::json!({"content": "evidence"})).unwrap(),
+        ];
+        assert_eq!(check(&items, &split, None).passed, 0);
+        let present = vec![msg("tool", "required {}\n evidence")];
+        assert_eq!(check(&items, &present, None).passed, 1);
+    }
+
+    #[test]
+    fn raw_tool_paths_and_diagnostics_do_not_accept_markdown_equivalence() {
+        for (kind, expected, changed) in [
+            (
+                "error_entry",
+                "src/foo_bar.rs:1:File not found",
+                "src/foo\\\\_bar.rs:1:File not found",
+            ),
+            (
+                "capability_overlay_fact",
+                "src/a  b.rs:1:match",
+                "src/a b.rs:1:match",
+            ),
+            ("required_param", "required_value", "required\\\\_value"),
+        ] {
+            let items = vec![CriticalItem {
+                kind,
+                check: Check::Text(expected.into()),
+            }];
+            assert_eq!(check(&items, &[msg("tool", changed)], None).passed, 0);
+            assert_eq!(check(&items, &[msg("tool", expected)], None).passed, 1);
+        }
+    }
+
+    #[test]
+    fn array_text_blocks_preserve_diagnostics_without_cross_block_matches() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/scenario/logs/buildlog_runtime.json");
+        let scenario: Scenario =
+            serde_json::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+        let items = critical_items(&scenario);
+        let mut wrapped = scenario.messages.clone();
+        for message in &mut wrapped {
+            if let Some(Value::String(text)) = message.get("content").cloned() {
+                message.insert(
+                    "content".into(),
+                    serde_json::json!([{"type": "text", "text": text}]),
+                );
+            }
+        }
+        assert_eq!(
+            check(&items, &wrapped, scenario.tools.as_deref()).passed,
+            items.len()
+        );
+        let exact = vec![CriticalItem {
+            kind: "error_entry",
+            check: Check::Text("src/foo_bar.rs:1:failure".into()),
+        }];
+        let block = |text: &str| {
+            serde_json::from_value::<Message>(
+                serde_json::json!({"role": "tool", "content": [{"type": "text", "text": text}]}),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            check(&exact, &[block("src/foo_bar.rs:1:failure")], None).passed,
+            1
+        );
+        assert_eq!(
+            check(&exact, &[block(r"src/foo\_bar.rs:1:failure")], None).passed,
+            0
+        );
+        let split: Message = serde_json::from_value(serde_json::json!({"content": [
+            {"type": "text", "text": "src/foo_bar.rs:"}, {"type": "text", "text": "1:failure"}
+        ]}))
+        .unwrap();
+        assert_eq!(check(&exact, &[split], None).passed, 0);
+    }
+
+    #[test]
+    fn normalization_still_reports_removed_content() {
+        // Reverse control: the normalized retry must not invent a fact the
+        // compressed text no longer carries, nor match across a case change.
+        let items = vec![
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("required_heading".into()),
+            },
+            CriticalItem {
+                kind: "capability_overlay_fact",
+                check: Check::Text("Disk Full".into()),
+            },
+        ];
+        let frame = vec![msg("tool", "# required\\_section\n\ndisk full on /var")];
+        let score = check(&items, &frame, None);
+        assert_eq!(score.passed, 0, "{score:?}");
+        assert_eq!(score.missing.len(), 2);
     }
 }

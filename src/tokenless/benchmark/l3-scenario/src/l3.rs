@@ -54,6 +54,10 @@ pub enum L3Error {
     #[error("no scenario assets found under {0}")]
     NoAssets(String),
 
+    /// A production Runtime call or recovery check failed.
+    #[error("runtime adaptation failed: {0}")]
+    Runtime(String),
+
     /// A tiktoken encoding could not be constructed.
     #[error("failed to load tokenizer {name}: {message}")]
     Tokenizer {

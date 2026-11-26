@@ -67,6 +67,23 @@ pub struct EntryStats {
     pub(crate) unrecoverable_truncations: Option<usize>,
 }
 
+impl EntryStats {
+    /// Runtime's arbitration result, so measurement tools never infer it from input shape.
+    pub fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
+    /// Recovery constraint of this measurement, without exposing input or candidate text.
+    pub fn recoverability(&self) -> Recoverability {
+        self.recoverability
+    }
+
+    /// Operators applied in this measurement, in order.
+    pub fn applied_operations(&self) -> &[AppliedOperation] {
+        &self.applied_operations
+    }
+}
+
 /// One protocol response plus compression artifact facts.
 pub struct EntryOutcome {
     /// Response to emit across the transport boundary.

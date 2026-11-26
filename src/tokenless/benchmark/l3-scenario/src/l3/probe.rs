@@ -495,6 +495,7 @@ mod tests {
             model_limit: 200_000,
             messages,
             tools,
+            critical_facts: Vec::new(),
         }
     }
 
@@ -523,6 +524,46 @@ mod tests {
         let v = evaluate_answer("The current date is 2025-01-06.", "2025-01-06");
         assert!(v.contains);
         assert!(!v.exact);
+    }
+
+    // This layer owns its scoring vectors; uncommitted external tool trees are not test dependencies.
+    #[test]
+    fn scoring_vectors_match_the_rust_evaluator() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/evaluate_answer.json"
+        );
+        let vectors: Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("scoring vectors ship with L3"),
+        )
+        .expect("vectors parse");
+        for case in vectors["f1"].as_array().expect("f1 vectors") {
+            let got = compute_f1(
+                &normalize(case["prediction"].as_str().unwrap()),
+                &normalize(case["truth"].as_str().unwrap()),
+            );
+            assert!(
+                (got - case["f1"].as_f64().unwrap()).abs() < 1e-12,
+                "{}",
+                case["source"]
+            );
+        }
+        let mut checked = 0;
+        for case in vectors["evaluate"].as_array().expect("evaluate vectors") {
+            assert_eq!(
+                case["rust"], true,
+                "non-executable examples must not be placed in evaluate"
+            );
+            let v = evaluate_answer(
+                case["prediction"].as_str().unwrap(),
+                case["truth"].as_str().unwrap(),
+            );
+            assert_eq!(v.contains, case["contains"] == true, "{}", case["source"]);
+            assert_eq!(v.exact, case["exact"] == true, "{}", case["source"]);
+            checked += 1;
+        }
+        assert!(checked > 0);
+        assert_eq!(checked, vectors["evaluate"].as_array().unwrap().len());
     }
 
     #[test]
