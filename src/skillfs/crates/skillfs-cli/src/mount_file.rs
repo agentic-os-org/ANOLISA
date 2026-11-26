@@ -186,7 +186,7 @@ pub(super) fn load_sources_observed(
         // root reports (two of its directories colliding on one leaf name)
         // names a skill no winner provides and stays fatal.
         for error in &errors {
-            let skill = error_skill_name(error);
+            let skill = error_skill_name(root, error);
             if let Some(skill) = skill {
                 if winners.contains(skill) {
                     observer.shadowed_error(root, skill, error);
@@ -196,6 +196,17 @@ pub(super) fn load_sources_observed(
                     continue;
                 }
             }
+            // Directory-inspection errors (unreadable candidate skill or
+            // category directories under a readable source root) warn and
+            // continue, aligning mount-file mounts with single-source
+            // `skillfs mount` so unrelated inaccessible auxiliary directories
+            // do not abort the mount. Unreadable source roots (`error.path ==
+            // root`) and confirmed manifest/structural errors remain fatal.
+            if error.is_directory_inspection_error() && error.path != *root {
+                tracing::warn!(path = %error.path.display(), error = %error.error,
+                    "skipping unreadable directory during mount");
+                continue;
+            }
             observer.rejected(skill);
             return Err(format!("{}: {}", error.path.display(), error.error).into());
         }
@@ -203,20 +214,25 @@ pub(super) fn load_sources_observed(
     Ok(merged)
 }
 
-/// Skill identity carried by a per-file load error: skills are keyed by
-/// directory leaf name and a failed `SKILL.md` is reported by its file
-/// path, so the parent directory's leaf name names the skill at fault.
-/// Errors for anything else (the source root itself, the max-skills
-/// guard, non-UTF-8 names) carry no skill identity.
-fn error_skill_name(error: &skillfs_core::store::LoadError) -> Option<&str> {
-    if error.path.file_name()? != "SKILL.md" {
-        return None;
+/// Skill identity carried by a per-skill load error: skills are keyed by
+/// directory leaf name. A failed `SKILL.md` reports its file path (so its
+/// parent directory leaf names the skill), and an unreadable candidate skill
+/// directory probe under `root` reports the directory itself (so its leaf
+/// names the candidate skill for shadowing). Errors for anything else (the
+/// source root itself, category listing failures, the max-skills guard,
+/// non-UTF-8 names) carry no skill identity.
+fn error_skill_name<'a>(root: &Path, error: &'a skillfs_core::store::LoadError) -> Option<&'a str> {
+    if error.path.file_name() == Some(std::ffi::OsStr::new("SKILL.md")) {
+        return error
+            .path
+            .parent()?
+            .file_name()
+            .and_then(|name| name.to_str());
     }
-    error
-        .path
-        .parent()?
-        .file_name()
-        .and_then(|name| name.to_str())
+    if error.is_manifest_probe_error() && error.path != root {
+        return error.path.file_name().and_then(|name| name.to_str());
+    }
+    None
 }
 
 #[cfg(test)]
@@ -408,5 +424,167 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[cfg(unix)]
+    struct RestorePermissions<'a>(&'a Path, u32);
+
+    #[cfg(unix)]
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(self.1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_auxiliary_directories_do_not_abort_mount() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses directory permission checks.
+        // SAFETY: geteuid takes no pointers and reads the effective uid.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source");
+        let demo = root.join("demo");
+        let aux = root.join("aux");
+        let cat_aux = root.join("cat-aux");
+        std::fs::create_dir_all(&demo).unwrap();
+        std::fs::create_dir_all(&aux).unwrap();
+        std::fs::create_dir_all(&cat_aux).unwrap();
+        std::fs::write(
+            demo.join("SKILL.md"),
+            "---\nname: demo\ndescription: good\n---\n",
+        )
+        .unwrap();
+
+        let _restore_aux = RestorePermissions(&aux, 0o755);
+        let _restore_cat_aux = RestorePermissions(&cat_aux, 0o755);
+        std::fs::set_permissions(&aux, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&cat_aux, std::fs::Permissions::from_mode(0o111)).unwrap();
+
+        let store = load_sources(&[root.clone()], &ParseConfig::default()).unwrap();
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.get("demo").unwrap().source_path,
+            demo.join("SKILL.md")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shadowed_unreadable_duplicate_is_observed_without_aborting_mount() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses directory permission checks.
+        // SAFETY: geteuid takes no pointers and reads the effective uid.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        #[derive(Default)]
+        struct RecordingObserver {
+            shadowed_errors: Vec<(PathBuf, String, PathBuf)>,
+            rejected: Vec<Option<String>>,
+        }
+        impl Observer for RecordingObserver {
+            fn shadowed_error(
+                &mut self,
+                source: &Path,
+                name: &str,
+                error: &skillfs_core::store::LoadError,
+            ) {
+                self.shadowed_errors.push((
+                    source.to_path_buf(),
+                    name.to_owned(),
+                    error.path.clone(),
+                ));
+            }
+            fn rejected(&mut self, name: Option<&str>) {
+                self.rejected.push(name.map(str::to_owned));
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let roots: Vec<_> = ["high", "low-flat", "low-cat"]
+            .map(|s| temp.path().join(s))
+            .into();
+        let winner = roots[0].join("demo");
+        let flat_dup = roots[1].join("demo");
+        let nested_dup = roots[2].join("ops").join("demo");
+        for dir in [&winner, &flat_dup, &nested_dup] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                "---\nname: demo\ndescription: good\n---\n",
+            )
+            .unwrap();
+        }
+
+        let _restore_flat = RestorePermissions(&flat_dup, 0o755);
+        let _restore_nested = RestorePermissions(&nested_dup, 0o755);
+        std::fs::set_permissions(&flat_dup, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&nested_dup, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let mut observer = RecordingObserver::default();
+        let store = load_sources_observed(&roots, &ParseConfig::default(), &mut observer).unwrap();
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.get("demo").unwrap().source_path,
+            winner.join("SKILL.md")
+        );
+        assert!(observer.rejected.is_empty(), "{:?}", observer.rejected);
+        assert_eq!(
+            observer.shadowed_errors,
+            vec![
+                (roots[1].clone(), "demo".to_owned(), flat_dup.clone()),
+                (roots[2].clone(), "demo".to_owned(), nested_dup.clone()),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_source_root_and_unreadable_manifest_still_abort_mount() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses file and directory permission checks.
+        // SAFETY: geteuid takes no pointers and reads the effective uid.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+
+        let blocked_root = temp.path().join("blocked-root");
+        std::fs::create_dir(&blocked_root).unwrap();
+        {
+            let _restore = RestorePermissions(&blocked_root, 0o755);
+            std::fs::set_permissions(&blocked_root, std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            let err = load_sources(&[blocked_root.clone()], &ParseConfig::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("cannot read directory"),
+                "unreadable source root must abort mount, got: {err}"
+            );
+        }
+
+        let root = temp.path().join("source");
+        let demo = root.join("demo");
+        std::fs::create_dir_all(&demo).unwrap();
+        let manifest = demo.join("SKILL.md");
+        std::fs::write(&manifest, "---\nname: demo\ndescription: good\n---\n").unwrap();
+        let _restore = RestorePermissions(&manifest, 0o644);
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = load_sources(&[root], &ParseConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("demo/SKILL.md"),
+            "confirmed unreadable SKILL.md must still abort mount, got: {err}"
+        );
     }
 }
