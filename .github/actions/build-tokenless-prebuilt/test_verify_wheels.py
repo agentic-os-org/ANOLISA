@@ -59,6 +59,7 @@ def create_runtime(
     platform: str | None = None,
     binary_architecture: str | None = None,
     executables: tuple[str, ...] | None = None,
+    extension: str | None = None,
 ) -> Path:
     platform = platform or PLATFORMS[(os_name, architecture)]
     path = directory / f"anolisa_tokenless-{version}-cp311-abi3-{platform}.whl"
@@ -82,7 +83,7 @@ def create_runtime(
                 + "\n"
             ).encode(),
         )
-        extension = "_native.pyd" if os_name == "windows" else "_native.abi3.so"
+        extension = extension or ("_native.pyd" if os_name == "windows" else "_native.abi3.so")
         add_member(archive, f"anolisa_tokenless/{extension}", payload, 0o100755)
         add_member(archive, "anolisa_tokenless/_bin/__init__.py", b"")
         if executables is None:
@@ -165,6 +166,25 @@ def main() -> int:
             if (os_name, architecture) == ("linux", "x86_64"):
                 create_agentscope(flat)
             run_verifier(flat, "--layout", "flat", "--os", os_name, "--arch", architecture)
+
+            # The SDK imports `anolisa_tokenless._native`; a renamed module must
+            # not clear the gate even when it carries the same native bytes.
+            bad_name = root / f"bad-extension-{os_name}-{architecture}"
+            bad_name.mkdir()
+            wrong_suffix = "_native_extra.pyd" if os_name == "windows" else "_native_extra.abi3.so"
+            create_runtime(bad_name, os_name, architecture, extension=wrong_suffix)
+            run_verifier(
+                bad_name,
+                "--layout", "flat", "--os", os_name, "--arch", architecture,
+                expect_success=False,
+            )
+
+        # A generic `_native.so` remains a valid stable-ABI extension on POSIX.
+        generic = root / "generic-so"
+        generic.mkdir()
+        create_runtime(generic, "linux", "x86_64", extension="_native.so")
+        create_agentscope(generic)
+        run_verifier(generic, "--layout", "flat", "--os", "linux", "--arch", "x86_64")
 
         aggregate = root / "aggregate"
         aggregate.mkdir()

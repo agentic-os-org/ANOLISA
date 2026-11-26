@@ -222,14 +222,19 @@ def verify_runtime(path: Path, version: str, executable: str) -> NativeTarget:
             fail(f"{path.name} has the wrong METADATA Version")
         verify_wheel_tags(wheel, python_tag, abi_tag, platforms)
 
+        # The SDK imports `anolisa_tokenless._native`, so a renamed module
+        # (e.g. `_native_extra.abi3.so`) cannot satisfy that import even though
+        # it carries native bytes. Match the exact basename, not a prefix.
+        native_names = (
+            ("anolisa_tokenless/_native.pyd",)
+            if target.os_name == "windows"
+            else ("anolisa_tokenless/_native.abi3.so", "anolisa_tokenless/_native.so")
+        )
         native_members = [
-            name
-            for name in archive.namelist()
-            if name.startswith("anolisa_tokenless/_native")
-            and name.endswith(".pyd" if target.os_name == "windows" else ".so")
+            name for name in archive.namelist() if name in native_names
         ]
         if len(native_members) != 1:
-            fail(f"{path.name} must contain exactly one native extension")
+            fail(f"{path.name} must contain exactly one native extension with the _native module name")
         if target.os_name == "windows":
             executable += ".exe"
         # _bin is also a Python package; any other file there is a stale binary.
