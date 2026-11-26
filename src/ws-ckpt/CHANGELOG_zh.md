@@ -2,6 +2,19 @@
 
 [English](CHANGELOG.md)
 
+## 0.7.4
+
+### Changed
+
+- RPM 构建现在要求 Rust >= 1.91 (#10379)
+
+### Fixed
+
+- `ws-ckpt rollback --guarded --json` 身份阶段拒绝时透传 daemon 的拒绝码与消息，不再统一报 `PreflightFailed` (#10563)
+- 迁移旧索引时，若发生 I/O 错误或新状态保存失败，daemon 会停止启动；legacy `index.json` 仅在新状态保存成功后删除 (#10643)
+- 原子写入不再跟随或覆盖残留的 `.tmp` 符号链接 (#10642)
+- Hermes 与 OpenClaw cron 对账支持包含撇号的工作区路径，避免重复或孤儿 crontab 条目 (#10469)
+
 ## 0.7.3
 
 ### Added
