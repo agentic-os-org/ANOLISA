@@ -569,3 +569,114 @@ fn warn_soft_survives_an_unwritable_stderr() {
     }
     drop(dev_full);
 }
+
+#[test]
+fn batch_expiry_purge_truncates_wal_while_preserving_sidecars_for_readonly_retrieve() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stash.db");
+    let wal_path = dir.path().join("stash.db-wal");
+    let shm_path = dir.path().join("stash.db-shm");
+
+    let store = SqliteStore::with_limits(&path, 60, 10_000).unwrap();
+    let live = store.stash("still-live-payload").unwrap();
+    for index in 0..(WAL_CHECKPOINT_PURGE_THRESHOLD + 4) {
+        let payload = format!("expired-{index}-{}", "x".repeat(2048));
+        store.stash(&payload).unwrap();
+    }
+    store
+        .lock_conn()
+        .execute(
+            "UPDATE stash SET expires_at = 0 WHERE hash != ?",
+            [&live.key],
+        )
+        .unwrap();
+    assert!(
+        wal_path.metadata().unwrap().len() > 0,
+        "expired writes should leave frames in WAL before batch purge"
+    );
+
+    // Next stash purges >= WAL_CHECKPOINT_PURGE_THRESHOLD expired rows and
+    // triggers a non-blocking TRUNCATE checkpoint.
+    let live2 = store.stash("second-live-payload").unwrap();
+    assert_eq!(wal_path.metadata().unwrap().len(), 0);
+    drop(store);
+
+    // SQLITE_FCNTL_PERSIST_WAL keeps sidecars on disk so read-only retrieve works.
+    assert!(wal_path.is_file());
+    assert!(shm_path.is_file());
+    let reader = SqliteStore::open_read_only(&path).unwrap();
+    assert_eq!(
+        reader.retrieve(&live.key).unwrap().as_deref(),
+        Some("still-live-payload")
+    );
+    assert_eq!(
+        reader.retrieve(&live2.key).unwrap().as_deref(),
+        Some("second-live-payload")
+    );
+}
+
+#[test]
+fn large_wal_purge_truncates_even_below_row_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stash.db");
+    let wal_path = dir.path().join("stash.db-wal");
+    let store = SqliteStore::with_limits(&path, 60, 10_000).unwrap();
+
+    // Write a small number of large payloads so -wal exceeds 1 MiB.
+    for index in 0..4 {
+        let payload = format!("large-{index}-{}", "Z".repeat(400 * 1024));
+        store.stash(&payload).unwrap();
+    }
+    assert!(wal_path.metadata().unwrap().len() >= WAL_CHECKPOINT_MIN_BYTES);
+    expire_all(&store);
+
+    // Purging those 4 expired rows via retrieve triggers WAL truncation due to WAL size.
+    assert_eq!(store.retrieve("000000000000000000000000").unwrap(), None);
+    assert_eq!(wal_path.metadata().unwrap().len(), 0);
+}
+
+#[test]
+fn evict_expired_and_explicit_checkpoint_wal_truncate_and_handle_contention() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stash.db");
+    let wal_path = dir.path().join("stash.db-wal");
+    let store = SqliteStore::with_limits(&path, 60, 10_000).unwrap();
+
+    let payload = format!("evictable-{}", "W".repeat(8192));
+    store.stash(&payload).unwrap();
+    expire_all(&store);
+    assert_eq!(store.evict_expired().unwrap(), 1);
+    assert_eq!(wal_path.metadata().unwrap().len(), 0);
+
+    let live = store.stash(&format!("live-{}", "L".repeat(8192))).unwrap();
+    assert!(wal_path.metadata().unwrap().len() > 0);
+    let ckpt = store.checkpoint_wal().unwrap();
+    assert!(!ckpt.busy);
+    assert_eq!(wal_path.metadata().unwrap().len(), 0);
+
+    // Read-only handles reject checkpoint_wal cleanly.
+    let reader_handle = SqliteStore::open_read_only(&path).unwrap();
+    assert!(reader_handle.checkpoint_wal().is_err());
+
+    // An active concurrent read snapshot makes checkpoint_wal return busy=true
+    // immediately without waiting for BUSY_TIMEOUT.
+    let raw_reader = Connection::open(&path).unwrap();
+    raw_reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM stash;")
+        .unwrap();
+    store.stash(&format!("newer-{}", "N".repeat(8192))).unwrap();
+    let start = Instant::now();
+    let busy_ckpt = store.checkpoint_wal().unwrap();
+    let elapsed = start.elapsed();
+    assert!(busy_ckpt.busy);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "checkpoint_wal blocked for {elapsed:?}"
+    );
+    drop(raw_reader);
+
+    let final_ckpt = store.checkpoint_wal().unwrap();
+    assert!(!final_ckpt.busy);
+    assert_eq!(wal_path.metadata().unwrap().len(), 0);
+    assert!(store.retrieve(&live.key).unwrap().is_some());
+}

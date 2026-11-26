@@ -514,6 +514,9 @@ tokenless stats diff --session <session-id>
 tokenless stats status
 tokenless stats enable
 tokenless stats disable
+tokenless stats prune --older-than 30
+tokenless stats prune --older-than 7 --trim-text --compact
+tokenless stats compact
 tokenless stats clear --yes
 ```
 
@@ -552,7 +555,27 @@ tokenless stats diff --session <session-id> \
 
 任一端内容不可用或超过 1 MiB 时不生成内容差异，渲染的 hunk 最多 500 行。单记录和 tool-use 差异可能包含存储的源文本，使用共享终端或收集输出时注意敏感信息。完整说明见[效果度量](measuring-savings.md)和[配置与数据隐私](configuration-and-privacy.md)。
 
-`stats status` 只报告本地统计和 SLS 开关及其来源，因为当前状态读取路径没有读取 compression 开关，所以不显示 `compression_enabled`。该设置应检查 `TOKENLESS_COMPRESSION_ENABLED` 和 `~/.tokenless/config.json`。
+`stats status` 报告本地统计和 SLS 开关，以及已配置的 `stats.db` 记录与正文保留策略及其来源（`env override`、`config file` 或 `default`）。因为当前状态读取路径没有读取 compression 开关，所以不显示 `compression_enabled`，该设置应检查 `TOKENLESS_COMPRESSION_ENABLED` 和 `~/.tokenless/config.json`。
+
+按保留期清理旧记录或正文载荷，并回收 SQLite 磁盘空间：
+
+```bash
+tokenless stats prune --older-than 30 --json
+tokenless stats prune --older-than 7 --trim-text --compact
+tokenless stats prune
+tokenless stats compact --json
+```
+
+`stats prune` 主要选项：
+
+| 选项 | 行为 |
+|------|------|
+| `--older-than <days>` | 正整数天数阈值；未指定时应用当前生效策略（默认记录 30 天、正文 7 天；当两项保留期均通过 `0`/`null` 显式停用时退出码为 `2`） |
+| `--trim-text` | 仅清除存储的压缩前后正文与孤立 `compression_artifacts`，保留数值度量与 `retrieve_events` |
+| `--compact` | 清理后执行尽力而为的 `VACUUM` 与非阻塞 `PRAGMA wal_checkpoint(TRUNCATE)` |
+| `--json` | 输出 schema `1.0` JSON 计数（带 `--compact` 时包含 `reclaim` 详情） |
+
+`stats compact` 执行尽力而为的 `VACUUM` 与非阻塞 `PRAGMA wal_checkpoint(TRUNCATE)`，并维持 `stats.db` 的 `0600` 权限；`stats clear --yes` 在清空全部表后也会执行尽力而为的 WAL 截断与 `VACUUM`。
 
 ## 错误与降级
 

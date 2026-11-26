@@ -7308,3 +7308,748 @@ fn compress_post_tool_error_structured_json_preserves_failing_test_and_assertion
         "missing `{sgr_err}` in:\n{sgr_rendered}"
     );
 }
+
+#[test]
+fn stats_prune_older_than_deletes_old_records_artifacts_and_retrieve_events() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let recorder = StatsRecorder::new(&stats_db).unwrap();
+
+    let old_ts = chrono::Local::now() - chrono::Duration::days(45);
+    let recent_ts = chrono::Local::now() - chrono::Duration::days(3);
+    let old_id = recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "cli".into(),
+                1000,
+                250,
+                400,
+                100,
+            )
+            .with_timestamp(old_ts)
+            .with_text("old-before".into(), "old-after".into()),
+        )
+        .unwrap();
+    let recent_id = recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "cli".into(),
+                800,
+                200,
+                300,
+                75,
+            )
+            .with_timestamp(recent_ts)
+            .with_text("new-before".into(), "new-after".into()),
+        )
+        .unwrap();
+    recorder
+        .record_artifacts(old_id, "json_truncation", &["a".repeat(24)])
+        .unwrap();
+    recorder
+        .record_artifacts(recent_id, "json_truncation", &["b".repeat(24)])
+        .unwrap();
+    let old_ret = recorder
+        .record_retrieve_event(
+            &"a".repeat(24),
+            "hit",
+            "cli",
+            Some(30),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&stats_db).unwrap();
+        let old_ns = old_ts.timestamp_nanos_opt().unwrap();
+        conn.execute(
+            "UPDATE retrieve_events SET timestamp = ?1, timestamp_ns = ?2 WHERE id = ?3",
+            rusqlite::params![old_ts.to_rfc3339(), old_ns, old_ret],
+        )
+        .unwrap();
+    }
+    drop(recorder);
+
+    let out = fixture
+        .command()
+        .args(["stats", "prune", "--older-than", "30", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["schema_version"], "1.0");
+    assert_eq!(report["stats_rows_deleted"], 1);
+    assert_eq!(report["text_rows_trimmed"], 0);
+    assert_eq!(report["artifacts_deleted"], 1);
+    assert_eq!(report["retrieve_events_deleted"], 1);
+    assert_eq!(report["compacted"], false);
+
+    let reopened = StatsRecorder::new(&stats_db).unwrap();
+    assert_eq!(reopened.count().unwrap(), 1);
+    assert!(reopened.record_by_id(old_id).unwrap().is_none());
+    assert!(reopened.record_by_id(recent_id).unwrap().is_some());
+}
+
+#[test]
+fn stats_prune_trim_text_and_compact_preserves_summary_and_shrinks_db() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let recorder = StatsRecorder::new(&stats_db).unwrap();
+
+    let old_ts = chrono::Local::now() - chrono::Duration::days(15);
+    let recent_ts = chrono::Local::now() - chrono::Duration::days(1);
+    let big_before = "X".repeat(256 * 1024);
+    let big_after = "Y".repeat(128 * 1024);
+    let mut old_ids = Vec::new();
+    for _ in 0..8 {
+        old_ids.push(
+            recorder
+                .record(
+                    &StatsRecord::new(
+                        OperationType::CompressResponse,
+                        "cli".into(),
+                        big_before.len(),
+                        65_536,
+                        big_after.len(),
+                        32_768,
+                    )
+                    .with_timestamp(old_ts)
+                    .with_text(big_before.clone(), big_after.clone()),
+                )
+                .unwrap(),
+        );
+    }
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "cli".into(),
+                1000,
+                250,
+                400,
+                100,
+            )
+            .with_timestamp(recent_ts)
+            .with_text("keep-before".into(), "keep-after".into()),
+        )
+        .unwrap();
+    recorder.checkpoint_wal().unwrap();
+    let size_before = std::fs::metadata(&stats_db).unwrap().len();
+    drop(recorder);
+
+    let out = fixture
+        .command()
+        .args([
+            "stats",
+            "prune",
+            "--older-than",
+            "7",
+            "--trim-text",
+            "--compact",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["text_rows_trimmed"], 8);
+    assert_eq!(report["stats_rows_deleted"], 0);
+    assert_eq!(report["compacted"], true);
+    assert_eq!(report["reclaim"]["vacuum_completed"], true);
+
+    let size_after = std::fs::metadata(&stats_db).unwrap().len();
+    assert!(
+        size_after < size_before / 4,
+        "expected compacted DB to shrink: before={size_before}, after={size_after}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&stats_db).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // Aggregate summary counts stay intact.
+    let summary = fixture
+        .command()
+        .args(["stats", "summary", "--json"])
+        .output()
+        .unwrap();
+    assert!(summary.status.success());
+    let summary_json: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(summary_json["total"]["records"], 9);
+
+    // Trimmed record shows no stored text content.
+    let show = fixture
+        .command()
+        .args(["stats", "show", &old_ids[0].to_string()])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    assert!(
+        String::from_utf8_lossy(&show.stdout).contains("(no text content stored)"),
+        "{}",
+        String::from_utf8_lossy(&show.stdout)
+    );
+}
+
+#[test]
+fn stats_prune_uses_env_policy_and_rejects_missing_or_zero_days() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let recorder = StatsRecorder::new(&stats_db).unwrap();
+    let old_ts = chrono::Local::now() - chrono::Duration::days(20);
+    let very_old_ts = chrono::Local::now() - chrono::Duration::days(45);
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "cli".into(),
+                1000,
+                250,
+                400,
+                100,
+            )
+            .with_timestamp(old_ts)
+            .with_text("old".into(), "old2".into()),
+        )
+        .unwrap();
+    let expired_id = recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "cli".into(),
+                1000,
+                250,
+                400,
+                100,
+            )
+            .with_timestamp(very_old_ts)
+            .with_text("expired".into(), "expired2".into()),
+        )
+        .unwrap();
+    drop(recorder);
+
+    let zero_err = fixture
+        .command()
+        .args(["stats", "prune", "--older-than", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(zero_err.status.code(), Some(2));
+
+    let disabled_err = fixture
+        .command()
+        .env("TOKENLESS_STATS_RETENTION_DAYS", "0")
+        .env("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "0")
+        .args(["stats", "prune"])
+        .output()
+        .unwrap();
+    assert_eq!(disabled_err.status.code(), Some(2));
+
+    let env_prune = fixture
+        .command()
+        .env("TOKENLESS_STATS_RETENTION_DAYS", "10")
+        .env("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "0")
+        .args(["stats", "prune", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        env_prune.status.success(),
+        "{}",
+        String::from_utf8_lossy(&env_prune.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&env_prune.stdout).unwrap();
+    assert_eq!(report["stats_rows_deleted"], 2);
+    assert!(
+        StatsRecorder::new(&stats_db)
+            .unwrap()
+            .record_by_id(expired_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn stats_compact_and_clear_reclaim_disk_space() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    let stats_db = fixture.data_dir.join("stats.db");
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let recorder = StatsRecorder::new(&stats_db).unwrap();
+    let big_before = "A".repeat(256 * 1024);
+    let big_after = "B".repeat(128 * 1024);
+    for _ in 0..6 {
+        recorder
+            .record(
+                &StatsRecord::new(
+                    OperationType::CompressResponse,
+                    "cli".into(),
+                    big_before.len(),
+                    65_536,
+                    big_after.len(),
+                    32_768,
+                )
+                .with_text(big_before.clone(), big_after.clone()),
+            )
+            .unwrap();
+    }
+    recorder.checkpoint_wal().unwrap();
+    let full_size = std::fs::metadata(&stats_db).unwrap().len();
+    drop(recorder);
+
+    // Delete via raw SQL to leave freelist pages, then reclaim with `stats compact`.
+    let conn = rusqlite::Connection::open(&stats_db).unwrap();
+    conn.execute("DELETE FROM stats", []).unwrap();
+    drop(conn);
+
+    let compact = fixture
+        .command()
+        .args(["stats", "compact", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        compact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compact.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&compact.stdout).unwrap();
+    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["vacuum_completed"], true);
+    assert!(std::fs::metadata(&stats_db).unwrap().len() < full_size / 4);
+
+    // Refill, then verify `stats clear --yes` also reclaims disk space and keeps 0600.
+    let recorder = StatsRecorder::new(&stats_db).unwrap();
+    for _ in 0..6 {
+        recorder
+            .record(
+                &StatsRecord::new(
+                    OperationType::CompressResponse,
+                    "cli".into(),
+                    big_before.len(),
+                    65_536,
+                    big_after.len(),
+                    32_768,
+                )
+                .with_text(big_before.clone(), big_after.clone()),
+            )
+            .unwrap();
+    }
+    drop(recorder);
+
+    let clear = fixture
+        .command()
+        .args(["stats", "clear", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        clear.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clear.stderr)
+    );
+    assert!(std::fs::metadata(&stats_db).unwrap().len() < full_size / 4);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&stats_db).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn stats_status_reports_retention_overrides() {
+    let output = tokenless_bin()
+        .env("TOKENLESS_STATS_RETENTION_DAYS", "30")
+        .env("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "0")
+        .args(["stats", "status"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Stats retention: 30 days (via env override)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Text retention:  unlimited (via env override)"),
+        "{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_only_writes_advance_periodic_retention_and_honor_disabled_env() {
+    fn seed_rtk_only_db(stats_db: &std::path::Path) -> i64 {
+        let conn = rusqlite::Connection::open(stats_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                source_pid INTEGER,
+                session_id TEXT,
+                tool_use_id TEXT,
+                before_chars INTEGER NOT NULL,
+                before_tokens INTEGER NOT NULL,
+                after_chars INTEGER NOT NULL,
+                after_tokens INTEGER NOT NULL,
+                before_text TEXT,
+                after_text TEXT
+            );",
+        )
+        .unwrap();
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        let recent_ts = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO stats (
+                timestamp, operation, agent_id, before_chars, before_tokens,
+                after_chars, after_tokens, before_text, after_text
+             ) VALUES (?1, 'rewrite-command', 'cli', 400, 100, 120, 30, 'old-before', 'old-after')",
+            [&old_ts],
+        )
+        .unwrap();
+        let expired_id = conn.last_insert_rowid();
+        for index in 2..StatsRecorder::AUTO_RETENTION_INTERVAL {
+            conn.execute(
+                "INSERT INTO stats (
+                    timestamp, operation, agent_id, before_chars, before_tokens,
+                    after_chars, after_tokens, before_text, after_text
+                 ) VALUES (?1, 'rewrite-command', 'cli', 400, 100, 120, 30, ?2, 'new-after')",
+                rusqlite::params![recent_ts, format!("recent-{index}")],
+            )
+            .unwrap();
+        }
+        expired_id
+    }
+
+    fn setup_workspace(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        for index in 0..20 {
+            std::fs::write(workspace.join(format!("item_{index:02}.txt")), "x").unwrap();
+        }
+        (home, workspace)
+    }
+
+    // 1. Disabled retention via env preserves row 1 when RTK writes row 64.
+    let Some(disabled_fixture) = TempDataDir::new() else {
+        return;
+    };
+    std::fs::create_dir_all(&disabled_fixture.data_dir).unwrap();
+    let disabled_db = disabled_fixture.data_dir.join("stats.db");
+    let disabled_expired_id = seed_rtk_only_db(&disabled_db);
+    let (home1, workspace1) = setup_workspace(&disabled_fixture.root);
+    let disabled_out = disabled_fixture
+        .command()
+        .env("HOME", &home1)
+        .env("XDG_CONFIG_HOME", home1.join(".config"))
+        .env("XDG_DATA_HOME", home1.join(".local/share"))
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_STATS_RETENTION_DAYS", "0")
+        .env("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "0")
+        .args(["rtk", "ls"])
+        .arg(&workspace1)
+        .output()
+        .unwrap();
+    assert!(
+        disabled_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disabled_out.stderr)
+    );
+    assert!(
+        disabled_out.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&disabled_out.stderr)
+    );
+    {
+        let conn = rusqlite::Connection::open(&disabled_db).unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stats", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, StatsRecorder::AUTO_RETENTION_INTERVAL);
+        let preserved: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stats WHERE id = ?1",
+                [disabled_expired_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved, 1);
+    }
+
+    // 2. Enabled retention cleans the 45-day-old row on RTK's 64th row without altering stderr.
+    let Some(enabled_fixture) = TempDataDir::new() else {
+        return;
+    };
+    std::fs::create_dir_all(&enabled_fixture.data_dir).unwrap();
+    let enabled_db = enabled_fixture.data_dir.join("stats.db");
+    let enabled_expired_id = seed_rtk_only_db(&enabled_db);
+    let (home2, workspace2) = setup_workspace(&enabled_fixture.root);
+    let enabled_out = enabled_fixture
+        .command()
+        .env("HOME", &home2)
+        .env("XDG_CONFIG_HOME", home2.join(".config"))
+        .env("XDG_DATA_HOME", home2.join(".local/share"))
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_STATS_RETENTION_DAYS", "30")
+        .env("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "7")
+        .args(["rtk", "ls"])
+        .arg(&workspace2)
+        .output()
+        .unwrap();
+    assert!(
+        enabled_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled_out.stderr)
+    );
+    assert!(
+        enabled_out.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&enabled_out.stderr)
+    );
+    {
+        let conn = rusqlite::Connection::open(&enabled_db).unwrap();
+        let remaining_expired: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stats WHERE id = ?1",
+                [enabled_expired_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_expired, 0);
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stats", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, StatsRecorder::AUTO_RETENTION_INTERVAL - 1);
+        let watermark: i64 = conn
+            .query_row(
+                "SELECT last_retention_row_id FROM stats_maintenance WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(watermark, StatsRecorder::AUTO_RETENTION_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_read_only_gain_does_not_prune_or_trim_stats() {
+    let Some(fixture) = TempDataDir::new() else {
+        return;
+    };
+    std::fs::create_dir_all(&fixture.data_dir).unwrap();
+    let stats_db = fixture.data_dir.join("stats.db");
+
+    let (expired_id, mid_id) = {
+        let conn = rusqlite::Connection::open(&stats_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                source_pid INTEGER,
+                session_id TEXT,
+                tool_use_id TEXT,
+                before_chars INTEGER NOT NULL,
+                before_tokens INTEGER NOT NULL,
+                after_chars INTEGER NOT NULL,
+                after_tokens INTEGER NOT NULL,
+                before_text TEXT,
+                after_text TEXT
+            );",
+        )
+        .unwrap();
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        let mid_ts = (chrono::Utc::now() - chrono::Duration::days(15)).to_rfc3339();
+        let recent_ts = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO stats (
+                timestamp, operation, agent_id, before_chars, before_tokens,
+                after_chars, after_tokens, before_text, after_text
+             ) VALUES (?1, 'rewrite-command', 'cli', 400, 100, 120, 30, 'old-before', 'old-after')",
+            [&old_ts],
+        )
+        .unwrap();
+        let expired_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "INSERT INTO stats (
+                timestamp, operation, agent_id, before_chars, before_tokens,
+                after_chars, after_tokens, before_text, after_text
+             ) VALUES (?1, 'rewrite-command', 'cli', 400, 100, 120, 30, 'mid-before', 'mid-after')",
+            [&mid_ts],
+        )
+        .unwrap();
+        let mid_id = conn.last_insert_rowid();
+
+        for index in 3..=StatsRecorder::AUTO_RETENTION_INTERVAL {
+            conn.execute(
+                "INSERT INTO stats (
+                    timestamp, operation, agent_id, before_chars, before_tokens,
+                    after_chars, after_tokens, before_text, after_text
+                 ) VALUES (?1, 'rewrite-command', 'cli', 400, 100, 120, 30, ?2, 'new-after')",
+                rusqlite::params![recent_ts, format!("recent-{index}")],
+            )
+            .unwrap();
+        }
+        (expired_id, mid_id)
+    };
+
+    let home = fixture.root.join("home");
+    let workspace = fixture.root.join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    for index in 0..20 {
+        std::fs::write(workspace.join(format!("item_{index:02}.txt")), "x").unwrap();
+    }
+
+    let gain_out = fixture
+        .command()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_STATS_RETENTION_DAYS", "30")
+        .env("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "7")
+        .args(["rtk", "gain"])
+        .output()
+        .unwrap();
+    assert!(
+        gain_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&gain_out.stderr)
+    );
+
+    {
+        let conn = rusqlite::Connection::open(&stats_db).unwrap();
+        let (total, max_id): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM stats",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(total, StatsRecorder::AUTO_RETENTION_INTERVAL);
+        assert_eq!(max_id, StatsRecorder::AUTO_RETENTION_INTERVAL);
+
+        let (old_before, old_after): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT before_text, after_text FROM stats WHERE id = ?1",
+                [expired_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(old_before.as_deref(), Some("old-before"));
+        assert_eq!(old_after.as_deref(), Some("old-after"));
+
+        let (mid_before, mid_after): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT before_text, after_text FROM stats WHERE id = ?1",
+                [mid_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(mid_before.as_deref(), Some("mid-before"));
+        assert_eq!(mid_after.as_deref(), Some("mid-after"));
+
+        let maintenance_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'stats_maintenance'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(maintenance_exists, 0);
+    }
+
+    // A saving RTK command writes row 65 and triggers sampled cleanup.
+    let ls_out = fixture
+        .command()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_STATS_RETENTION_DAYS", "30")
+        .env("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "7")
+        .args(["rtk", "ls"])
+        .arg(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        ls_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ls_out.stderr)
+    );
+    assert!(
+        ls_out.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&ls_out.stderr)
+    );
+
+    {
+        let conn = rusqlite::Connection::open(&stats_db).unwrap();
+        let remaining_expired: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stats WHERE id = ?1",
+                [expired_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_expired, 0);
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stats", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, StatsRecorder::AUTO_RETENTION_INTERVAL);
+
+        let (mid_before, mid_after): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT before_text, after_text FROM stats WHERE id = ?1",
+                [mid_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(mid_before.is_none());
+        assert!(mid_after.is_none());
+
+        let watermark: i64 = conn
+            .query_row(
+                "SELECT last_retention_row_id FROM stats_maintenance WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(watermark, StatsRecorder::AUTO_RETENTION_INTERVAL + 1);
+    }
+}

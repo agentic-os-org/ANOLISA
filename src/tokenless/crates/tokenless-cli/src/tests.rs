@@ -94,6 +94,8 @@ struct PersistConfigGuard {
     prev_stats: Option<std::ffi::OsString>,
     prev_sls: Option<std::ffi::OsString>,
     prev_compression: Option<std::ffi::OsString>,
+    prev_retention: Option<std::ffi::OsString>,
+    prev_text_retention: Option<std::ffi::OsString>,
 }
 
 impl PersistConfigGuard {
@@ -111,10 +113,14 @@ impl PersistConfigGuard {
         let prev_stats = std::env::var_os("TOKENLESS_STATS_ENABLED");
         let prev_sls = std::env::var_os("TOKENLESS_SLS_ENABLED");
         let prev_compression = std::env::var_os("TOKENLESS_COMPRESSION_ENABLED");
+        let prev_retention = std::env::var_os("TOKENLESS_STATS_RETENTION_DAYS");
+        let prev_text_retention = std::env::var_os("TOKENLESS_STATS_TEXT_RETENTION_DAYS");
         unsafe {
             std::env::set_var("TOKENLESS_STATS_ENABLED", stats_env);
             std::env::set_var("TOKENLESS_SLS_ENABLED", sls_env);
             std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", compression_env);
+            std::env::remove_var("TOKENLESS_STATS_RETENTION_DAYS");
+            std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS");
         }
         Self {
             _lock: lock,
@@ -123,6 +129,8 @@ impl PersistConfigGuard {
             prev_stats,
             prev_sls,
             prev_compression,
+            prev_retention,
+            prev_text_retention,
         }
     }
 
@@ -146,6 +154,14 @@ impl Drop for PersistConfigGuard {
             match &self.prev_compression {
                 Some(v) => std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", v),
                 None => std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED"),
+            }
+            match &self.prev_retention {
+                Some(v) => std::env::set_var("TOKENLESS_STATS_RETENTION_DAYS", v),
+                None => std::env::remove_var("TOKENLESS_STATS_RETENTION_DAYS"),
+            }
+            match &self.prev_text_retention {
+                Some(v) => std::env::set_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS", v),
+                None => std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS"),
             }
         }
     }
@@ -1408,6 +1424,52 @@ fn run_command_stats_status() {
 }
 
 #[test]
+fn run_command_stats_status_reads_config_file_retention() {
+    let _cfg = PersistConfigGuard::with_file_and_env(
+        r#"{"stats_enabled":true,"sls_enabled":false,"stats_retention_days":45,"stats_text_retention_days":1}"#,
+        "",
+        "",
+        "",
+    );
+    let config = TokenlessConfig::load();
+    assert_eq!(config.stats_retention_days(), Some(45));
+    assert_eq!(config.stats_text_retention_days(), Some(1));
+    assert_eq!(TokenlessConfig::file_retention_keys_present(), (true, true));
+    assert_eq!(retention_source(None, false), "default");
+    assert_eq!(retention_source(None, true), "config file");
+    assert_eq!(retention_source(Some(None), false), "env override");
+    assert_eq!(retention_source(Some(Some(10)), true), "env override");
+    assert_eq!(
+        format_retention_days(config.stats_retention_days()),
+        "45 days"
+    );
+    assert_eq!(
+        format_retention_days(config.stats_text_retention_days()),
+        "1 day"
+    );
+    assert!(run_command(Commands::Stats(StatsCommands::Status)).is_ok());
+}
+
+#[test]
+fn run_command_stats_disable_preserves_explicit_retention_opt_out() {
+    let guard = PersistConfigGuard::with_file_and_env(
+        r#"{"stats_enabled":true,"stats_retention_days":0,"stats_text_retention_days":null}"#,
+        "",
+        "",
+        "",
+    );
+    assert_eq!(TokenlessConfig::file_retention_keys_present(), (true, true));
+    run_command(Commands::Stats(StatsCommands::Disable)).unwrap();
+    let persisted = guard.read_persisted();
+    assert!(!persisted.stats_enabled);
+    assert_eq!(persisted.stats_retention_days(), None);
+    assert_eq!(persisted.stats_text_retention_days(), None);
+    let reloaded = TokenlessConfig::load();
+    assert_eq!(reloaded.stats_retention_days(), None);
+    assert_eq!(reloaded.stats_text_retention_days(), None);
+}
+
+#[test]
 fn stats_persist_snapshot_enable_keeps_file_compression_and_sls() {
     // A/B dry-run sets TOKENLESS_COMPRESSION_ENABLED=0 in the process, but
     // `stats enable` must write the on-disk compression/SLS values, not the
@@ -1416,11 +1478,15 @@ fn stats_persist_snapshot_enable_keeps_file_compression_and_sls() {
         stats_enabled: false,
         sls_enabled: true,
         compression_enabled: true,
+        stats_retention_days: Some(30),
+        stats_text_retention_days: Some(7),
     };
     let persisted = stats_persist_snapshot(file, true);
     assert!(persisted.stats_enabled);
     assert!(persisted.sls_enabled);
     assert!(persisted.compression_enabled);
+    assert_eq!(persisted.stats_retention_days, Some(30));
+    assert_eq!(persisted.stats_text_retention_days, Some(7));
 }
 
 #[test]
@@ -1429,6 +1495,7 @@ fn stats_persist_snapshot_disable_keeps_file_compression_and_sls() {
         stats_enabled: true,
         sls_enabled: false,
         compression_enabled: false,
+        ..TokenlessConfig::default()
     };
     let persisted = stats_persist_snapshot(file, false);
     assert!(!persisted.stats_enabled);
@@ -1441,16 +1508,22 @@ fn run_command_stats_enable_does_not_persist_env_overrides() {
     // Drive the production Enable arm (load_from_file + save). Replacing
     // load_from_file() with load() would write the session env values.
     let guard = PersistConfigGuard::with_file_and_env(
-        "{\"stats_enabled\":false,\"sls_enabled\":true,\"compression_enabled\":true}",
+        "{\"stats_enabled\":false,\"sls_enabled\":true,\"compression_enabled\":true,\"stats_retention_days\":90,\"stats_text_retention_days\":14}",
         "0",
         "0",
         "0",
     );
+    unsafe {
+        std::env::set_var("TOKENLESS_STATS_RETENTION_DAYS", "3");
+        std::env::set_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS", "1");
+    }
     run_command(Commands::Stats(StatsCommands::Enable)).unwrap();
     let persisted = guard.read_persisted();
     assert!(persisted.stats_enabled);
     assert!(persisted.sls_enabled);
     assert!(persisted.compression_enabled);
+    assert_eq!(persisted.stats_retention_days, Some(90));
+    assert_eq!(persisted.stats_text_retention_days, Some(14));
 }
 
 #[test]
@@ -1466,6 +1539,127 @@ fn run_command_stats_disable_does_not_persist_env_overrides() {
     assert!(!persisted.stats_enabled);
     assert!(!persisted.sls_enabled);
     assert!(!persisted.compression_enabled);
+}
+
+#[test]
+fn parse_positive_u32_rejects_zero_and_non_numeric() {
+    assert_eq!(parse_positive_u32("1"), Ok(1));
+    assert_eq!(parse_positive_u32("30"), Ok(30));
+    assert!(parse_positive_u32("0").is_err());
+    assert!(parse_positive_u32("-1").is_err());
+    assert!(parse_positive_u32("abc").is_err());
+}
+
+#[test]
+fn run_command_stats_prune_requires_days_or_configured_policy() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    struct RetentionEnvOverrideGuard {
+        _dir: tempfile::TempDir,
+        prev_retention: Option<std::ffi::OsString>,
+        prev_text_retention: Option<std::ffi::OsString>,
+    }
+    impl Drop for RetentionEnvOverrideGuard {
+        fn drop(&mut self) {
+            TokenlessConfig::override_config_path_for_tests(None);
+            unsafe {
+                match &self.prev_retention {
+                    Some(v) => std::env::set_var("TOKENLESS_STATS_RETENTION_DAYS", v),
+                    None => std::env::remove_var("TOKENLESS_STATS_RETENTION_DAYS"),
+                }
+                match &self.prev_text_retention {
+                    Some(v) => std::env::set_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS", v),
+                    None => std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS"),
+                }
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    std::fs::write(&cfg_path, "{}").unwrap();
+    TokenlessConfig::override_config_path_for_tests(Some(cfg_path.clone()));
+    let prev_retention = std::env::var_os("TOKENLESS_STATS_RETENTION_DAYS");
+    let prev_text_retention = std::env::var_os("TOKENLESS_STATS_TEXT_RETENTION_DAYS");
+    unsafe {
+        std::env::remove_var("TOKENLESS_STATS_RETENTION_DAYS");
+        std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS");
+    }
+    let _cfg_guard = RetentionEnvOverrideGuard {
+        _dir: dir,
+        prev_retention,
+        prev_text_retention,
+    };
+
+    // With an empty config file, built-in default 30d/7d policy applies cleanly.
+    assert!(
+        run_command(Commands::Stats(StatsCommands::Prune {
+            older_than: None,
+            trim_text: false,
+            compact: false,
+            json: false,
+        }))
+        .is_ok()
+    );
+    assert!(
+        run_command(Commands::Stats(StatsCommands::Prune {
+            older_than: None,
+            trim_text: true,
+            compact: false,
+            json: false,
+        }))
+        .is_ok()
+    );
+
+    // Explicit disable in config.json rejects `stats prune` without --older-than.
+    std::fs::write(
+        &cfg_path,
+        r#"{"stats_retention_days":0,"stats_text_retention_days":0}"#,
+    )
+    .unwrap();
+
+    let err = run_command(Commands::Stats(StatsCommands::Prune {
+        older_than: None,
+        trim_text: false,
+        compact: false,
+        json: false,
+    }))
+    .unwrap_err();
+    assert_eq!(err.1, 2);
+    assert!(err.0.contains("--older-than"), "{}", err.0);
+
+    let trim_err = run_command(Commands::Stats(StatsCommands::Prune {
+        older_than: None,
+        trim_text: true,
+        compact: false,
+        json: false,
+    }))
+    .unwrap_err();
+    assert_eq!(trim_err.1, 2);
+    assert!(
+        trim_err.0.contains("stats_text_retention_days"),
+        "{}",
+        trim_err.0
+    );
+}
+
+#[test]
+fn run_command_stats_prune_and_compact_succeed() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    assert!(
+        run_command(Commands::Stats(StatsCommands::Prune {
+            older_than: Some(30),
+            trim_text: true,
+            compact: true,
+            json: true,
+        }))
+        .is_ok()
+    );
+    assert!(run_command(Commands::Stats(StatsCommands::Compact { json: true })).is_ok());
 }
 
 #[test]

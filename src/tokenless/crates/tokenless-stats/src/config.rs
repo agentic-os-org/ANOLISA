@@ -1,14 +1,30 @@
 //! Configuration for tokenless.
 //!
-//! Stored at `~/.tokenless/config.json`. Controls global feature flags.
+//! Stored at `~/.tokenless/config.json`. Controls global feature flags and
+//! optional statistics retention windows.
 //! Environment variables `TOKENLESS_STATS_ENABLED`, `TOKENLESS_SLS_ENABLED`,
-//! and `TOKENLESS_COMPRESSION_ENABLED` override file config at runtime.
+//! `TOKENLESS_COMPRESSION_ENABLED`, `TOKENLESS_STATS_RETENTION_DAYS`, and
+//! `TOKENLESS_STATS_TEXT_RETENTION_DAYS` override file config at runtime.
 //! `tokenless stats enable` / `disable` persist from the file snapshot so
 //! those session overrides are not written back.
 
+use crate::recorder::RetentionPolicy;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::path::PathBuf;
+
+/// Built-in default automatic retention window in days for `stats.db` rows.
+pub const DEFAULT_STATS_RETENTION_DAYS: u32 = RetentionPolicy::DEFAULT_ROW_RETENTION_DAYS;
+/// Built-in default automatic retention window in days for stored text payloads in `stats.db`.
+pub const DEFAULT_STATS_TEXT_RETENTION_DAYS: u32 = RetentionPolicy::DEFAULT_TEXT_RETENTION_DAYS;
+
+fn default_stats_retention_days() -> Option<u32> {
+    Some(DEFAULT_STATS_RETENTION_DAYS)
+}
+
+fn default_stats_text_retention_days() -> Option<u32> {
+    Some(DEFAULT_STATS_TEXT_RETENTION_DAYS)
+}
 
 thread_local! {
     /// Test-only redirect for [`TokenlessConfig::config_path`].
@@ -34,6 +50,17 @@ pub struct TokenlessConfig {
     /// enabling A/B comparison of the same task with/without compression.
     #[serde(default = "default_true")]
     pub compression_enabled: bool,
+    /// Optional automatic retention window in days for `stats.db` rows
+    /// (plus orphaned `compression_artifacts` and old `retrieve_events`).
+    /// `None` or `0` disables automatic row expiry (default: `Some(30)`).
+    #[serde(default = "default_stats_retention_days")]
+    pub stats_retention_days: Option<u32>,
+    /// Optional automatic retention window in days for full text payloads
+    /// (`before_text`, `after_text`, `before_output`, `after_output`) in
+    /// `stats.db`. Older rows retain numeric counts and metadata with `NULL`
+    /// text. `None` or `0` disables automatic text trimming (default: `Some(7)`).
+    #[serde(default = "default_stats_text_retention_days")]
+    pub stats_text_retention_days: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -46,8 +73,38 @@ impl Default for TokenlessConfig {
             stats_enabled: true,
             sls_enabled: true,
             compression_enabled: true,
+            stats_retention_days: default_stats_retention_days(),
+            stats_text_retention_days: default_stats_text_retention_days(),
         }
     }
+}
+
+/// Parse an optional retention-days environment variable override.
+///
+/// - `None`, empty/whitespace-only, or unparseable values return `None` (no
+///   override; fall back to `config.json` or default).
+/// - `"0"` returns `Some(None)` (explicitly disables retention, overriding a
+///   non-zero value in `config.json`).
+/// - A positive integer returns `Some(Some(days))`.
+pub fn parse_retention_env_override(raw: Option<&str>) -> Option<Option<u32>> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u32>() {
+        Ok(0) => Some(None),
+        Ok(days) => Some(Some(days)),
+        Err(_) => None,
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct ConfigEnvOverrides<'a> {
+    stats_enabled: Option<&'a str>,
+    sls_enabled: Option<&'a str>,
+    compression_enabled: Option<&'a str>,
+    stats_retention_days: Option<&'a str>,
+    stats_text_retention_days: Option<&'a str>,
 }
 
 /// Parse a boolean env value: "1", "true", "yes" (case-insensitive) → true.
@@ -92,39 +149,66 @@ impl TokenlessConfig {
         Self::config_path().exists()
     }
 
+    /// Inspect whether `stats_retention_days` and `stats_text_retention_days`
+    /// keys are explicitly present in a valid on-disk config file.
+    ///
+    /// Returns `(false, false)` when the config file cannot be read or cannot
+    /// be parsed as [`TokenlessConfig`] (matching [`Self::load`]'s fallback).
+    pub fn file_retention_keys_present() -> (bool, bool) {
+        let Ok(raw) = std::fs::read_to_string(Self::config_path()) else {
+            return (false, false);
+        };
+        if serde_json::from_str::<TokenlessConfig>(&raw).is_err() {
+            return (false, false);
+        }
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(serde_json::Value::Object(map)) => (
+                map.contains_key("stats_retention_days"),
+                map.contains_key("stats_text_retention_days"),
+            ),
+            _ => (false, false),
+        }
+    }
+
     /// Load config with explicit env overrides for all toggles and optional custom path.
     ///
-    /// Priority (per toggle): env > config.json file > default.
+    /// Priority (per setting): env > config.json file > default.
     /// Empty env var values are normalized to None (treated as unset).
     ///
-    /// All env combinations that leave at least one toggle unset will attempt to
+    /// All env combinations that leave at least one setting unset will attempt to
     /// read the config file so the file value can fill the gap. IO failures
     /// (missing file, unreadable path, corrupt NFS mount, etc.) are silently
     /// ignored and the built-in defaults take over — `env > default` priority is
     /// preserved even when the file cannot be read.
     ///
-    /// Fast path: when all three env vars are present (none is None after
-    /// normalization), the file read is skipped entirely — every toggle is already
-    /// determined by the env values, so opening the config file would have no
-    /// effect. This avoids latency on slow or broken mounts in env-only
-    /// deployments.
+    /// Fast path: when all five settings are determined by env vars, the file
+    /// read is skipped entirely — every setting is already determined, so
+    /// opening the config file would have no effect. This avoids latency on
+    /// slow or broken mounts in env-only deployments.
     pub fn load_with_envs_and_path(
         stats_env: Option<&str>,
         sls_env: Option<&str>,
         compression_env: Option<&str>,
         path: Option<&PathBuf>,
     ) -> Self {
-        Self::load_with_envs_and_file_reader(stats_env, sls_env, compression_env, path, |p| {
-            std::fs::read_to_string(p)
-        })
+        Self::load_with_all_envs_and_file_reader(
+            ConfigEnvOverrides {
+                stats_enabled: stats_env,
+                sls_enabled: sls_env,
+                compression_enabled: compression_env,
+                stats_retention_days: None,
+                stats_text_retention_days: None,
+            },
+            path,
+            |p| std::fs::read_to_string(p),
+        )
     }
 
     /// Core logic of [`TokenlessConfig::load_with_envs_and_path`] with an
     /// injectable file reader. Production always reads via
     /// [`std::fs::read_to_string`]; tests inject a recording reader so they can
-    /// assert whether the config file read was attempted at all — the returned
-    /// config alone cannot distinguish the fast path from a failed read when
-    /// every toggle is already determined by env.
+    /// assert whether the config file read was attempted at all.
+    #[cfg(test)]
     fn load_with_envs_and_file_reader(
         stats_env: Option<&str>,
         sls_env: Option<&str>,
@@ -132,17 +216,45 @@ impl TokenlessConfig {
         path: Option<&PathBuf>,
         read_file: impl FnOnce(&std::path::Path) -> std::io::Result<String>,
     ) -> Self {
-        // Normalize empty strings to None — an empty env var means "unset".
-        let stats_env = stats_env.filter(|v| !v.is_empty());
-        let sls_env = sls_env.filter(|v| !v.is_empty());
-        let compression_env = compression_env.filter(|v| !v.is_empty());
+        Self::load_with_all_envs_and_file_reader(
+            ConfigEnvOverrides {
+                stats_enabled: stats_env,
+                sls_enabled: sls_env,
+                compression_enabled: compression_env,
+                stats_retention_days: None,
+                stats_text_retention_days: None,
+            },
+            path,
+            read_file,
+        )
+    }
 
-        // Fast path: all three toggles are determined by env — no file read needed.
-        if let (Some(s), Some(sl), Some(c)) = (stats_env, sls_env, compression_env) {
+    fn load_with_all_envs_and_file_reader(
+        envs: ConfigEnvOverrides<'_>,
+        path: Option<&PathBuf>,
+        read_file: impl FnOnce(&std::path::Path) -> std::io::Result<String>,
+    ) -> Self {
+        // Normalize empty strings to None — an empty env var means "unset".
+        let stats_env = envs.stats_enabled.filter(|v| !v.is_empty());
+        let sls_env = envs.sls_enabled.filter(|v| !v.is_empty());
+        let compression_env = envs.compression_enabled.filter(|v| !v.is_empty());
+        let retention_env = parse_retention_env_override(envs.stats_retention_days);
+        let text_retention_env = parse_retention_env_override(envs.stats_text_retention_days);
+
+        // Fast path: all five settings are determined by env — no file read needed.
+        if let (Some(s), Some(sl), Some(c), Some(r), Some(tr)) = (
+            stats_env,
+            sls_env,
+            compression_env,
+            retention_env,
+            text_retention_env,
+        ) {
             return Self {
                 stats_enabled: parse_env_bool(s),
                 sls_enabled: parse_env_bool(sl),
                 compression_enabled: parse_env_bool(c),
+                stats_retention_days: r,
+                stats_text_retention_days: tr,
             };
         }
 
@@ -153,28 +265,19 @@ impl TokenlessConfig {
             .and_then(|s| serde_json::from_str::<TokenlessConfig>(&s).ok())
             .unwrap_or_default();
 
-        let stats_enabled = if let Some(val) = stats_env {
-            parse_env_bool(val)
-        } else {
-            base.stats_enabled
-        };
-
-        let sls_enabled = if let Some(val) = sls_env {
-            parse_env_bool(val)
-        } else {
-            base.sls_enabled
-        };
-
-        let compression_enabled = if let Some(val) = compression_env {
-            parse_env_bool(val)
-        } else {
-            base.compression_enabled
-        };
+        let stats_enabled = stats_env.map_or(base.stats_enabled, parse_env_bool);
+        let sls_enabled = sls_env.map_or(base.sls_enabled, parse_env_bool);
+        let compression_enabled = compression_env.map_or(base.compression_enabled, parse_env_bool);
+        let stats_retention_days = retention_env.unwrap_or_else(|| base.stats_retention_days());
+        let stats_text_retention_days =
+            text_retention_env.unwrap_or_else(|| base.stats_text_retention_days());
 
         Self {
             stats_enabled,
             sls_enabled,
             compression_enabled,
+            stats_retention_days,
+            stats_text_retention_days,
         }
     }
 
@@ -196,23 +299,24 @@ impl TokenlessConfig {
     }
 
     /// Load config: env vars override file config, file config overrides defaults.
-    /// Priority: env > config.json file > default (per toggle)
+    /// Priority: env > config.json file > default (per setting)
     /// Empty env var values are treated as unset (fall through to file config).
     pub fn load() -> Self {
-        let stats_env = std::env::var("TOKENLESS_STATS_ENABLED")
-            .ok()
-            .filter(|v| !v.is_empty());
-        let sls_env = std::env::var("TOKENLESS_SLS_ENABLED")
-            .ok()
-            .filter(|v| !v.is_empty());
-        let compression_env = std::env::var("TOKENLESS_COMPRESSION_ENABLED")
-            .ok()
-            .filter(|v| !v.is_empty());
-        Self::load_with_envs_and_path(
-            stats_env.as_deref(),
-            sls_env.as_deref(),
-            compression_env.as_deref(),
+        let stats_env = std::env::var("TOKENLESS_STATS_ENABLED").ok();
+        let sls_env = std::env::var("TOKENLESS_SLS_ENABLED").ok();
+        let compression_env = std::env::var("TOKENLESS_COMPRESSION_ENABLED").ok();
+        let retention_env = std::env::var("TOKENLESS_STATS_RETENTION_DAYS").ok();
+        let text_retention_env = std::env::var("TOKENLESS_STATS_TEXT_RETENTION_DAYS").ok();
+        Self::load_with_all_envs_and_file_reader(
+            ConfigEnvOverrides {
+                stats_enabled: stats_env.as_deref(),
+                sls_enabled: sls_env.as_deref(),
+                compression_enabled: compression_env.as_deref(),
+                stats_retention_days: retention_env.as_deref(),
+                stats_text_retention_days: text_retention_env.as_deref(),
+            },
             None,
+            |p| std::fs::read_to_string(p),
         )
     }
 
@@ -223,7 +327,9 @@ impl TokenlessConfig {
     /// `TOKENLESS_COMPRESSION_ENABLED` into `config.json`, turning a
     /// temporary A/B dry-run into a durable setting.
     pub fn load_from_file() -> Self {
-        Self::load_with_envs_and_path(None, None, None, None)
+        Self::load_with_all_envs_and_file_reader(ConfigEnvOverrides::default(), None, |p| {
+            std::fs::read_to_string(p)
+        })
     }
 
     /// Save config to disk.
@@ -258,6 +364,24 @@ impl TokenlessConfig {
     /// When false, tokenless runs in dry-run mode.
     pub fn is_compression_enabled(&self) -> bool {
         self.compression_enabled
+    }
+
+    /// Configured automatic stats row retention window in days (`None` when disabled).
+    pub fn stats_retention_days(&self) -> Option<u32> {
+        self.stats_retention_days.filter(|&days| days > 0)
+    }
+
+    /// Configured automatic text-payload retention window in days (`None` when disabled).
+    pub fn stats_text_retention_days(&self) -> Option<u32> {
+        self.stats_text_retention_days.filter(|&days| days > 0)
+    }
+
+    /// Returns the effective [`RetentionPolicy`] for `stats.db`.
+    pub fn retention_policy(&self) -> RetentionPolicy {
+        RetentionPolicy {
+            row_retention_days: self.stats_retention_days(),
+            text_retention_days: self.stats_text_retention_days(),
+        }
     }
 }
 

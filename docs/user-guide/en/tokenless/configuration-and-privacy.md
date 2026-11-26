@@ -12,9 +12,9 @@ In the normal path, each toggle uses:
 Environment variable > ~/.tokenless/config.json > default
 ```
 
-An empty environment variable is treated as unset. For Boolean environment variables, `1`, `true`, and `yes` are true, case-insensitively; any other non-empty value is false. Prefer explicit `true` or `false` values for readability.
+An empty environment variable is treated as unset. For Boolean environment variables, `1`, `true`, and `yes` are true, case-insensitively; any other non-empty value is false. Prefer explicit `true` or `false` values for readability. For retention day environment variables (`TOKENLESS_STATS_RETENTION_DAYS`, `TOKENLESS_STATS_TEXT_RETENTION_DAYS`), a positive integer sets the retention window in days, `0` disables retention (overriding `config.json`), and empty or non-integer values fall back to `config.json` or the default.
 
-There is one current implementation exception: when both `TOKENLESS_STATS_ENABLED` and `TOKENLESS_SLS_ENABLED` are non-empty, the config file is skipped completely. In that branch, compression uses `TOKENLESS_COMPRESSION_ENABLED` when set and otherwise defaults to `true`. If you export both recording variables, export the compression variable explicitly as well.
+There is one current implementation exception: when all five settings (`TOKENLESS_STATS_ENABLED`, `TOKENLESS_SLS_ENABLED`, `TOKENLESS_COMPRESSION_ENABLED`, `TOKENLESS_STATS_RETENTION_DAYS`, and `TOKENLESS_STATS_TEXT_RETENTION_DAYS`) are supplied as valid non-empty environment overrides, the config file is skipped completely because every setting is already determined. Otherwise, Tokenless reads `~/.tokenless/config.json` to fill any unset option.
 
 ## Configuration file
 
@@ -30,11 +30,13 @@ Complete example:
 {
   "stats_enabled": true,
   "sls_enabled": true,
-  "compression_enabled": true
+  "compression_enabled": true,
+  "stats_retention_days": 30,
+  "stats_text_retention_days": 7
 }
 ```
 
-A missing, unreadable, or invalid JSON file is silently replaced by the all-`true` defaults in memory. Validate a manually edited file with:
+A missing, unreadable, or invalid JSON file is silently replaced by the built-in defaults (`true` for toggles, `30` days for `stats_retention_days`, and `7` days for `stats_text_retention_days`) in memory. Validate a manually edited file with:
 
 ```bash
 jq . ~/.tokenless/config.json
@@ -45,6 +47,8 @@ jq . ~/.tokenless/config.json
 | `stats_enabled` | `true` | Writes complete before/after text and metrics to local SQLite |
 | `sls_enabled` | `true` | Appends a metrics-only record when the target JSONL file exists |
 | `compression_enabled` | `true` | Returns compressed output when true; false runs dry-run and returns the original |
+| `stats_retention_days` | `30` | Positive days enable sampled cleanup (every 64 rows across CLI compression, `tokenless rtk`, and `TokenlessRuntime` / Python SDK) deleting expired `stats` rows, their `compression_artifacts`, and expired `retrieve_events`; set `0` or `null` to disable (unlimited) |
+| `stats_text_retention_days` | `7` | Positive days enable sampled cleanup clearing stored before/after text payloads on older `stats` rows while preserving numeric metrics and summaries; set `0` or `null` to disable (unlimited) |
 
 When Tokenless writes the configuration, it restricts the mode to `0600`. Confirm the mode after creating it manually:
 
@@ -355,6 +359,8 @@ Local region compression and reconstruction have been verified on finite samples
 | `TOKENLESS_STATS_ENABLED` | Override local statistics | Does not affect SLS or Stash |
 | `TOKENLESS_SLS_ENABLED` | Override SLS metrics | Does not affect local statistics |
 | `TOKENLESS_COMPRESSION_ENABLED` | Override active compression | False is dry-run, not a full stop |
+| `TOKENLESS_STATS_RETENTION_DAYS` | Override row retention window in days for `stats.db` | Positive integer sets days; `0` disables (`config.json` overridden); invalid/empty falls back |
+| `TOKENLESS_STATS_TEXT_RETENTION_DAYS` | Override text-payload retention window in days for `stats.db` | Positive integer sets days; `0` disables (`config.json` overridden); invalid/empty falls back |
 | `TOKENLESS_DATA_DIR` | Directory containing `stats.db`, `stash.db` and `rtk-outcomes.db` | Any accessible absolute directory except filesystem root; no parent traversal |
 | `TOKENLESS_STATS_DB` | Override the statistics database | Must be under the real user home or selected data directory |
 | `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
@@ -411,9 +417,9 @@ them from source control or backups as required by your data policy.
 
 | Data | Default path | Default content | Retention | Stop new data |
 |------|--------------|-----------------|-----------|---------------|
-| Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | No automatic TTL; retained until cleared | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, the complete original of rendered HTML pages, and each HTML value rendered inside JSON | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
-| Configuration | `~/.tokenless/config.json` | Three Boolean toggles | Persistent | Not applicable |
+| Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | Default 30 days for rows/events and 7 days for stored text payloads (sampled cleanup every 64 rows across CLI compression, `tokenless rtk`, and `TokenlessRuntime` / Python SDK); override via `stats_retention_days` / `stats_text_retention_days` (`0` or `null` for unlimited) or manual `tokenless stats prune` / `clear` / `compact` | `tokenless stats disable` |
+| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, the complete original of rendered HTML pages, and each HTML value rendered inside JSON | One-hour TTL and 10,000 live entries; expired rows are purged lazily with non-blocking WAL checkpointing after batch or large-WAL purges | CLI: `--no-stash`; agent: disable the adapter |
+| Configuration | `~/.tokenless/config.json` | Three Boolean toggles and optional retention day settings | Persistent | Not applicable |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | Metrics and identifiers, no compressed source text | Managed by SLS/Logtail infrastructure | `TOKENLESS_SLS_ENABLED=0` or config false |
 
 ### Sensitivity of local statistics
@@ -490,13 +496,29 @@ Restart the agent afterwards. Setting only `compression_enabled=false` does not 
 
 ## Clear data
 
-Clear local statistics records:
+Prune old local statistics or clear old stored text payloads non-destructively, then reclaim freed disk pages:
+
+```bash
+# Delete records, orphaned artifacts, and retrieve events older than 30 days
+tokenless stats prune --older-than 30 --compact
+
+# Clear only stored before/after text older than 7 days while keeping summary counts
+tokenless stats prune --older-than 7 --trim-text --compact
+
+# Apply configured stats_retention_days / stats_text_retention_days immediately
+tokenless stats prune --compact
+
+# Reclaim freed pages and truncate stats.db-wal explicitly
+tokenless stats compact
+```
+
+Clear all local statistics records:
 
 ```bash
 tokenless stats clear --yes
 ```
 
-This clears records from the statistics database resolved in the current environment, but it does not remove the database file or SQLite sidecars. Tokenless currently has no Stash clear subcommand. For irreversible local-database removal:
+`stats clear` deletes all records and attempts best-effort WAL truncation plus `VACUUM` compaction (preserving `0600` permissions on `stats.db`), without removing the database file or SQLite sidecars. Tokenless currently has no Stash clear subcommand. For irreversible local-database removal:
 
 1. Disable every Tokenless adapter.
 2. Exit agents and Tokenless processes that may still use the databases.

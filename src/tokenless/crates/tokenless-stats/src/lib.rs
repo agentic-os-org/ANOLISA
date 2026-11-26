@@ -21,7 +21,10 @@ pub mod trace;
 
 pub use record::{CompressionMode, OperationType, StatsRecord};
 
-pub use recorder::{RetrieveTotals, StatsError, StatsRecorder, StatsResult, StatsSummary};
+pub use recorder::{
+    PruneReport, ReclaimReport, RetentionPolicy, RetentionSnapshot, RetrieveTotals, StatsError,
+    StatsRecorder, StatsResult, StatsSummary,
+};
 
 pub use query::{
     format_compare, format_compare_json, format_list, format_show, format_summary,

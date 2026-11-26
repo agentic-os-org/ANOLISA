@@ -1196,3 +1196,209 @@ fn retrieve_recorded_logs_each_store_outcome() {
     assert_eq!(totals.errors, 1);
     assert!(totals.retrieved_tokens > 0);
 }
+
+static RUNTIME_RETENTION_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct RuntimeRetentionGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    config_path: PathBuf,
+    prev_retention: Option<std::ffi::OsString>,
+    prev_text_retention: Option<std::ffi::OsString>,
+}
+
+impl RuntimeRetentionGuard {
+    fn new(
+        config_json: &str,
+        retention_env: Option<&str>,
+        text_retention_env: Option<&str>,
+    ) -> Self {
+        let lock = RUNTIME_RETENTION_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        std::fs::write(&config_path, config_json).unwrap();
+        TokenlessConfig::override_config_path_for_tests(Some(config_path.clone()));
+        let prev_retention = std::env::var_os("TOKENLESS_STATS_RETENTION_DAYS");
+        let prev_text_retention = std::env::var_os("TOKENLESS_STATS_TEXT_RETENTION_DAYS");
+        unsafe {
+            match retention_env {
+                Some(value) => std::env::set_var("TOKENLESS_STATS_RETENTION_DAYS", value),
+                None => std::env::remove_var("TOKENLESS_STATS_RETENTION_DAYS"),
+            }
+            match text_retention_env {
+                Some(value) => std::env::set_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS", value),
+                None => std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS"),
+            }
+        }
+        Self {
+            _lock: lock,
+            _dir: dir,
+            config_path,
+            prev_retention,
+            prev_text_retention,
+        }
+    }
+}
+
+impl Drop for RuntimeRetentionGuard {
+    fn drop(&mut self) {
+        TokenlessConfig::override_config_path_for_tests(None);
+        unsafe {
+            match &self.prev_retention {
+                Some(value) => std::env::set_var("TOKENLESS_STATS_RETENTION_DAYS", value),
+                None => std::env::remove_var("TOKENLESS_STATS_RETENTION_DAYS"),
+            }
+            match &self.prev_text_retention {
+                Some(value) => std::env::set_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS", value),
+                None => std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS"),
+            }
+        }
+        let _ = &self.config_path;
+    }
+}
+
+fn seed_aged_stats_rows(stats_path: &Path) -> (i64, i64) {
+    let nanos_per_day: i64 = 86_400 * 1_000_000_000;
+    let recorder = StatsRecorder::new(stats_path).unwrap();
+    let expired_id = recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "seed".to_string(),
+                1000,
+                250,
+                400,
+                100,
+            )
+            .with_text("expired-before".to_string(), "expired-after".to_string()),
+        )
+        .unwrap();
+    let mid_id = recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "seed".to_string(),
+                1000,
+                250,
+                400,
+                100,
+            )
+            .with_text("mid-before".to_string(), "mid-after".to_string()),
+        )
+        .unwrap();
+    drop(recorder);
+
+    let conn = rusqlite::Connection::open(stats_path).unwrap();
+    conn.execute(
+        "UPDATE stats SET timestamp_ns = timestamp_ns - ?1 WHERE id = ?2",
+        rusqlite::params![45 * nanos_per_day, expired_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE stats SET timestamp_ns = timestamp_ns - ?1 WHERE id = ?2",
+        rusqlite::params![15 * nanos_per_day, mid_id],
+    )
+    .unwrap();
+    (expired_id, mid_id)
+}
+
+#[test]
+fn runtime_applies_default_stats_retention_on_sampled_writes() {
+    let _guard = RuntimeRetentionGuard::new("{}", None, None);
+    let directory = tempfile::tempdir().unwrap();
+    let stats_path = directory.path().join("stats.db");
+    let (expired_id, mid_id) = seed_aged_stats_rows(&stats_path);
+
+    let runtime = TokenlessRuntime::new(RuntimeConfig {
+        data_dir: Some(directory.path().to_path_buf()),
+        stats_enabled: true,
+        ..RuntimeConfig::default()
+    })
+    .unwrap();
+    let input = serde_json::to_string(&serde_json::json!({
+        "tail": "世界".repeat(300)
+    }))
+    .unwrap();
+    let options = CompressOptions {
+        truncate_strings_at: Some(tokenless_ccr::truncation_suffix_char_len() + 16),
+        require_reversible: true,
+        ..CompressOptions::default()
+    };
+    let total_runtime_writes = (StatsRecorder::AUTO_RETENTION_INTERVAL - 2) as usize;
+    for _ in 0..total_runtime_writes {
+        let result = runtime
+            .compress_response(&input, &options, &Attribution::new("retention-test"))
+            .unwrap();
+        assert!(result.applied());
+    }
+
+    let reopened = StatsRecorder::new(&stats_path).unwrap();
+    assert!(reopened.record_by_id(expired_id).unwrap().is_none());
+    let mid = reopened.record_by_id(mid_id).unwrap().unwrap();
+    assert!(mid.before_text.is_none());
+    assert!(mid.after_text.is_none());
+    assert_eq!(mid.before_tokens, 250);
+    assert_eq!(mid.after_tokens, 100);
+    assert_eq!(
+        reopened.count().unwrap(),
+        (StatsRecorder::AUTO_RETENTION_INTERVAL - 1) as usize
+    );
+}
+
+#[test]
+fn runtime_honors_explicitly_disabled_retention_policy() {
+    for (config_json, retention_env, text_retention_env) in [
+        ("{}", Some("0"), Some("0")),
+        (
+            r#"{"stats_retention_days":0,"stats_text_retention_days":0}"#,
+            None,
+            None,
+        ),
+    ] {
+        let _guard = RuntimeRetentionGuard::new(config_json, retention_env, text_retention_env);
+        let directory = tempfile::tempdir().unwrap();
+        let stats_path = directory.path().join("stats.db");
+        let (expired_id, mid_id) = seed_aged_stats_rows(&stats_path);
+
+        let runtime = TokenlessRuntime::new(RuntimeConfig {
+            data_dir: Some(directory.path().to_path_buf()),
+            stats_enabled: true,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        let input = serde_json::to_string(&serde_json::json!({
+            "tail": "世界".repeat(300)
+        }))
+        .unwrap();
+        let options = CompressOptions {
+            truncate_strings_at: Some(tokenless_ccr::truncation_suffix_char_len() + 16),
+            require_reversible: true,
+            ..CompressOptions::default()
+        };
+        let total_runtime_writes = (StatsRecorder::AUTO_RETENTION_INTERVAL - 2) as usize;
+        for _ in 0..total_runtime_writes {
+            let result = runtime
+                .compress_response(
+                    &input,
+                    &options,
+                    &Attribution::new("retention-disabled-test"),
+                )
+                .unwrap();
+            assert!(result.applied());
+        }
+
+        let reopened = StatsRecorder::new(&stats_path).unwrap();
+        let expired = reopened.record_by_id(expired_id).unwrap().unwrap();
+        assert_eq!(expired.before_text.as_deref(), Some("expired-before"));
+        assert_eq!(expired.after_text.as_deref(), Some("expired-after"));
+        let mid = reopened.record_by_id(mid_id).unwrap().unwrap();
+        assert_eq!(mid.before_text.as_deref(), Some("mid-before"));
+        assert_eq!(mid.after_text.as_deref(), Some("mid-after"));
+        assert_eq!(
+            reopened.count().unwrap(),
+            StatsRecorder::AUTO_RETENTION_INTERVAL as usize
+        );
+    }
+}

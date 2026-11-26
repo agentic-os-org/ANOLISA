@@ -17,9 +17,10 @@ use tokenless_runtime::{
     record_compression, retrieve_recorded,
 };
 use tokenless_schema::SchemaCompressor;
+use tokenless_stats::config::parse_retention_env_override;
 use tokenless_stats::{
-    CompressionMode, DiffSort, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
-    estimate_tokens,
+    CompressionMode, DiffSort, OperationType, PruneReport, ReclaimReport, RetentionPolicy,
+    StatsRecord, StatsRecorder, TokenlessConfig, estimate_tokens,
 };
 use tokenless_stats::{
     ensure_state_dir, format_compare, format_compare_json, format_diff_report, format_list,
@@ -319,6 +320,27 @@ enum StatsCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Prune old statistics rows or stored text payloads
+    Prune {
+        /// Delete records older than this many days (or clear text when --trim-text is set)
+        #[arg(long, value_name = "DAYS", value_parser = parse_positive_u32)]
+        older_than: Option<u32>,
+        /// Clear old before/after text payloads while keeping numeric metrics and summaries
+        #[arg(long)]
+        trim_text: bool,
+        /// Reclaim freed database space (VACUUM + WAL checkpoint) after pruning
+        #[arg(long)]
+        compact: bool,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reclaim freed database space and truncate the WAL file
+    Compact {
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Clear all statistics
     Clear {
         #[arg(long)]
@@ -349,6 +371,16 @@ fn env_flag(name: &str, default: bool) -> bool {
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
         .parse::<usize>()
+        .map_err(|_| format!("invalid positive integer: {value}"))?;
+    if parsed == 0 {
+        return Err("value must be greater than zero".to_string());
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, String> {
+    let parsed = value
+        .parse::<u32>()
         .map_err(|_| format!("invalid positive integer: {value}"))?;
     if parsed == 0 {
         return Err("value must be greater than zero".to_string());
@@ -521,8 +553,27 @@ fn open_recorder_with(
     StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {e}"), 1))
 }
 
+fn open_recorder_with_retention(
+    paths: &DatabasePathResolver,
+    warn_on_rejected_override: bool,
+    retention: RetentionPolicy,
+) -> Result<StatsRecorder, (String, i32)> {
+    let db_path = get_db_path_with(paths, warn_on_rejected_override)
+        .map_err(|error| (format!("Stats database unavailable: {error}"), 1))?;
+    ensure_db_dir(&db_path)?;
+    StatsRecorder::with_retention(db_path, retention)
+        .map_err(|e| (format!("Failed to open database: {e}"), 1))
+}
+
 fn try_open_recorder(paths: &DatabasePathResolver) -> Option<StatsRecorder> {
-    match open_recorder_with(paths, true) {
+    try_open_recorder_with_retention(paths, RetentionPolicy::default())
+}
+
+fn try_open_recorder_with_retention(
+    paths: &DatabasePathResolver,
+    retention: RetentionPolicy,
+) -> Option<StatsRecorder> {
+    match open_recorder_with_retention(paths, true, retention) {
         Ok(recorder) => Some(recorder),
         Err((message, _)) => {
             warn_soft(&format!(
@@ -772,7 +823,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 .transpose()
                 .map_err(|error| (error, 1))?;
             let recorder = if config.is_stats_enabled() {
-                try_open_recorder(&database_paths)
+                try_open_recorder_with_retention(&database_paths, config.retention_policy())
             } else {
                 None
             };
@@ -1227,6 +1278,66 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         write_stdout(&format_diff_report(&report, color))?;
                     }
                 }
+                StatsCommands::Prune {
+                    older_than,
+                    trim_text,
+                    compact,
+                    json,
+                } => {
+                    enum PruneAction {
+                        Rows(u32),
+                        TrimText(u32),
+                        Policy(RetentionPolicy),
+                    }
+                    let action = match (older_than, trim_text) {
+                        (Some(days), false) => PruneAction::Rows(days),
+                        (Some(days), true) => PruneAction::TrimText(days),
+                        (None, false) => {
+                            let policy = TokenlessConfig::load().retention_policy();
+                            if !policy.is_enabled() {
+                                return Err((
+                                    "Specify --older-than <DAYS>, or configure stats_retention_days / stats_text_retention_days."
+                                        .to_string(),
+                                    2,
+                                ));
+                            }
+                            PruneAction::Policy(policy)
+                        }
+                        (None, true) => {
+                            let Some(days) = TokenlessConfig::load().stats_text_retention_days()
+                            else {
+                                return Err((
+                                    "Specify --older-than <DAYS> with --trim-text, or configure stats_text_retention_days."
+                                        .to_string(),
+                                    2,
+                                ));
+                            };
+                            PruneAction::TrimText(days)
+                        }
+                    };
+                    let recorder = open_recorder()?;
+                    let report = match action {
+                        PruneAction::Rows(days) => recorder.prune_older_than(days),
+                        PruneAction::TrimText(days) => recorder.trim_text_older_than(days),
+                        PruneAction::Policy(policy) => recorder.apply_retention(policy),
+                    }
+                    .map_err(|e| (format!("Failed to prune statistics: {e}"), 1))?;
+                    let reclaim = compact
+                        .then(|| {
+                            recorder.compact().map_err(|e| {
+                                (format!("Failed to compact statistics database: {e}"), 1)
+                            })
+                        })
+                        .transpose()?;
+                    write_prune_output(&report, reclaim.as_ref(), json)?;
+                }
+                StatsCommands::Compact { json } => {
+                    let recorder = open_recorder()?;
+                    let reclaim = recorder
+                        .compact()
+                        .map_err(|e| (format!("Failed to compact statistics database: {e}"), 1))?;
+                    write_compact_output(&reclaim, json)?;
+                }
                 StatsCommands::Clear { yes } => {
                     let recorder = open_recorder()?;
                     if !yes {
@@ -1263,8 +1374,17 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     let sls_env_set = std::env::var("TOKENLESS_SLS_ENABLED")
                         .ok()
                         .filter(|v| !v.is_empty());
+                    let retention_env_raw = std::env::var("TOKENLESS_STATS_RETENTION_DAYS").ok();
+                    let text_retention_env_raw =
+                        std::env::var("TOKENLESS_STATS_TEXT_RETENTION_DAYS").ok();
+                    let retention_env_set =
+                        parse_retention_env_override(retention_env_raw.as_deref());
+                    let text_retention_env_set =
+                        parse_retention_env_override(text_retention_env_raw.as_deref());
                     let config = TokenlessConfig::load();
                     let file_exists = TokenlessConfig::config_file_exists();
+                    let (file_has_retention, file_has_text_retention) =
+                        TokenlessConfig::file_retention_keys_present();
 
                     let stats_state = if config.is_stats_enabled() {
                         "ENABLED"
@@ -1295,6 +1415,22 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         "default"
                     };
                     write_stdout(&format!("SLS recording:   {sls_state} (via {sls_source})"))?;
+
+                    let stats_retention_state =
+                        format_retention_days(config.stats_retention_days());
+                    let stats_retention_source =
+                        retention_source(retention_env_set, file_has_retention);
+                    write_stdout(&format!(
+                        "Stats retention: {stats_retention_state} (via {stats_retention_source})"
+                    ))?;
+
+                    let text_retention_state =
+                        format_retention_days(config.stats_text_retention_days());
+                    let text_retention_source =
+                        retention_source(text_retention_env_set, file_has_text_retention);
+                    write_stdout(&format!(
+                        "Text retention:  {text_retention_state} (via {text_retention_source})"
+                    ))?;
                 }
                 StatsCommands::Enable => {
                     persist_stats_enabled(true)?;
@@ -1414,7 +1550,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         }
         // Defensive: main() hands `rtk` to RTK before the Tokenless parser
         // sees it, so this arm normally does not run.
-        Commands::Rtk { args } => process::exit(rtk::run(RTK_PROGRAM, rtk_args(args))),
+        Commands::Rtk { args } => process::exit(run_rtk_subcommand(args)),
     }
 
     Ok(())
@@ -1519,6 +1655,91 @@ fn stats_persist_snapshot(file_config: TokenlessConfig, enabled: bool) -> Tokenl
     config
 }
 
+fn format_retention_days(days: Option<u32>) -> String {
+    match days {
+        Some(1) => "1 day".to_string(),
+        Some(n) => format!("{n} days"),
+        None => "unlimited".to_string(),
+    }
+}
+
+fn retention_source(env_override: Option<Option<u32>>, in_file: bool) -> &'static str {
+    if env_override.is_some() {
+        "env override"
+    } else if in_file {
+        "config file"
+    } else {
+        "default"
+    }
+}
+
+fn format_reclaim_line(reclaim: &ReclaimReport) -> String {
+    if reclaim.vacuum_completed {
+        format!(
+            "Compacted statistics database: {} -> {} bytes.",
+            reclaim.bytes_before, reclaim.bytes_after
+        )
+    } else {
+        format!(
+            "Compaction deferred (database busy): {} -> {} bytes.",
+            reclaim.bytes_before, reclaim.bytes_after
+        )
+    }
+}
+
+fn write_prune_output(
+    report: &PruneReport,
+    reclaim: Option<&ReclaimReport>,
+    json: bool,
+) -> Result<(), (String, i32)> {
+    if json {
+        let mut payload = serde_json::json!({
+            "schema_version": "1.0",
+            "stats_rows_deleted": report.stats_rows_deleted,
+            "text_rows_trimmed": report.text_rows_trimmed,
+            "artifacts_deleted": report.artifacts_deleted,
+            "retrieve_events_deleted": report.retrieve_events_deleted,
+            "compacted": reclaim.is_some_and(|r| r.vacuum_completed),
+        });
+        if let Some(reclaim) = reclaim
+            && let Some(obj) = payload.as_object_mut()
+        {
+            obj.insert(
+                "reclaim".to_string(),
+                serde_json::to_value(reclaim).unwrap_or_default(),
+            );
+        }
+        let formatted = serde_json::to_string_pretty(&payload)
+            .map_err(|e| (format!("Failed to serialize prune report: {e}"), 1))?;
+        return write_stdout(&formatted);
+    }
+    let mut lines = vec![format!(
+        "Pruned statistics: {} row(s) deleted, {} row(s) text-trimmed, {} orphaned artifact(s) deleted, {} retrieve event(s) deleted.",
+        report.stats_rows_deleted,
+        report.text_rows_trimmed,
+        report.artifacts_deleted,
+        report.retrieve_events_deleted
+    )];
+    if let Some(reclaim) = reclaim {
+        lines.push(format_reclaim_line(reclaim));
+    }
+    write_stdout(&lines.join("\n"))
+}
+
+fn write_compact_output(reclaim: &ReclaimReport, json: bool) -> Result<(), (String, i32)> {
+    if json {
+        let mut payload = serde_json::to_value(reclaim)
+            .map_err(|e| (format!("Failed to serialize compact report: {e}"), 1))?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("schema_version".to_string(), serde_json::json!("1.0"));
+        }
+        let formatted = serde_json::to_string_pretty(&payload)
+            .map_err(|e| (format!("Failed to serialize compact report: {e}"), 1))?;
+        return write_stdout(&formatted);
+    }
+    write_stdout(&format_reclaim_line(reclaim))
+}
+
 /// Record compression stats — best-effort so compression output
 /// is never blocked by database errors.
 ///
@@ -1585,7 +1806,8 @@ fn record_compression_stats(
     // redirected logs) must not turn a fail-soft stats miss into a
     // failed compression command.
     if config.is_stats_enabled()
-        && let Some(recorder) = try_open_recorder(database_paths)
+        && let Some(recorder) =
+            try_open_recorder_with_retention(database_paths, config.retention_policy())
         && let Err(e) = recorder.record(&record)
     {
         warn_soft(&format!(
@@ -1615,6 +1837,45 @@ fn report_fatal(message: &str) {
     let _ = stderr.flush();
 }
 
+struct PostRtkRetentionContext {
+    db_path: PathBuf,
+    policy: RetentionPolicy,
+    before_snapshot: tokenless_stats::RetentionSnapshot,
+}
+
+fn prepare_post_rtk_retention() -> Option<PostRtkRetentionContext> {
+    let config = TokenlessConfig::load();
+    if !config.is_stats_enabled() {
+        return None;
+    }
+    let policy = config.retention_policy();
+    if !policy.is_enabled() {
+        return None;
+    }
+    let resolver = DatabasePathResolver::default();
+    let db_path = get_db_path_with(&resolver, false).ok()?;
+    let before_snapshot = StatsRecorder::read_retention_snapshot(&db_path).ok()?;
+    Some(PostRtkRetentionContext {
+        db_path,
+        policy,
+        before_snapshot,
+    })
+}
+
+fn run_rtk_subcommand(args: impl IntoIterator<Item = OsString>) -> i32 {
+    let retention_ctx = prepare_post_rtk_retention();
+    let status = rtk::run(RTK_PROGRAM, rtk_args(args));
+    if let Some(ctx) = retention_ctx {
+        let _ = StatsRecorder::maybe_run_periodic_retention(
+            &ctx.db_path,
+            ctx.policy,
+            ctx.before_snapshot,
+            i64::from(std::process::id()),
+        );
+    }
+    status
+}
+
 fn main() {
     // RTK parses its own arguments, including help flags, so they bypass the
     // Tokenless parser. The end-of-options marker before the command is
@@ -1622,7 +1883,7 @@ fn main() {
     // a delimiter.
     let mut args = std::env::args_os().skip(1);
     if args.next().is_some_and(|arg| arg == RTK_SUBCOMMAND) {
-        process::exit(rtk::run(RTK_PROGRAM, rtk_args(args)));
+        process::exit(run_rtk_subcommand(args));
     }
     if let Err((msg, code)) = run() {
         report_fatal(&msg);

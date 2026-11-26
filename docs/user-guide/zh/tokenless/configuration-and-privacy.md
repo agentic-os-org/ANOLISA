@@ -12,9 +12,9 @@ Tokenless 默认启用压缩、本地统计和 SLS 度量。由于本地统计�
 环境变量 > ~/.tokenless/config.json > 默认值
 ```
 
-空环境变量视为未设置。布尔环境变量中，`1`、`true`、`yes`（大小写不敏感）表示 true；其他非空值表示 false。为了可读性，建议明确使用 `true` 或 `false`。
+空环境变量视为未设置。布尔环境变量中，`1`、`true`、`yes`（大小写不敏感）表示 true；其他非空值表示 false。为了可读性，建议明确使用 `true` 或 `false`。对于保留天数环境变量（`TOKENLESS_STATS_RETENTION_DAYS`、`TOKENLESS_STATS_TEXT_RETENTION_DAYS`），正整数设置保留天数，`0` 表示停用保留策略（覆盖 `config.json`），空值或非整数值则回退到 `config.json` 或默认值。
 
-当前实现有一个例外：当 `TOKENLESS_STATS_ENABLED` 和 `TOKENLESS_SLS_ENABLED` 都是非空值时，代码会完全跳过配置文件。在这个分支中，压缩开关优先使用 `TOKENLESS_COMPRESSION_ENABLED`；未设置时直接默认为 `true`。如果同时导出两个记录开关，也应显式导出压缩开关。
+当前实现有一个例外：只有当五个配置项（`TOKENLESS_STATS_ENABLED`、`TOKENLESS_SLS_ENABLED`、`TOKENLESS_COMPRESSION_ENABLED`、`TOKENLESS_STATS_RETENTION_DAYS` 和 `TOKENLESS_STATS_TEXT_RETENTION_DAYS`）都提供了有效的非空环境变量覆盖时，代码才会跳过配置文件，因为所有配置均已确定；否则仍会读取 `~/.tokenless/config.json` 补齐未覆盖的字段。
 
 ## 配置文件
 
@@ -30,11 +30,13 @@ Tokenless 默认启用压缩、本地统计和 SLS 度量。由于本地统计�
 {
   "stats_enabled": true,
   "sls_enabled": true,
-  "compression_enabled": true
+  "compression_enabled": true,
+  "stats_retention_days": 30,
+  "stats_text_retention_days": 7
 }
 ```
 
-配置文件缺失、不可读或 JSON 无效时，当前代码会静默使用内存中的全 `true` 默认值。手动编辑后可先验证：
+配置文件缺失、不可读或 JSON 无效时，当前代码会静默使用内存中的默认值（开关为 `true`，`stats_retention_days` 默认 `30` 天，`stats_text_retention_days` 默认 `7` 天）。手动编辑后可先验证：
 
 ```bash
 jq . ~/.tokenless/config.json
@@ -45,6 +47,8 @@ jq . ~/.tokenless/config.json
 | `stats_enabled` | `true` | 把压缩前后文本和度量写入本地 SQLite |
 | `sls_enabled` | `true` | 目标 JSONL 文件已存在时追加仅包含度量的记录 |
 | `compression_enabled` | `true` | 为 true 时返回压缩结果；false 时进入 dry-run 并返回原文 |
+| `stats_retention_days` | `30` | 正整数启用采样自动清理（每 64 行触发，覆盖 CLI 压缩、`tokenless rtk` 与 `TokenlessRuntime`/Python SDK），删除超期 `stats` 行、关联 `compression_artifacts` 及超期 `retrieve_events`；设为 `0` 或 `null` 可停用（不限制） |
+| `stats_text_retention_days` | `7` | 正整数启用采样自动清理，清除超期 `stats` 行的压缩前后正文载荷，保留数值度量与汇总；设为 `0` 或 `null` 可停用（不限制） |
 
 Tokenless 写入配置文件时会把权限限制为 `0600`。手动创建文件后也应确认：
 
@@ -279,6 +283,8 @@ token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 
 | `TOKENLESS_STATS_ENABLED` | 覆盖本地统计开关 | 不影响 SLS 或 Stash |
 | `TOKENLESS_SLS_ENABLED` | 覆盖 SLS 度量开关 | 不影响本地统计 |
 | `TOKENLESS_COMPRESSION_ENABLED` | 覆盖真实压缩开关 | false 是 dry-run，不是完全停用 |
+| `TOKENLESS_STATS_RETENTION_DAYS` | 覆盖 `stats.db` 记录保留天数 | 正整数设置天数；`0` 停用并覆盖 `config.json`；空值或非法值回退 |
+| `TOKENLESS_STATS_TEXT_RETENTION_DAYS` | 覆盖 `stats.db` 正文载荷保留天数 | 正整数设置天数；`0` 停用并覆盖 `config.json`；空值或非法值回退 |
 | `TOKENLESS_DATA_DIR` | 存放 `stats.db`、`stash.db` 和 `rtk-outcomes.db` 的目录 | 可访问的任意绝对目录，但不能是文件系统根目录或包含父目录遍历 |
 | `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
@@ -330,9 +336,9 @@ SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路�
 
 | 数据 | 默认路径 | 默认内容 | 保留方式 | 如何停止新增 |
 |------|----------|----------|----------|--------------|
-| 本地统计 | `~/.tokenless/stats.db` | 压缩前后完整文本、标识和度量 | 无自动 TTL，直到清理 | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容、被转写 HTML 页面的完整原文，以及 JSON 中每个被转写的 HTML 值 | TTL 1 小时、最多 10,000 个有效条目，过期行延迟清理 | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
-| 配置 | `~/.tokenless/config.json` | 三个布尔开关 | 持续保留 | 不适用 |
+| 本地统计 | `~/.tokenless/stats.db` | 压缩前后完整文本、标识和度量 | 默认保留 30 天记录与事件、7 天正文载荷（CLI 压缩、`tokenless rtk` 与 `TokenlessRuntime`/Python SDK 均按每 64 行采样清理）；可通过 `stats_retention_days` / `stats_text_retention_days` 覆盖（`0` 或 `null` 表示不限制），或手动执行 `tokenless stats prune` / `clear` / `compact` | `tokenless stats disable` |
+| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容、被转写 HTML 页面的完整原文，以及 JSON 中每个被转写的 HTML 值 | TTL 1 小时、最多 10,000 个有效条目；过期行延迟清理，批量或大 WAL 清理后自动执行非阻塞 WAL checkpoint | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
+| 配置 | `~/.tokenless/config.json` | 三个布尔开关及可选保留天数设置 | 持续保留 | 不适用 |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | 度量和标识，不含压缩原文 | 由 SLS/Logtail 设施管理 | `TOKENLESS_SLS_ENABLED=0` 或配置为 false |
 
 ### 本地统计的敏感性
@@ -407,13 +413,29 @@ anolisa adapter disable tokenless <framework>
 
 ## 清理数据
 
-清空本地统计记录：
+按年龄非破坏性清理旧统计记录或旧正文载荷，并回收空闲磁盘页：
+
+```bash
+# 删除超过 30 天的记录、孤立 artifact 和 retrieve 事件
+tokenless stats prune --older-than 30 --compact
+
+# 仅清除超过 7 天的压缩前后正文，保留统计汇总与数值度量
+tokenless stats prune --older-than 7 --trim-text --compact
+
+# 立即应用配置的 stats_retention_days / stats_text_retention_days
+tokenless stats prune --compact
+
+# 显式压缩空闲页并截断 stats.db-wal
+tokenless stats compact
+```
+
+清空全部本地统计记录：
 
 ```bash
 tokenless stats clear --yes
 ```
 
-该命令会清空当前环境解析到的统计库记录，但不会删除数据库文件或 SQLite sidecar。Tokenless 当前没有 Stash clear 子命令。需要不可逆地删除本地数据库时：
+`stats clear` 会清空当前环境解析到的统计库记录，并尽力执行 WAL 截断与 `VACUUM` 压缩（保持 `stats.db` 的 `0600` 权限），但不会删除数据库文件或 SQLite sidecar。Tokenless 当前没有 Stash clear 子命令。需要不可逆地删除本地数据库时：
 
 1. 先禁用所有 Tokenless Adapter。
 2. 退出仍可能使用数据库的 Agent 和 Tokenless 进程。
