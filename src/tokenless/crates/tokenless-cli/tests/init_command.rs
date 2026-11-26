@@ -1831,3 +1831,189 @@ fn a_startup_line_does_not_hide_the_shipped_codex_status_without_jq() {
         installed.combined()
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-07 (round 7) — the scanner must not lose a document it can read
+// ---------------------------------------------------------------------------
+
+/// The shipped Qoder detector's output shape: one prose line of its own, then a
+/// compact status document.
+const QODER_SHAPE_DETECT: &str = r#"#!/usr/bin/env bash
+echo "[tokenless] qoder: detected compatible qodercli at /usr/bin/qodercli"
+echo '{"status":"installable"}'
+exit 0
+"#;
+
+/// A startup line holding one brace that never closes, which is what a shell
+/// startup log looks like when it quotes a command or a parameter expansion.
+const STARTUP_UNMATCHED_BRACE: &str = "echo 'loading {profile'\n";
+
+#[test]
+fn an_unmatched_brace_in_startup_output_does_not_swallow_the_status() {
+    let fixture = Fixture::new(&[Target::new("one", QODER_SHAPE_DETECT)]);
+    let startup = startup_file(fixture._root.path(), STARTUP_UNMATCHED_BRACE);
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    // The stray brace is prose: it opens nothing, so the document behind it is
+    // still the detector's answer.
+    assert_eq!(
+        status_of(&list.stdout, "one"),
+        "installable",
+        "a prose brace swallowed the status:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "one"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(fixture.installed(), vec!["one".to_string()]);
+}
+
+/// The shipped Qoder detector against a compatible host stub, with the same
+/// unmatched brace in the startup log.
+#[test]
+#[cfg(unix)]
+fn an_unmatched_brace_does_not_swallow_the_shipped_qoder_status() {
+    let fixture = Fixture::new(&[Target::installable("qoder")]);
+    fs::copy(
+        bundled_adapters().join("qoder/scripts/detect.sh"),
+        fixture.adapter_dir.join("qoder/scripts/detect.sh"),
+    )
+    .expect("copy shipped qoder detector");
+    // A host CLI that answers the capability probes the detector makes.
+    let stub = fixture.stub_bin();
+    write_script(&stub.join("qodercli"), "#!/bin/sh\nexit 0\n");
+    let startup = startup_file(fixture._root.path(), STARTUP_UNMATCHED_BRACE);
+    let path = format!(
+        "{}:{}",
+        stub.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "qoder"),
+        "installable",
+        "the shipped detector's status was lost:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "qoder"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["qoder".to_string()],
+        "the registration was skipped:\n{}",
+        named.combined()
+    );
+}
+
+/// The shipped Codex detector behind a startup line, with the tokenless binary
+/// under a PATH entry whose name holds a form feed — the escape the detector
+/// writes as a backslash and one byte, on both the `jq` and the jq-free path.
+#[test]
+#[cfg(unix)]
+fn a_startup_line_does_not_break_an_escaped_control_character() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    let control = fixture._root.path().join("bin\u{000c}");
+    fs::create_dir_all(&control).expect("create control-character directory");
+    write_script(
+        &control.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+    let mut paths = vec![format!(
+        "{}:{}:/usr/bin:/bin",
+        control.display(),
+        fixture.bin.display()
+    )];
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if link_shell_tools(&tools) {
+        paths.push(format!(
+            "{}:{}:{}",
+            control.display(),
+            fixture.bin.display(),
+            tools.display()
+        ));
+    }
+
+    for path in &paths {
+        let list = finish(
+            fixture
+                .command_with_path(&["init", "--list"], path)
+                .env("BASH_ENV", &startup)
+                .output()
+                .expect("run tokenless init"),
+        );
+        list.assert_code(0);
+        assert_eq!(
+            status_of(&list.stdout, "codex"),
+            "installable",
+            "PATH {path}:\n{}",
+            list.stdout
+        );
+        assert!(
+            !list.stdout.contains("not parseable JSON"),
+            "a valid document was reported unreadable on PATH {path}:\n{}",
+            list.stdout
+        );
+    }
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &paths[0])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "an escaped path cost the registration:\n{}",
+        named.combined()
+    );
+}

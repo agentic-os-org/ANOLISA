@@ -409,13 +409,23 @@ fn opens_json_document(stdout: &str) -> bool {
         return true;
     }
     let bytes = stdout.as_bytes();
-    bytes.iter().enumerate().any(|(index, byte)| {
-        *byte == b'{'
-            && bytes[index + 1..]
-                .iter()
-                .find(|byte| !byte.is_ascii_whitespace())
-                == Some(&b'"')
-    })
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'{' && opens_object_literal(bytes, index))
+}
+
+/// True when the brace at `open` begins an object literal: the first
+/// non-whitespace byte after it is the double quote of a key.
+///
+/// This is what separates a detector writing JSON from a log line that happens
+/// to hold a brace, and it is shape rather than position, so startup output in
+/// front of the document changes nothing.
+fn opens_object_literal(bytes: &[u8], open: usize) -> bool {
+    bytes[open + 1..]
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| *byte == b'"')
 }
 
 /// JSON objects a detector published on stdout.
@@ -427,7 +437,9 @@ fn opens_json_document(stdout: &str) -> bool {
 /// around it, and the lifecycle scripts inherit the caller's environment — so
 /// a `BASH_ENV` startup file that writes to stdout lands ahead of the status.
 /// Reading line by line lost that document, and the exit code that followed
-/// reported a registration nobody had verified.
+/// reported a registration nobody had verified. A brace such output left
+/// unclosed does not hide the document either, because the scan resyncs on the
+/// next one instead of treating everything after it as nested.
 fn json_objects(stdout: &str) -> Vec<serde_json::Value> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
@@ -445,51 +457,99 @@ fn json_objects(stdout: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Every balanced `{...}` span in `text`, in the order the spans open.
+/// Every JSON object document in `text`, outermost first, in the order they
+/// open.
 ///
-/// A brace inside a JSON string does not close a document, so a path holding
-/// one still yields a single span. Quotes are tracked only inside a candidate
-/// object: prose around it may quote anything without hiding the document that
-/// follows. A span that never closes is dropped, which leaves the output with
-/// no published object for [`status_unreadable`] to report.
+/// Each `{` is a candidate document: [`matching_brace`] looks for the brace
+/// that closes it, tracking strings so a brace inside a path neither splits nor
+/// closes one, and an escape consuming exactly the one byte after it so a `\f`
+/// in a path does not swallow the quote that ends the string. Quotes are read
+/// from the candidate's own brace onwards, so prose before it — quoted or not —
+/// cannot change how the document is scanned.
+///
+/// A candidate that never closes is prose, not a document, and the scan resyncs
+/// on the next brace: one unmatched `{` in a startup log must not swallow the
+/// status behind it. Unless the candidate opened as an object literal — then it
+/// is one broken document, and a brace-shaped region inside it is part of that
+/// document rather than a second answer to salvage, so the scan stops and
+/// [`status_unreadable`] reports it. The resync budget keeps a wall of unmatched
+/// braces linear instead of quadratic; exhausting it leaves fewer documents in
+/// the result, which reads as [`DetectStatus::Unreadable`] — the conservative
+/// answer — rather than as a status nobody published.
 fn json_object_spans(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut spans: Vec<&str> = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
+    let mut cursor = 0;
+    let mut resyncs = MAX_BRACE_RESYNCS;
+    while cursor < bytes.len() {
+        let Some(offset) = bytes[cursor..].iter().position(|&byte| byte == b'{') else {
+            break;
+        };
+        let open = cursor + offset;
+        match matching_brace(text, open) {
+            // Nested objects are part of this document rather than a second
+            // answer, so the scan continues after the closing brace.
+            Some(close) => {
+                spans.push(&text[open..=close]);
+                cursor = close + 1;
+            }
+            None => {
+                if opens_object_literal(bytes, open) || resyncs == 0 {
+                    break;
+                }
+                resyncs -= 1;
+                cursor = open + 1;
+            }
+        }
+    }
+    spans
+}
+
+/// How many unclosed braces the scanner steps over before giving up.
+///
+/// A status document is a few hundred bytes and a stray brace in a startup log
+/// costs one resync, so this is only ever reached by output that is mostly
+/// unmatched braces.
+const MAX_BRACE_RESYNCS: usize = 64;
+
+/// The brace closing the object that opens at `open`, or `None` when the text
+/// ends first.
+///
+/// `open` is always the index of a `{`, so the depth is at least one for every
+/// `}` this sees and the first one that brings it back to zero is the
+/// document's own.
+fn matching_brace(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0;
     let mut in_string = false;
     let mut escaped = false;
-    for (index, &byte) in bytes.iter().enumerate() {
+    for (offset, &byte) in bytes[open..].iter().enumerate() {
         if in_string {
-            match byte {
-                b'\\' => escaped = !escaped,
-                b'"' => {
-                    // A quoted quote stays inside the string.
-                    in_string = escaped;
-                    escaped = false;
-                }
-                _ => {}
+            if escaped {
+                // One escape, one byte: whatever follows the backslash is the
+                // escaped character, so a quote after `\f` still ends the
+                // string.
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
             }
             continue;
         }
         match byte {
-            b'"' if depth > 0 => in_string = true,
-            b'{' => {
-                if depth == 0 {
-                    start = index;
-                }
-                depth += 1;
-            }
-            b'}' if depth > 0 => {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    spans.push(&text[start..=index]);
+                    return Some(open + offset);
                 }
             }
             _ => {}
         }
     }
-    spans
+    None
 }
 
 /// Run `install.sh` for a framework with both streams attached to ours.
@@ -1253,6 +1313,115 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The five short escapes and the `\u00XX` form the shipped Codex detector
+    /// emits for U+0001-U+001F, as they appear inside a JSON string.
+    fn escaped_control_forms() -> Vec<String> {
+        (1..32u8)
+            .map(|code| match code {
+                0x08 => String::from("\\b"),
+                0x09 => String::from("\\t"),
+                0x0a => String::from("\\n"),
+                0x0c => String::from("\\f"),
+                0x0d => String::from("\\r"),
+                _ => format!("\\u{code:04x}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_json_escape_consumes_exactly_one_byte() {
+        // A backslash escapes the one byte after it. Keeping the flag set past
+        // that byte made the scanner read the *closing* quote of the string as
+        // escaped, so a valid document never closed and the target came out
+        // unreadable instead of installable.
+        let form_feed = r#"{"path": "/opt/bin\ftokenless", "status": "installable"}"#;
+        assert_eq!(json_object_spans(form_feed).len(), 1, "{form_feed}");
+        assert_eq!(declared(Some(0), form_feed), DetectStatus::Installable);
+        assert!(!status_unreadable(form_feed));
+
+        // An escaped backslash still ends the string at the quote after it.
+        let backslashes = r#"{"path": "C:\\bin\\", "status": "ready"}"#;
+        assert_eq!(declared(Some(1), backslashes), DetectStatus::Ready);
+
+        // The same escape inside a pretty-printed document behind startup
+        // output: both of this round's inputs at once.
+        let pretty = format!(
+            "{STARTUP_LINE}{{\n  \"path\": \"/opt/bin\\ftokenless\",\n  \"status\": \"installable\"\n}}\n"
+        );
+        assert_eq!(json_objects(&pretty).len(), 1, "{pretty}");
+        assert_eq!(declared(Some(0), &pretty), DetectStatus::Installable);
+    }
+
+    #[test]
+    fn every_escaped_control_character_keeps_the_document_readable() {
+        // All 31 control characters a path can hold, in the form the shipped
+        // detector emits for each, behind one line of startup output.
+        let forms = escaped_control_forms();
+        assert_eq!(forms.len(), 31);
+        for form in &forms {
+            let stdout = format!(
+                "{STARTUP_LINE}{{\n  \"path\": \"/opt/bin{form}/tokenless\",\n  \"status\": \"installable\"\n}}\n"
+            );
+            assert!(
+                !status_unreadable(&stdout),
+                "escape {form:?} read as unreadable:\n{stdout}"
+            );
+            assert_eq!(
+                declared(Some(0), &stdout),
+                DetectStatus::Installable,
+                "escape {form:?} lost the status:\n{stdout}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_brace_in_prose_does_not_swallow_the_status() {
+        // One stray brace in a startup log used to leave every document behind
+        // it nested inside a span that never closed, so nothing was published
+        // and a valid answer came out unreadable.
+        let stdout = "loading {profile\n[tokenless] qoder: detected compatible qodercli\n{\"status\":\"installable\"}\n";
+        assert_eq!(json_objects(stdout).len(), 1, "{stdout}");
+        assert!(!status_unreadable(stdout));
+        assert_eq!(declared(Some(0), stdout), DetectStatus::Installable);
+
+        // Several documents after the prose are all read, and the first status
+        // still wins.
+        let two = "oops {\n{\"status\":\"ready\"}\n{\"status\":\"installable\"}\n";
+        assert_eq!(json_objects(two).len(), 2, "{two}");
+        assert_eq!(declared(Some(1), two), DetectStatus::Ready);
+
+        // A quoted stray brace is prose too: the quotes around it belong to the
+        // log line, not to a document.
+        let quoted = "awk '{print $1}' failed\n{\"status\":\"missing_prereqs\"}\n";
+        assert_eq!(
+            declared(Some(0), quoted),
+            DetectStatus::MissingPrereqs,
+            "{quoted}"
+        );
+    }
+
+    #[test]
+    fn a_broken_document_is_not_repaired_by_resyncing() {
+        // Resyncing steps over prose braces; it must not turn the previous
+        // round's unparseable document into an answer, whatever precedes it.
+        let broken = format!("{STARTUP_LINE}{BROKEN_CODEX_STATUS}");
+        assert!(json_objects(&broken).is_empty(), "{broken}");
+        assert!(status_unreadable(&broken));
+        assert_eq!(declared(Some(0), &broken), DetectStatus::Unreadable);
+    }
+
+    #[test]
+    fn a_broken_document_does_not_leak_an_inner_object() {
+        // One broken answer stays one broken answer: a nested object inside a
+        // document that never closed is part of it, not a status to salvage, so
+        // the target stays unreadable instead of falling through to the exit
+        // code that a JSON-publishing detector returns as a constant.
+        let nested = "{\n  \"detail\": {\"note\": \"x\"},\n  \"status\": \n";
+        assert!(json_objects(nested).is_empty(), "{nested}");
+        assert!(status_unreadable(nested));
+        assert_eq!(declared(Some(0), nested), DetectStatus::Unreadable);
     }
 
     #[test]
