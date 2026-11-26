@@ -115,21 +115,27 @@ pub(crate) fn render_snapshot_message(state: &CompactionState) -> Message {
 
 /// Builds the effective provider history for a transcript and projection.
 ///
-/// Without a projection this is the full transcript. With one, the summarized
-/// prefix is replaced by the rendered snapshot message.
+/// Cancellation markers belong to the persisted transcript. A live
+/// projection also replaces the summarized prefix with the rendered snapshot.
 pub(crate) fn effective_messages(
     messages: &[Message],
     state: Option<&CompactionState>,
 ) -> Vec<Message> {
-    match state {
-        Some(state) if state.compacted_through <= messages.len() => {
-            let mut effective = Vec::with_capacity(messages.len() - state.compacted_through + 1);
-            effective.push(render_snapshot_message(state));
-            effective.extend_from_slice(&messages[state.compacted_through..]);
-            effective
-        }
-        _ => messages.to_vec(),
-    }
+    let (snapshot, tail) = match state {
+        Some(state) if state.compacted_through <= messages.len() => (
+            Some(render_snapshot_message(state)),
+            &messages[state.compacted_through..],
+        ),
+        _ => (None, messages),
+    };
+    snapshot
+        .into_iter()
+        .chain(
+            tail.iter()
+                .filter(|message| !super::boundary::is_cancelled_run_marker(message))
+                .cloned(),
+        )
+        .collect()
 }
 
 /// Validates and bounds a projection loaded from an untrusted envelope.

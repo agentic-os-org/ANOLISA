@@ -159,14 +159,22 @@ impl ClaudeStreamParser {
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
             if value.get("is_error").and_then(|value| value.as_bool()) == Some(true) {
-                events.push(AgentEvent::AgentFailed {
-                    run_id: self.run_id.clone(),
-                    error: extract_claude_error_text(&value)
-                        .or_else(|| extract_claude_result_text(&value))
-                        .unwrap_or_else(|| "analysis returned an error".to_string()),
-                    error_code: self.error_code.clone(),
-                    max_turns: self.max_turns,
-                });
+                let message = extract_claude_error_text(&value)
+                    .or_else(|| extract_claude_result_text(&value));
+                if self.error_code.as_deref() == Some("turn_cancelled") {
+                    events.push(AgentEvent::AgentCancelled {
+                        run_id: self.run_id.clone(),
+                        reason: message
+                            .unwrap_or_else(|| "user requested cancellation".to_string()),
+                    });
+                } else {
+                    events.push(AgentEvent::AgentFailed {
+                        run_id: self.run_id.clone(),
+                        error: message.unwrap_or_else(|| "analysis returned an error".to_string()),
+                        error_code: self.error_code.clone(),
+                        max_turns: self.max_turns,
+                    });
+                }
             } else {
                 events.push(AgentEvent::AgentCompleted {
                     run_id: self.run_id.clone(),

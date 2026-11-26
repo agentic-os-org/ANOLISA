@@ -280,8 +280,14 @@ pub(super) fn run_turn(
         for event in parser.parse_line(&line) {
             for event in pending_control_tool_call.borrow_mut().stage_or_emit(event) {
                 if let Err(error) = question::observe_event(&question_gate, &event) {
-                    transport_error = Some(error.message);
-                    break 'output;
+                    // Older Core processes can return success after acknowledging
+                    // an interrupt. Cancellation finalization discards that result.
+                    if !matches!(event, AgentEvent::AgentCompleted { .. })
+                        || !command.cancelled.load(Ordering::SeqCst)
+                    {
+                        transport_error = Some(error.message);
+                        break 'output;
+                    }
                 }
                 update_completion_flags(&event, &mut completed, &mut failed);
                 if is_terminal_agent_event(&event) {

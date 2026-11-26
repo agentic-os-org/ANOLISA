@@ -86,7 +86,8 @@ pub fn serialize_cosh_core_initialize(request_id: &str) -> String {
             "capabilities": {
                 "can_handle_can_use_tool": true,
                 "can_handle_host_executed_shell": true,
-                "can_handle_ecs_trial_v1": true
+                "can_handle_ecs_trial_v1": true,
+                "can_handle_turn_cancelled": true
             }
         }
     })

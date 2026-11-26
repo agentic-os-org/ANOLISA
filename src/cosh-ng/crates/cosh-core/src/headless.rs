@@ -246,19 +246,7 @@ pub async fn run(
         match combine_turn_and_persist(turn_result, persist_result) {
             Ok(()) => {
                 let duration = start.elapsed();
-                let result_msg = OutputMessage::Result {
-                    subtype: Some("success".to_string()),
-                    is_error: false,
-                    result: None,
-                    errors: None,
-                    error_code: None,
-                    max_turns: None,
-                    session_error_code: None,
-                    session_error_phase: None,
-                    session_id: Some(engine.session_id.clone()),
-                    env_delta: None,
-                    duration_ms: Some(duration.as_millis() as u64),
-                };
+                let result_msg = successful_turn_result(&engine.session_id, duration);
                 // Emit the result before awaiting telemetry so a stalled
                 // metadata probe does not delay the visible turn result.
                 engine.emit(&mut writer, &result_msg);
@@ -940,22 +928,11 @@ where
                 protocol.pending_input.extend(access.drain_input());
             }
             let persist_result = session.persist(engine);
+            let mut end = InputLineResult::Continue;
             match combine_turn_and_persist(turn_result, persist_result) {
                 Ok(()) => {
                     let duration = start.elapsed();
-                    let result_msg = OutputMessage::Result {
-                        subtype: Some("success".to_string()),
-                        is_error: false,
-                        result: None,
-                        errors: None,
-                        error_code: None,
-                        max_turns: None,
-                        session_error_code: None,
-                        session_error_phase: None,
-                        session_id: Some(engine.session_id.clone()),
-                        env_delta: None,
-                        duration_ms: Some(duration.as_millis() as u64),
-                    };
+                    let result_msg = successful_turn_result(&engine.session_id, duration);
                     // Emit the result before awaiting telemetry so a stalled
                     // metadata probe does not delay the visible turn result.
                     engine.emit(writer, &result_msg);
@@ -968,20 +945,25 @@ where
                     session.recommend_auto_compaction(engine, writer);
                 }
                 Err(failure) => {
-                    let mut err_msg = failure.output_message(&engine.session_id);
-                    if let Some(failure) = engine
+                    let trial_failure = engine
                         .trial_access
                         .as_ref()
-                        .and_then(|access| access.failure())
-                    {
-                        if let OutputMessage::Result { error_code, .. } = &mut err_msg {
-                            *error_code = Some(failure.code);
-                        }
+                        .and_then(|access| access.failure());
+                    let result = failure.interactive_result(
+                        &engine.session_id,
+                        trial_failure.as_ref(),
+                        engine.client_capabilities.can_handle_turn_cancelled,
+                        args.cosh_shell_transport,
+                        start.elapsed(),
+                    );
+                    if let Some(result) = result {
+                        // Emit the result before awaiting telemetry so a stalled
+                        // metadata probe does not delay the visible turn result.
+                        engine.emit(writer, &result);
+                        let _ = sls::emit(&engine.build_sls_record(start.elapsed())).await;
+                    } else {
+                        end = InputLineResult::Shutdown;
                     }
-                    // Emit the error result before awaiting telemetry so a stalled
-                    // metadata probe does not delay the visible turn result.
-                    engine.emit(writer, &err_msg);
-                    let _ = sls::emit(&engine.build_sls_record(start.elapsed())).await;
                 }
             }
             engine.drain_retired_extension_snapshots().await;
@@ -990,6 +972,7 @@ where
                     tracing::error!("failed to persist activated extension generation: {error}");
                 }
             }
+            return end;
         }
 
         InputMessage::ControlResponse { .. } => {}
@@ -1388,6 +1371,24 @@ struct TurnFailure {
     session_error_code: Option<&'static str>,
 }
 
+const TURN_CANCELLED: &str = "turn_cancelled";
+
+fn successful_turn_result(session_id: &str, duration: std::time::Duration) -> OutputMessage {
+    OutputMessage::Result {
+        subtype: Some("success".to_string()),
+        is_error: false,
+        result: None,
+        errors: None,
+        error_code: None,
+        max_turns: None,
+        session_error_code: None,
+        session_error_phase: None,
+        session_id: Some(session_id.to_string()),
+        env_delta: None,
+        duration_ms: Some(duration.as_millis() as u64),
+    }
+}
+
 impl TurnFailure {
     fn output_message(&self, session_id: &str) -> OutputMessage {
         match self.session_error_code {
@@ -1406,6 +1407,44 @@ impl TurnFailure {
             }
         }
     }
+
+    fn interactive_result(
+        &self,
+        session_id: &str,
+        trial_failure: Option<&crate::provider::ProviderFailure>,
+        supports_turn_cancelled: bool,
+        shell_transport: bool,
+        duration: std::time::Duration,
+    ) -> Option<OutputMessage> {
+        let cancelled = self.error_code == Some(TURN_CANCELLED);
+        let trial_code = trial_failure
+            .filter(|failure| {
+                self.session_error_code.is_none()
+                    && (!cancelled || failure.code != "trial_cancelled")
+            })
+            .map(|failure| failure.code.as_str());
+
+        if cancelled {
+            if let Some(code) = trial_code {
+                return Some(OutputMessage::result_error_with_code(
+                    session_id,
+                    &format!("provider access failed [{code}]"),
+                    Some(code),
+                ));
+            }
+            if !supports_turn_cancelled {
+                // Older Shell already handles EOF after its own interrupt.
+                // A result would either be reported as a failure or rejected
+                // while the question is still pending.
+                return (!shell_transport).then(|| successful_turn_result(session_id, duration));
+            }
+        }
+        let mut result = self.output_message(session_id);
+        if let (Some(code), OutputMessage::Result { error_code, .. }) = (trial_code, &mut result) {
+            *error_code = Some(code.to_string());
+        }
+        Some(result)
+    }
 }
 
 fn combine_turn_and_persist(
@@ -1414,6 +1453,12 @@ fn combine_turn_and_persist(
 ) -> Result<(), TurnFailure> {
     match (turn, persist) {
         (Ok(AgentTurnOutcome::Completed), Ok(())) => Ok(()),
+        (Ok(AgentTurnOutcome::Cancelled), Ok(())) => Err(TurnFailure {
+            message: "user requested cancellation".to_string(),
+            error_code: Some(TURN_CANCELLED),
+            max_turns: None,
+            session_error_code: None,
+        }),
         (Ok(AgentTurnOutcome::MaxTurns { limit }), Ok(())) => Err(TurnFailure {
             message: crate::core::max_turns_error(limit),
             error_code: Some("max_turns"),
@@ -1426,15 +1471,17 @@ fn combine_turn_and_persist(
             message: turn_error,
             session_error_code: None,
         }),
-        (Ok(AgentTurnOutcome::Completed), Err(persist_error)) => Err(TurnFailure {
-            message: format!(
-                "session persistence failed [{}]: {persist_error}",
-                persist_error.code()
-            ),
-            error_code: None,
-            max_turns: None,
-            session_error_code: Some(persist_error.code()),
-        }),
+        (Ok(AgentTurnOutcome::Completed | AgentTurnOutcome::Cancelled), Err(persist_error)) => {
+            Err(TurnFailure {
+                message: format!(
+                    "session persistence failed [{}]: {persist_error}",
+                    persist_error.code()
+                ),
+                error_code: None,
+                max_turns: None,
+                session_error_code: Some(persist_error.code()),
+            })
+        }
         (Ok(AgentTurnOutcome::MaxTurns { limit }), Err(persist_error)) => Err(TurnFailure {
             message: format!(
                 "{}; session persistence failed [{}]: {persist_error}",
@@ -1693,6 +1740,71 @@ mod tests {
             &[],
         )
         .is_err());
+    }
+
+    #[test]
+    fn cancelled_turn_emits_an_interruption_result() {
+        let failure = combine_turn_and_persist(Ok(AgentTurnOutcome::Cancelled), Ok(()))
+            .expect_err("cancelled turn");
+        assert!(matches!(
+            failure.output_message("session"),
+            OutputMessage::Result {
+                is_error: true,
+                error_code: Some(code),
+                ..
+            } if code == "turn_cancelled"
+        ));
+    }
+
+    #[test]
+    fn interactive_trial_stop_preserves_the_turn_outcome_and_real_failures() {
+        use crate::provider::{DispatchState, ProviderFailure, ProviderFailureKind};
+        use std::time::Duration;
+
+        let mut trial_failure = ProviderFailure {
+            code: "trial_cancelled".into(),
+            kind: ProviderFailureKind::Other,
+            dispatch: DispatchState::Accepted,
+            request_id: None,
+        };
+        let cancellation = combine_turn_and_persist(Ok(AgentTurnOutcome::Cancelled), Ok(()))
+            .expect_err("cancelled turn");
+        let result = cancellation.interactive_result(
+            "session",
+            Some(&trial_failure),
+            true,
+            true,
+            Duration::ZERO,
+        );
+        assert!(matches!(result, Some(OutputMessage::Result {
+            error_code: Some(code), session_error_code: None, ..
+        }) if code == TURN_CANCELLED));
+
+        trial_failure.code = "trial_provider_error".into();
+        let result = cancellation.interactive_result(
+            "session",
+            Some(&trial_failure),
+            true,
+            true,
+            Duration::ZERO,
+        );
+        assert!(matches!(result, Some(OutputMessage::Result {
+            is_error: true, error_code: Some(code), ..
+        }) if code == "trial_provider_error"));
+
+        let failure = combine_turn_and_persist(
+            Ok(AgentTurnOutcome::Cancelled),
+            Err(SessionError::Conflict {
+                session_id: "session".into(),
+            }),
+        )
+        .expect_err("persistence failure");
+        let result =
+            failure.interactive_result("session", Some(&trial_failure), true, true, Duration::ZERO);
+        assert!(matches!(result, Some(OutputMessage::Result {
+            is_error: true, error_code: None,
+            session_error_code: Some(code), session_error_phase: Some(phase), ..
+        }) if code == "conflict" && phase == "persist"));
     }
 
     #[test]

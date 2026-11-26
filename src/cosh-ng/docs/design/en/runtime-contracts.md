@@ -56,6 +56,10 @@ The persistent shell service matches the initialize response by request ID and
 does not send the first user turn until negotiation succeeds. Later turns reuse
 the capabilities recorded for that process.
 
+The persistent adapter declares `capabilities.can_handle_turn_cancelled` in
+its v1 request. The [headless JSONL cancellation reference](ipc-protocol.md#cosh-core-headless-jsonl-cancellation)
+defines the result and the fallback for older Shell peers.
+
 ## Approval contract
 
 The canonical modes are:

@@ -104,7 +104,13 @@ Core 可能因为工具决策或用户输入而暂停。使用相同的 request 
 {"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"allow","toolUseID":"toolu-1"}}}
 ```
 
-Core 还可能发出 `ask_user`、`auth_required` 和可选的 `shell_evidence` 请求。前端可以使用下面的消息中断或停止进程：
+Core 还可能发出 `ask_user`、`auth_required` 和可选的 `shell_evidence` 请求。Core 等待执行工具前由工具策略要求的审批、`ask_user` 的回答或 `shell_evidence` 的响应时，发送 `interrupt` 可取消当前请求。
+
+```json
+{"type":"control_request","request_id":"interrupt-1","request":{"subtype":"interrupt"}}
+```
+
+在 `initialize` 中将 `request.capabilities.can_handle_turn_cancelled` 设为 `true`，中断上述等待时就会收到带有 `error_code: "turn_cancelled"` 的 `result`。收到结果后，可以在同一个进程中发送下一条用户请求。要关闭进程，请在空闲时发送 `shutdown`。
 
 ```json
 {"type":"control_request","request_id":"stop-1","request":{"subtype":"shutdown"}}
@@ -131,6 +137,6 @@ ID 的作用域是工作空间。未传入 `--workspace <path>` 时，工作空�
 
 成功时省略可选的 `result` 字段。
 
-失败结果使用 `is_error: true` 并包含 `errors`；会话加载或持久化失败还会包含 `session_error_code` 和 `session_error_phase`。无效 JSONL 输入会输出错误 result，并以非零状态退出。stdout 只保留协议消息，诊断信息写入其他日志。
+处理一般错误结果前，先检查 `error_code: "turn_cancelled"`。失败结果使用 `is_error: true` 并包含 `errors`。会话加载或持久化失败还会包含 `session_error_code` 和 `session_error_phase`。无效 JSONL 输入会输出错误 result，并以非零状态退出。stdout 只保留协议消息，诊断信息写入其他日志。
 
-完整 schema 见开发者[IPC 协议参考](../../../../../src/cosh-ng/docs/design/zh/ipc-protocol.md)。
+结果消息和 v1 兼容行为见开发者 [IPC 协议参考](../../../../../src/cosh-ng/docs/design/zh/ipc-protocol.md#cosh-core-headless-jsonl-取消)。

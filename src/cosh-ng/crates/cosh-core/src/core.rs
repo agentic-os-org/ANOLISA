@@ -64,6 +64,7 @@ fn is_sensitive_write(tool_name: &str, params: &serde_json::Value) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentTurnOutcome {
     Completed,
+    Cancelled,
     MaxTurns { limit: u32 },
 }
 
@@ -1137,18 +1138,25 @@ impl CoshCore {
                 if in_band_questions_enabled {
                     match parse_in_band_question(&text_buf) {
                         InBandQuestion::Valid(synthetic) => {
-                            let result =
-                                self.handle_ask_user(&synthetic, None, reader, writer).await;
-                            if result.is_error {
-                                self.messages.push(Message::assistant(&text_buf));
-                                self.audit.record_turn_terminal(
-                                    turn_scope,
-                                    AuditOutcomeStatus::Failed,
-                                    Some("question_failed"),
-                                );
-                                return Ok(AgentTurnOutcome::Completed);
-                            }
+                            let ControlWaitResult {
+                                result,
+                                interrupted,
+                            } = self.handle_ask_user(&synthetic, None, reader, writer).await;
                             self.messages.push(Message::assistant(&text_buf));
+                            if result.is_error {
+                                let (status, reason) = if interrupted {
+                                    (AuditOutcomeStatus::Cancelled, "interrupted")
+                                } else {
+                                    (AuditOutcomeStatus::Failed, "question_failed")
+                                };
+                                self.audit
+                                    .record_turn_terminal(turn_scope, status, Some(reason));
+                                return Ok(if interrupted {
+                                    AgentTurnOutcome::Cancelled
+                                } else {
+                                    AgentTurnOutcome::Completed
+                                });
+                            }
                             self.messages.push(Message::user(&format!(
                                 "User answered the question: {}",
                                 result.output
@@ -1260,6 +1268,8 @@ impl CoshCore {
             // this batch is fully answered.
             let mut fatal_turn: Option<FatalTurn> = None;
 
+            let mut loop_warnings = 0;
+
             for tc in &tool_calls {
                 provider_access::drive(
                     trial_access.as_ref(),
@@ -1286,10 +1296,9 @@ impl CoshCore {
                 // core can no longer talk to.
                 self.promote_control_transport_failure(&mut fatal_turn);
 
-                // Every id in the assistant message needs exactly one tool result,
-                // or the next provider request violates tool-message pairing — and
-                // headless persists and reuses the session even when a turn fails.
-                if fatal_turn.is_some() {
+                // The persisted transcript still owes a result for every call
+                // the assistant declared, even when the turn has ended.
+                if interrupted || fatal_turn.is_some() {
                     self.skip_unexecuted_tool_call(
                         CoreAuditScope::tool(&run_id, &turn_id, &tc.id),
                         writer,
@@ -1346,15 +1355,13 @@ impl CoshCore {
                             writer,
                         )
                         .await?;
-                    if let Some(result) = dispatched {
+                    if let Some(wait) = dispatched {
                         self.messages.push(Message::tool_result(
                             &tc.id,
-                            &result.output,
-                            result.is_error,
+                            &wait.result.output,
+                            wait.result.is_error,
                         ));
-                    }
-                    if interrupted {
-                        return Ok(AgentTurnOutcome::Completed);
+                        interrupted = wait.interrupted;
                     }
                     continue;
                 }
@@ -1442,9 +1449,13 @@ impl CoshCore {
                     self.audit
                         .record_tool_execution_started(tool_scope, &tc.name, &tool_data)?;
                     let tool_start = Instant::now();
-                    let result = self
+                    let ControlWaitResult {
+                        result,
+                        interrupted: evidence_interrupted,
+                    } = self
                         .handle_shell_evidence(&tc.id, &params, reader, writer)
                         .await;
+                    interrupted = evidence_interrupted;
                     self.audit.record_tool_terminal(
                         tool_scope,
                         &tc.name,
@@ -1459,9 +1470,6 @@ impl CoshCore {
                         &result.output,
                         result.is_error,
                     ));
-                    if interrupted {
-                        return Ok(AgentTurnOutcome::Completed);
-                    }
                     continue;
                 }
 
@@ -1853,13 +1861,11 @@ impl CoshCore {
                     // If a hook requests sandbox bypass, present an approval
                     // panel with the original (un-sandboxed) command.
                     // ─── SLS: sandbox blocked ───
-                    // #1940: when the turn is already fatal (the policy
-                    // approval above timed out), the recorded tool result is
-                    // final — never open a second approval whose Allowed arm
-                    // would still execute the tool behind that result.
+                    // A timed-out or interrupted policy approval ends the
+                    // turn. A second approval could still run the tool.
                     if let Some(bypass) = failure_hook
                         .sandbox_bypass_request
-                        .filter(|_| fatal_turn.is_none())
+                        .filter(|_| fatal_turn.is_none() && !interrupted)
                     {
                         self.metrics.sandbox_blocked += 1;
                         self.emit(
@@ -2001,18 +2007,34 @@ impl CoshCore {
                 ));
 
                 if self.loop_detector.record_action(&tc.name, &tc.arguments) {
-                    self.messages
-                        .push(Message::system(LoopDetector::loop_warning()));
+                    loop_warnings += 1;
                 }
+            }
 
-                if interrupted {
-                    self.audit.record_turn_terminal(
-                        turn_scope,
-                        AuditOutcomeStatus::Cancelled,
-                        Some("interrupted"),
-                    );
-                    return Ok(AgentTurnOutcome::Completed);
-                }
+            // The tool results must stay together for history compaction.
+            for _ in 0..loop_warnings {
+                self.messages
+                    .push(Message::system(LoopDetector::loop_warning()));
+            }
+
+            if interrupted {
+                self.messages
+                    .push(Message::system(crate::compaction::CANCELLED_RUN_MARKER));
+                // Flush trial-provider progress even when the interrupted tool
+                // was the last in its batch.
+                provider_access::drive(
+                    trial_access.as_ref(),
+                    std::future::ready(()),
+                    reader,
+                    writer,
+                )
+                .await;
+                self.audit.record_turn_terminal(
+                    turn_scope,
+                    AuditOutcomeStatus::Cancelled,
+                    Some("interrupted"),
+                );
+                return Ok(AgentTurnOutcome::Cancelled);
             }
             // Also checked after the last call: a failure there never re-enters
             // the loop boundary above.
@@ -2115,7 +2137,8 @@ impl CoshCore {
         &self,
         expected_request_id: &str,
         reader: &mut tokio::io::Lines<R>,
-    ) -> Option<String> {
+    ) -> ControlWaitResult {
+        let no_answer = || ToolResult::error("User did not answer (interrupted or disconnected)");
         while let Ok(Some(line)) = reader.next_line().await {
             let line = line.trim().to_string();
             if line.is_empty() {
@@ -2130,18 +2153,23 @@ impl CoshCore {
                     if response.request_id != expected_request_id {
                         continue;
                     }
-                    return response.response.answer;
+                    return response
+                        .response
+                        .answer
+                        .map(ToolResult::success)
+                        .unwrap_or_else(no_answer)
+                        .into();
                 }
                 InputMessage::ControlRequest { request, .. } => {
                     if matches!(request, ShellControlRequest::Interrupt) {
                         self.provider.cancel();
-                        return None;
+                        return ControlWaitResult::interrupted();
                     }
                 }
                 _ => {}
             }
         }
-        None
+        no_answer().into()
     }
 
     async fn handle_shell_evidence<W, R>(
@@ -2150,13 +2178,13 @@ impl CoshCore {
         params: &serde_json::Value,
         reader: &mut tokio::io::Lines<R>,
         writer: &mut W,
-    ) -> ToolResult
+    ) -> ControlWaitResult
     where
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
         let Some(action) = params.get("action").and_then(|v| v.as_str()) else {
-            return ToolResult::error("cosh_shell_evidence missing required action");
+            return ToolResult::error("cosh_shell_evidence missing required action").into();
         };
 
         let request_id = self.next_request_id();
@@ -2168,7 +2196,8 @@ impl CoshCore {
                 {
                     return ToolResult::error(
                         "cosh_shell_evidence action=list_commands accepts only limit and cursor",
-                    );
+                    )
+                    .into();
                 }
                 let limit = params
                     .get("limit")
@@ -2180,7 +2209,7 @@ impl CoshCore {
                     .transpose();
                 let limit = match limit {
                     Ok(limit) => limit.unwrap_or(20).clamp(1, 100) as u16,
-                    Err(result) => return result,
+                    Err(result) => return result.into(),
                 };
                 let cursor = match params.get("cursor") {
                     Some(serde_json::Value::Null) | None => None,
@@ -2189,7 +2218,8 @@ impl CoshCore {
                         None => {
                             return ToolResult::error(
                                 "cosh_shell_evidence cursor must be a string or null",
-                            );
+                            )
+                            .into();
                         }
                     },
                 };
@@ -2202,14 +2232,17 @@ impl CoshCore {
                         cursor,
                     ),
                 ) {
-                    return self.evidence_request_emit_failed(&request_id, &error);
+                    return self
+                        .evidence_request_emit_failed(&request_id, &error)
+                        .into();
                 }
             }
             "read_output" => {
                 let Some(output_id) = params.get("output_id").and_then(|v| v.as_str()) else {
                     return ToolResult::error(
                         "cosh_shell_evidence action=read_output missing required output_id",
-                    );
+                    )
+                    .into();
                 };
                 let direction = params
                     .get("direction")
@@ -2218,7 +2251,8 @@ impl CoshCore {
                 if direction != "head" && direction != "tail" {
                     return ToolResult::error(
                         "cosh_shell_evidence action=read_output direction must be head or tail",
-                    );
+                    )
+                    .into();
                 }
                 let lines = params
                     .get("lines")
@@ -2232,7 +2266,7 @@ impl CoshCore {
                     .transpose();
                 let lines = match lines {
                     Ok(lines) => lines.unwrap_or(120).clamp(1, 300) as u16,
-                    Err(result) => return result,
+                    Err(result) => return result.into(),
                 };
                 let bypass_recent_filter = match params.get("bypass_recent_filter") {
                     Some(value) => match value.as_bool() {
@@ -2240,7 +2274,7 @@ impl CoshCore {
                         None => {
                             return ToolResult::error(
                                 "cosh_shell_evidence action=read_output bypass_recent_filter must be a boolean",
-                            );
+                            ).into();
                         }
                     },
                     None => false,
@@ -2257,13 +2291,16 @@ impl CoshCore {
                         bypass_recent_filter,
                     ),
                 ) {
-                    return self.evidence_request_emit_failed(&request_id, &error);
+                    return self
+                        .evidence_request_emit_failed(&request_id, &error)
+                        .into();
                 }
             }
             _ => {
                 return ToolResult::error(
                     "cosh_shell_evidence action must be list_commands or read_output",
-                );
+                )
+                .into();
             }
         }
 
@@ -2291,7 +2328,7 @@ impl CoshCore {
         &self,
         expected_request_id: &str,
         reader: &mut tokio::io::Lines<R>,
-    ) -> ToolResult {
+    ) -> ControlWaitResult {
         while let Ok(Some(line)) = reader.next_line().await {
             let line = line.trim().to_string();
             if line.is_empty() {
@@ -2309,10 +2346,12 @@ impl CoshCore {
                         continue;
                     }
                     if response.response.behavior.as_deref() != Some("shell_evidence") {
-                        return ToolResult::error("cosh_shell_evidence received unknown response");
+                        return ToolResult::error("cosh_shell_evidence received unknown response")
+                            .into();
                     }
                     let Some(result) = response.response.result else {
-                        return ToolResult::error("cosh_shell_evidence response missing result");
+                        return ToolResult::error("cosh_shell_evidence response missing result")
+                            .into();
                     };
                     let is_error = result
                         .metadata
@@ -2349,18 +2388,19 @@ impl CoshCore {
                     return ToolResult {
                         output: result.llm_content,
                         is_error,
-                    };
+                    }
+                    .into();
                 }
                 InputMessage::ControlRequest { request, .. } => {
                     if matches!(request, ShellControlRequest::Interrupt) {
                         self.provider.cancel();
-                        return ToolResult::error("Interrupted by user");
+                        return ControlWaitResult::interrupted();
                     }
                 }
                 _ => {}
             }
         }
-        ToolResult::error("cosh_shell_evidence response was not received")
+        ToolResult::error("cosh_shell_evidence response was not received").into()
     }
 
     async fn wait_for_approval<R: AsyncBufReadExt + Unpin>(
@@ -2555,6 +2595,30 @@ const CONTROL_TRANSPORT_AUDIT_REASON: &str = "control_transport_failed";
 /// Audit reason code for a turn ended by an approval that never reached a
 /// decision surface before the residual deadline (#1940).
 const APPROVAL_TIMEOUT_AUDIT_REASON: &str = "approval_timeout";
+
+/// The tool result and whether the peer explicitly interrupted the wait.
+struct ControlWaitResult {
+    result: ToolResult,
+    interrupted: bool,
+}
+
+impl ControlWaitResult {
+    fn interrupted() -> Self {
+        Self {
+            result: ToolResult::error("Interrupted by user"),
+            interrupted: true,
+        }
+    }
+}
+
+impl From<ToolResult> for ControlWaitResult {
+    fn from(result: ToolResult) -> Self {
+        Self {
+            result,
+            interrupted: false,
+        }
+    }
+}
 
 /// One fatal turn outcome held until every declared tool call is closed.
 struct FatalTurn {

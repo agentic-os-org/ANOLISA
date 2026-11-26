@@ -19,9 +19,11 @@ pub use budget::{ContextBudget, ModelCapability};
 pub use projection::CompactionState;
 pub use runtime::CompactionRuntime;
 
-pub(crate) use boundary::has_new_compactable_prefix;
+pub(crate) use boundary::{has_new_compactable_prefix, CANCELLED_RUN_MARKER};
 pub(crate) use budget::estimate_text_tokens;
 pub(crate) use engine::run_compact_cli;
+#[cfg(test)]
+pub(crate) use engine::{compact_session, CompactionTrigger};
 pub(crate) use preflight::run_context_preflight;
 pub(crate) use projection::{sanitize_loaded_state, source_digest};
 pub(crate) use runtime::estimate_prefix_tokens;

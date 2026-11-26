@@ -159,6 +159,9 @@ pub struct ClientControlCapabilities {
     pub can_handle_host_executed_shell: bool,
     #[serde(default)]
     pub can_handle_ecs_trial_v1: bool,
+    /// Accepts a request-level `turn_cancelled` result.
+    #[serde(default)]
+    pub can_handle_turn_cancelled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

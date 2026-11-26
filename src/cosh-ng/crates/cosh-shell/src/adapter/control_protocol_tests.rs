@@ -948,6 +948,10 @@ fn serialize_cosh_core_initialize_format() {
     assert_eq!(v["request_id"], "init-7");
     assert_eq!(v["request"]["subtype"], "initialize");
     assert_eq!(v["request"]["protocol_version"], CONTROL_PROTOCOL_VERSION);
+    assert_eq!(
+        v["request"]["capabilities"]["can_handle_turn_cancelled"],
+        true
+    );
 }
 
 #[test]

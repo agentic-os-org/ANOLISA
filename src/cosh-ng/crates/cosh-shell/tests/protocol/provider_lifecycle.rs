@@ -1545,6 +1545,85 @@ exit 1"#,
 }
 
 #[test]
+fn cosh_core_pending_question_cancel_allows_next_request() {
+    let script = mock_provider_script(
+        "cosh-core-cancel-question",
+        r#"IFS= read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}'
+while IFS= read -r prompt; do
+  case "$prompt" in
+    *'ask then cancel'*|*'ask then complete'*)
+      printf '%s\n' '{"type":"control_request","request_id":"ask-pending","request":{"subtype":"ask_user","question":"Choose","options":[{"label":"One"}]}}'
+      ;;
+  esac
+  case "$prompt" in
+    *'ask then cancel'*)
+      IFS= read -r interrupt
+      case "$interrupt" in
+        *'"subtype":"interrupt"'*) ;;
+        *) exit 1 ;;
+      esac
+      ;;
+  esac
+  case "$prompt" in
+    *'ask then cancel with explicit result'*)
+      printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"error_code":"turn_cancelled","errors":["user requested cancellation"]}'
+      ;;
+    *) printf '%s\n' '{"type":"result","subtype":"success","is_error":false}' ;;
+  esac
+done"#,
+    );
+    let adapter = cosh_core_active_adapter(&script);
+    for prompt in ["ask then cancel", "ask then cancel with explicit result"] {
+        let mut request = make_request(prompt);
+        request.user_input = Some(prompt.into());
+        let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
+        let events = collect_events_until(&handle, Duration::from_secs(3), |event| {
+            matches!(event, AgentEvent::UserQuestion { .. })
+        });
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::UserQuestion { .. })
+        ));
+
+        handle.cancel();
+        let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+        assert!(
+            matches!(&events[..], [AgentEvent::AgentCancelled { .. }]),
+            "{events:?}"
+        );
+    }
+
+    let next = adapter.start_cancellable(make_request("after-cancel"), CoshApprovalMode::Auto);
+    let events = collect_events_until_finished(&next, Duration::from_secs(3));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "{events:?}"
+    );
+
+    let mut request = make_request("premature-completion");
+    request.user_input = Some("ask then complete".into());
+    let premature = adapter.start_cancellable(request, CoshApprovalMode::Auto);
+    let events = collect_events_until(&premature, Duration::from_secs(3), |event| {
+        matches!(event, AgentEvent::UserQuestion { .. })
+    });
+    assert!(
+        matches!(events.last(), Some(AgentEvent::UserQuestion { .. })),
+        "{events:?}"
+    );
+    match premature.poll_event_timeout(Duration::from_secs(3)) {
+        Err(error) => assert_eq!(
+            error.message,
+            "cosh-core-question-protocol:premature-completion"
+        ),
+        _ => panic!("unanswered question must reject an uncancelled success result"),
+    }
+    let _ = fs::remove_file(script);
+}
+
+#[test]
 fn cosh_core_pending_question_nonzero_exit_reports_only_protocol_failure() {
     let script = mock_provider_script(
         "cosh-core-question-then-nonzero",
