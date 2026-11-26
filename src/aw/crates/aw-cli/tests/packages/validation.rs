@@ -365,3 +365,37 @@ fn validation_rejects_nonregular_and_oversized_documents_without_blocking() {
         "invalid_configuration"
     );
 }
+
+#[test]
+fn config_init_reserves_the_daemon_socket_in_private_state() {
+    let mut f = Fixture::new();
+    make_private_dir(&f.state);
+    let socket = f.state.join("aw.sock");
+    let alias = f.root.join("alias");
+    std::os::unix::fs::symlink(&f.state, &alias).unwrap();
+
+    for config in [
+        socket.clone(),
+        f.state.join("./aw.sock"),
+        alias.join("aw.sock"),
+        f.root.join("state/../state/aw.sock"),
+        std::path::PathBuf::from("state/aw.sock"),
+    ] {
+        f.config = config;
+        let output = invoke(&f.init());
+        assert_eq!(output.status.code(), Some(1), "{:?}", f.config);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("reserved for the daemon socket"), "{error}");
+        assert!(!socket.try_exists().unwrap());
+    }
+
+    f.config = f.state.join("settings.yaml");
+    let output = invoke(&f.init());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(f.config.is_file());
+    assert!(!socket.try_exists().unwrap());
+}
