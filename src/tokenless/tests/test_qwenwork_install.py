@@ -1200,48 +1200,57 @@ runpy.run_path(str(Path(__file__).parent / "contract.py"), run_name="__main__")
             )
 
     def test_windows_installed_hook_shape_enables_the_bridge_and_rewrites_powershell(self) -> None:
-        # The Windows installer rewrites every registered hook command into
-        # the PowerShell form `& '<python>' -X utf8 -B
-        # "${env:QODER_PLUGIN_ROOT}/hooks/shared/rewrite_hook.py"` and adds
-        # PowerShell to the PreToolUse matcher (lifecycle.py's Windows
-        # branch). Both shapes must enable the bridge, and a PowerShell
-        # event must receive the PowerShell retrieve form with or without
-        # the managed flag — the same signal the RTK rewrite keys on.
+        # Run the real installer with platform.system() stubbed to Windows:
+        # the Windows branch keeps the recovery-only PreToolUse registration
+        # (rewritten to the PowerShell form of rewrite_hook.py and with
+        # PowerShell appended to the matcher) and rewrites PostToolUse to
+        # compress_response_hook.py. The installed hooks.json shape must
+        # enable the bridge, and a PowerShell event must receive the
+        # PowerShell retrieve form with or without the managed flag — the
+        # same signal the RTK rewrite keys on.
         self.prepare_detached_plugin()
         # `_QWENWORK_RECOVERY` is a module global shared across tests; reset
         # it so a later test cannot inherit state pointing into this sandbox.
         self.addCleanup(setattr, qwenwork_adapter, "_QWENWORK_RECOVERY", None)
-        private_bin = self.target / "bin"
-        private_bin.mkdir(exist_ok=True)
-        _create_mock_tokenless(str(private_bin))
-        (self.target / "bin/tokenless.exe").write_text(
-            "#!/usr/bin/env python3\nprint('win')\n"
-        )
-        os.chmod(self.target / "bin/tokenless.exe", 0o755)
         key = "abcdef0123456789abcdef01"
         payload = {
             "tool_name": "Bash",
             "tool_response": "", "tool_input": {"command": "echo hi"},
             "session_id": "win-session", "cwd": str(self.root),
         }
-        windows_hooks = json.loads((self.target / "hooks/hooks.json").read_text())
-        for event, groups in windows_hooks["hooks"].items():
-            for group in groups:
-                if event == "PreToolUse":
-                    group["matcher"] = f"{group['matcher']}|PowerShell"
-                script = (
-                    "rewrite_hook.py" if event == "PreToolUse" else "compress_response_hook.py"
-                )
-                python = sys.executable.replace("'", "''")
-                for hook in group["hooks"]:
-                    hook["shell"] = "powershell"
-                    hook["command"] = (
-                        f"& '{python}' -X utf8 -B "
-                        f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/{script}" --agent-id qwenwork'
-                    )
-        (self.target / "hooks/hooks.json").write_text(
-            json.dumps(windows_hooks, indent=2) + "\n", encoding="utf-8"
+        # prepare_detached_plugin removed the adapter source; the second
+        # install needs it again. setUp still patches PLUGIN_ROOT to
+        # self.source and _application returns a version the Windows
+        # branch accepts.
+        ignored = shutil.ignore_patterns("__pycache__", "*.pyc")
+        shutil.copytree(SOURCE, self.source, symlinks=True, ignore=ignored)
+        shutil.copytree(COMMON, self.adapters / "common/hooks", ignore=ignored)
+        template = (self.source / ".qoder-plugin/plugin.json.in").read_text(encoding="utf-8")
+        self.manifest.write_text(template.replace("@VERSION@", "1.0.0"), encoding="utf-8")
+        # A foreign marker owns the current target (the test added binaries
+        # to it), so reinstall from a clean target: uninstall first, then
+        # let the Windows branch install fresh, then provide the binaries.
+        self.run_action("uninstall")
+        with mock.patch.object(
+            lifecycle.platform, "system", return_value="Windows"
+        ), mock.patch.object(
+            lifecycle, "_application", return_value=(self.app, "1.3.2")
+        ):
+            self.run_action("install")
+        private_bin = self.target / "bin"
+        private_bin.mkdir(exist_ok=True)
+        os.chmod(private_bin, 0o755)
+        _create_mock_tokenless(str(private_bin))
+        (private_bin / "tokenless.exe").write_text(
+            "#!/usr/bin/env python3\nprint('win')\n"
         )
+        os.chmod(private_bin / "tokenless.exe", 0o755)
+        installed = json.loads((self.target / "hooks/hooks.json").read_text())
+        self.assertEqual(set(installed["hooks"]), {"PreToolUse", "PostToolUse"})
+        pre_group = installed["hooks"]["PreToolUse"][0]
+        self.assertIn("rewrite_hook.py", pre_group["hooks"][0]["command"])
+        self.assertIn("PowerShell", pre_group["matcher"])
+        self.assertEqual(pre_group["hooks"][0]["shell"], "powershell")
         with mock.patch.object(
             qwenwork_adapter, "Path", PosixPath
         ), mock.patch.object(qwenwork_adapter.hook_utils, "Path", PosixPath), mock.patch.object(

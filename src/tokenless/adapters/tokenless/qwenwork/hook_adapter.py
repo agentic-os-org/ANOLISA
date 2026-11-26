@@ -61,6 +61,22 @@ _QWENWORK_RECOVERY: dict[str, str] | None = None
 _QWENWORK_SHELL_RECOVERY = False
 
 
+def _is_rewrite_hook(token: str) -> bool:
+    """Whether a registered PreToolUse command token invokes this plugin's
+    rewrite hook. The Windows installer rewrites the command into the
+    PowerShell form `& '<python>' -X utf8 -B
+    "${env:QODER_PLUGIN_ROOT}/hooks/shared/rewrite_hook.py"`, whose token
+    split never yields a bare `rewrite_hook.py`, so also accept the
+    plugin's own `hooks/shared/` path form; arbitrary external paths do
+    not count.
+    """
+    if os.path.basename(token) != "rewrite_hook.py":
+        return False
+    return token == "rewrite_hook.py" or token.replace("\\", "/").endswith(
+        "hooks/shared/rewrite_hook.py"
+    )
+
+
 def _prepare_qwenwork_recovery(
     plugin_root: str, payload: dict
 ) -> dict[str, str] | None:
@@ -90,13 +106,9 @@ def _prepare_qwenwork_recovery(
         covered = set()
         for group in hooks:
             if any(
-                # Match by basename: the Windows installer rewrites each hook
-                # command into the PowerShell form
-                # `& '<python>' -X utf8 -B "${env:QODER_PLUGIN_ROOT}/hooks/shared/rewrite_hook.py"`,
-                # whose token split never yields a bare `rewrite_hook.py`.
                 hook.get("type") == "command"
                 and any(
-                    os.path.basename(token) == "rewrite_hook.py"
+                    _is_rewrite_hook(token)
                     for token in shlex.split(hook.get("command", ""))
                 )
                 for hook in group.get("hooks", [])

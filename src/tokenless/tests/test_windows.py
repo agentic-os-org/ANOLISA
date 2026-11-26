@@ -98,10 +98,16 @@ class WindowsHookTests(unittest.TestCase):
         settings.write_text('{"disabled":true}', encoding="utf-8")
         self.install()
         installed = json.loads((self.plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
-        self.assertEqual(set(installed["hooks"]), {"PostToolUse"})
+        self.assertEqual(set(installed["hooks"]), {"PreToolUse", "PostToolUse"})
         self.assertEqual(
             installed["hooks"]["PostToolUse"][0]["hooks"][0]["shell"], "powershell"
         )
+        pre = installed["hooks"]["PreToolUse"][0]
+        self.assertEqual(
+            pre["hooks"][0]["shell"], "powershell"
+        )
+        self.assertIn("rewrite_hook.py", pre["hooks"][0]["command"])
+        self.assertIn("PowerShell", pre["matcher"])
         marker = self.plugin / self.lifecycle.MARKER
         before = marker.stat().st_mtime_ns
         self.install()
