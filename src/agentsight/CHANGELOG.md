@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.17.1
+
+### Features
+- Import public AW execution audit in the Linux `serve` process with `--aw-binary` and `--aw-audit-state-dir`, and query the private projection with `agentsight aw-audit`. Immutable execution objects and chain cursors are committed together; import reachability is reported separately from the last successful check.
+
+### Security
+- Create the configuration-encryption salt atomically with owner-only read permissions, reject symlinks and FIFOs on reads, and coordinate creation on filesystems without hard-link support.
+- Treat leading-dash fact-check symbols as literal grep patterns and constrain file/path checks to the repository, including symlink resolution; skip blank symbols and accept contained absolute paths.
+
+### Fixes
+- Pin shared SSL images through the observed process namespace and verify their mapping identity, so the original process exiting during attachment cannot invalidate the remaining probes. Keep startup warm-up probes across process exits and refresh replaced launchers.
+- Preserve Gemini `modelVersion` and `responseId` in drained SSE streams, fall back when primary fields are empty, clamp unindexed candidates to the merged length, and label non-streaming Responses usage as OpenAI.
+- Fold SSE usage before continuation buffers reach their cap, preserve authoritative Anthropic `message_delta` usage against stale prefixes, and propagate folded usage through delivery analysis. Recover unterminated or newline-terminated unframed tails and decode stacked SSE content codings.
+- Key Anthropic content blocks by stream index, bound block indices, preserve native tool calls on empty chunks, avoid duplicate tool enrichment, and normalize empty tool-call/result IDs.
+- Preserve request bodies across split HTTP/1 headers and interim 1xx responses, count pending body bytes in retention, and flush them on incomplete-header abandonment.
+- Defer HTTP/2 stream retirement until END_STREAM header/trailer continuations finish, and reset stale HPACK state when oversized continuations are dropped.
+- Apply late provider usage semantics and normalize exclusive cached prompt totals in ATIF final metrics; retain real cached usage and final-prompt hints in recorded optimization roots.
+- Keep newer activity polls and completed manual evaluations from being overwritten by older reads; treat non-object evaluation fields safely and use cached request JSON when a parsed request is absent.
+- Reapply reuse-review filters after decisions, retire reads started before a decision, clear failed audit-list snapshots, and reset selection mode when toggling pending rows.
+- Preserve confirmed storage saves when a follow-up usage refresh fails, preserve keys edited during a save, and report clipboard fallback success only when copying succeeds.
+- Resolve external sub-agent references with empty or explicit trajectory IDs, preserve marker-named project directories, and retire stale analysis runs on history navigation.
+- Restrict resource-timeline evidence to protocol tool responses and call IDs instead of matching result-shaped JSON inside unrelated payloads; retain legacy boolean and `[` commands.
+- Use all active bindings for global capacity checks, retain trusted targets from the activation preview, and keep structured directory-tree denials from poisoning runtime health.
+- Scope enforcer subscription cleanup by registration generation so an old unsubscribe cannot close a replacement stream; preserve containment compare-and-swap timestamps when recording blocked evidence and align clamped violation offsets to page boundaries.
+- Stop and join FFI worker threads before closing eventfd, and deliver drained `CleanExitPartial` LLM calls to FFI even without SQLite. C FFI signatures and event layouts are unchanged.
+- Deduplicate default and explicit logtail exporters by kernel file identity, drain pending handoffs, and retain exporter registration across reactivation.
+- Resolve relative configuration and PID-file paths before daemon chdir, and clamp out-of-range purge cutoffs consistently in token, HTTP and token-consumption stores.
+- Trim agent filters consistently in cache and GenAI queries, and make empty cache CLI filters match the API.
+- Isolate temporary-input and cleanup failures to individual batch-analysis sessions rather than aborting remaining work or discarding completed results.
+- Reject malformed campaign QPS/repetition values, skip malformed k6 metric names with diagnostics, group reports by recorded QPS, honor SVG point limits, and fit RSS trends from all samples.
+- Count benchmark losses across counter resets, attribute probe drops by phase, and report unavailable capacity attribution when a positive counter series disappears instead of treating it as zero loss.
+- Associate DateTimePicker labels with their inputs for accessible time selection.
+
+### Performance
+- Bound rolling RSS window lookups without changing the sample-based trend calculation.
+
+### Upgrade notes
+- AW audit import is optional, Linux-only, and must run as the owner of AW state using an absolute path to a trusted AW executable. The private `aw-audit/audit.db` projection has a 64 MiB main-file cap; regular retention does not prune it.
+- Preserve the existing `.secret_salt` with encrypted configuration when upgrading or rolling back; this release does not require a configuration-schema migration (schema remains 6).
+
 ## 0.17.0
 
 ### Breaking changes
