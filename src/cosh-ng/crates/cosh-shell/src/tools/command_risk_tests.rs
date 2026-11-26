@@ -1392,6 +1392,46 @@ fn compound_readonly_fails_closed_outside_the_eligible_envelope() {
     }
 }
 
+// Lib-only so the exact lib/bin overlap ceiling stays unchanged (the macro
+// compiles this into the lib target alone; a bare #[test] here would also
+// reach the bin target and raise the overlap).
+library_tests! {
+    #[test]
+    fn compound_readonly_never_overrides_the_sensitive_path_gate() {
+        // The simple path fails closed on sensitive targets before any
+        // readonly evidence is considered; a compound aggregates the same
+        // "sensitive-path" reason from its per-segment assessments, so
+        // appending benign readonly segments must not convert an
+        // approval-gated read into an auto-executed compound. The evidence
+        // grant honors the same gate the simple path applies.
+        for command in [
+            "cat .env && pwd",
+            "cat .env; pwd",
+            "cat .env || pwd",
+            "cat .env\npwd",
+            "pwd && cat ~/.netrc",
+            "cat /etc/shadow && echo done",
+            // Tab separation and unspaced meta: the parser treats \t as a
+            // token separator and records an unspaced && as a segment
+            // connector, so the gate must hold for these spellings too —
+            // the entries pin that a future segmentation change cannot
+            // reopen the bypass unnoticed.
+            "cat\t.env&&pwd",
+            "cat\t.env\t&&\tpwd",
+        ] {
+            let assessment = auto(command);
+            assert_eq!(
+                assessment.execution,
+                ExecutionDecision::AskUser,
+                "{command}"
+            );
+            assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+            assert!(assessment.reasons.contains(&"sensitive-path"), "{command}");
+            assert!(assessment.auto_allow.is_none(), "{command}");
+        }
+    }
+}
+
 #[test]
 fn compound_readonly_grant_preserves_aggregated_assessment_fields() {
     // Issue #1882 invariant I4: granting the evidence changes only the
