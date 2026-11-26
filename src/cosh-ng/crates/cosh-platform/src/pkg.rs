@@ -597,7 +597,7 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
             "pkg",
         ),
         PkgManager::Apt => run_command(
-            Command::new("dpkg-query").args(["-W", "-f", "${Package}\n"]),
+            Command::new("dpkg-query").args(["-W", "-f", "${db:Status-Abbrev}\t${Package}\n"]),
             PKG_TIMEOUT,
             "pkg",
         ),
@@ -612,7 +612,11 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
     match result {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            parse_installed_names(&stdout)
+            if mgr == PkgManager::Apt {
+                parse_installed_names_with_status(&stdout)
+            } else {
+                parse_installed_names(&stdout)
+            }
         }
         _ => HashSet::new(),
     }
@@ -625,6 +629,26 @@ fn parse_installed_names(output: &str) -> HashSet<String> {
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .map(|l| l.to_string())
+        .collect()
+}
+
+/// Parse `dpkg-query -W -f '${db:Status-Abbrev}\t${Package}\n'` output.
+///
+/// `dpkg-query -W` enumerates every status-database row, including
+/// removed-but-not-purged (`rc`) packages; only rows whose status starts
+/// with "ii" are installed — the same rule `parse_apt_list_output` applies
+/// for `pkg list --installed`.
+fn parse_installed_names_with_status(output: &str) -> HashSet<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (status, name) = line.split_once('\t')?;
+            status
+                .trim()
+                .starts_with("ii")
+                .then(|| name.trim().to_string())
+        })
+        .filter(|name| !name.is_empty())
         .collect()
 }
 
@@ -1616,6 +1640,68 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains("bash"));
         assert!(names.contains("nginx"));
+    }
+
+    #[test]
+    fn test_parse_installed_names_with_status_keeps_only_installed_rows() {
+        let output = "ii \tnginx\nrc\texim4-config\nun\tghost-pkg\nhi \theld-pkg\n";
+        let names = parse_installed_names_with_status(output);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("nginx"));
+        assert!(!names.contains("exim4-config"));
+        assert!(!names.contains("ghost-pkg"));
+        assert!(!names.contains("held-pkg"));
+    }
+
+    #[test]
+    fn test_parse_installed_names_with_status_ignores_malformed_lines() {
+        let output = "ii\tnginx\nno-tab-here\n\nrc\texim4-config\n";
+        let names = parse_installed_names_with_status(output);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("nginx"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn get_installed_names_apt_reports_only_currently_installed_packages() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A PATH-scoped dpkg-query stub drives the exact command shape. It
+        // prints status-annotated rows only when the -f format asks for
+        // ${db:Status-Abbrev} (the fixed query); the historical plain-name
+        // branch is a tripwire that makes a format revert produce no rows.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("dpkg-query");
+        std::fs::write(
+            &stub,
+            r#"#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    *Status-Abbrev*) printf 'ii\tnginx\nrc\texim4-config\nun\tghost-pkg\n'; exit 0;;
+  esac
+done
+printf 'nginx\nexim4-config\nghost-pkg\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let scoped_path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        std::env::set_var("PATH", &scoped_path);
+        let names = get_installed_names(PkgManager::Apt);
+        match original_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let mut expected = HashSet::new();
+        expected.insert("nginx".to_string());
+        assert_eq!(names, expected);
     }
 
     #[test]
