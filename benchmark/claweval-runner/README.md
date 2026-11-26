@@ -241,6 +241,12 @@ Core logic: `src/ce_runner/tool_injector.py`
 | `scripts/check_api_key.py` | Test API key connectivity |
 | `scripts/check_openclaw_env.py` | Inspect openclaw environment (`--fix` to cleanup) |
 
+The offline token comparison marks a trial `insufficient_evidence` when any
+supplied token count is not a non-negative integer. Other trials still appear
+in the summary and CSV. Integer strings and explicit zeros are accepted.
+Omitted session totals and cache counters default to zero; a trace-end record
+and its aggregate counters remain optional.
+
 Fixed-port per-trial sandboxes attempt stop and force removal when startup
 readiness fails or is interrupted, before any handle reaches the caller.
 Shutdown also attempts removal after a failed stop. Cleanup warnings expose

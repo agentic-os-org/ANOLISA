@@ -238,6 +238,10 @@ ce-runner 使用 openclaw 原生的 MCP 运行时(stdio)向 agent 暴露任务�
 | `scripts/check_api_key.py` | 测试 API key 连通性 |
 | `scripts/check_openclaw_env.py` | 检查 openclaw 环境(`--fix` 可清理) |
 
+离线 Token 对比会将包含无效计数的 trial 标为 `insufficient_evidence`，其余
+trial 仍会写入汇总和 CSV。提供的计数须为非负整数，支持整数字符串和显式零值。
+省略的 session 总数与缓存计数默认为零；trace-end 记录及其聚合计数仍为可选项。
+
 固定端口的逐 trial 沙箱会在启动就绪检查失败或中断时尝试停止并强制移除容器，
 无需等待调用方取得句柄。关闭时，即使停止操作失败，也会尝试移除。
 清理警告会指出未释放的资源，原始启动错误仍保持可见。
