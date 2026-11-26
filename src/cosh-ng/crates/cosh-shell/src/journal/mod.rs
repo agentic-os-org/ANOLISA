@@ -4,13 +4,14 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-use crate::types::ShellEvent;
+use crate::types::{ShellEvent, ShellEventKind};
 
 pub(crate) mod audit;
 
 #[derive(Debug)]
 pub(crate) struct ShellEventJournal {
     writer: BufWriter<File>,
+    last_editing_session: Option<String>,
 }
 
 impl ShellEventJournal {
@@ -24,15 +25,54 @@ impl ShellEventJournal {
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             writer: BufWriter::new(file),
+            last_editing_session: None,
         })
     }
 
     pub(crate) fn append(&mut self, events: &[ShellEvent]) -> io::Result<()> {
+        let mut last_editing_session = self.last_editing_session.as_deref();
         for event in events {
+            let editing_session = plain_editing_session(event);
+            if editing_session.is_some() && editing_session == last_editing_session {
+                continue;
+            }
             serde_json::to_writer(&mut self.writer, &redacted_event(event)).map_err(json_to_io)?;
             self.writer.write_all(b"\n")?;
+            last_editing_session = editing_session;
         }
-        self.writer.flush()
+        self.writer.flush()?;
+        if last_editing_session != self.last_editing_session.as_deref() {
+            self.last_editing_session = last_editing_session.map(str::to_owned);
+        }
+        Ok(())
+    }
+}
+
+fn plain_editing_session(event: &ShellEvent) -> Option<&str> {
+    match event {
+        ShellEvent {
+            kind: ShellEventKind::UserInputIntercepted,
+            session_id,
+            command_id: None,
+            command: None,
+            cwd: None,
+            end_cwd: None,
+            exit_code: None,
+            started_at_ms: _,
+            ended_at_ms: None,
+            duration_ms: None,
+            terminal_output_ref: None,
+            terminal_output_bytes: None,
+            input: None,
+            component: Some(component),
+            message: Some(message),
+            command_origin: None,
+            shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
+        } if component == "shell_input" && message == "input editing" => Some(session_id),
+        _ => None,
     }
 }
 
