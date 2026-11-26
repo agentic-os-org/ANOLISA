@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.17] - 2026-11-26
+
+### Fixed
+
+- OpenClaw discovery and plugin reloads keep memory tools, automatic recall, and automatic capture working while the host can still call the active plugin instance (#9439).
+- OpenClaw automatic recall can match names containing supplementary Han characters such as 𠮷野家. The `anolisa_memory_search` tool also reports an empty search as “no matching memories found” (#10515, #10464).
+- Changes to automatic capture and consolidation consent take effect on the next check. An existing consent file that is empty, unreadable, or invalid blocks automatic writes. Updating one scope in an empty or invalid file keeps the other scope denied (#9557).
+- `memory_sessions` reads tool-call counts from the call-count wording in session summaries, so a duration such as 15 minutes no longer appears as 15 calls (#3720).
+- Task tools use the task filename as the ID, so listed tasks can be resumed, updated, or closed even when the stored ID is inconsistent. Files with invalid task filenames are skipped. Task progress values above 100 are capped at 100% when saved or read (#9558, #9411).
+- Full index rescans retain existing search entries for temporarily unreadable files and still remove entries for deleted files (#9409).
+- `mem_snapshot` reports gzip finalization failures before publishing a snapshot and attempts to remove the incomplete archive (#6929).
+
 ## [0.2.16] - 2026-11-13
 
 ### Fixed
