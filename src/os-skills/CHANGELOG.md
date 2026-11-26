@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-26
+
+### Fixed
+
+- The `setup-mcp` skill refuses to merge into an existing configuration whose
+  JSON root is an array, string, number, boolean, or `null`, reporting an error
+  and preserving the original file and its permissions instead of silently
+  replacing its contents. Normal object-root merges and backup recovery for
+  malformed JSON are unchanged; repair the existing configuration before
+  retrying (#10668)
+
 ## [0.8.0] - 2026-11-22
 
 ### Added

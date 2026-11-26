@@ -1,6 +1,6 @@
 {
   "name": "anolisa-os-skills",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "skills": [
     "ai/install-claude-code",
     "ai/install-hermes",
