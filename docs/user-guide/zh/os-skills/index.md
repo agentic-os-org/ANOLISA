@@ -74,6 +74,15 @@ RPM 安装请通过包管理器卸载，raw `anolisa install` 部署请使用
 > "显示运行中的容器及其资源使用"
 ```
 
+用户安装后，可用以下命令查找 ANOLISA 手册：
+
+```bash
+python3 ~/.copilot-shell/skills/anolisa-guide/scripts/check_docs.py
+```
+
+成功时，最后一行是可供读取的文档目录。刷新失败时，指南会在自身的安装目录下查找
+`reference/`。如果设置了 `SKILLS_DIR`，请运行该集合中的脚本。
+
 ---
 
 ## 技能分类

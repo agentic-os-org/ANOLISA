@@ -32,17 +32,11 @@ TIMEOUT = 180  # 爬取超时时间（秒）
 # 目录常量
 USER_CACHE_DIR = Path.home() / ".cache" / "anolisa"
 CACHE_DIR = USER_CACHE_DIR / "skills" / "anolisa-guide" / "reference"
-STATIC_DIR = Path("/usr/share/anolisa/skills/anolisa-guide/reference")
 VENV_DIR = USER_CACHE_DIR / ".venv"
 
-# 脚本目录
-STATIC_SCRIPT_DIR = Path("/usr/share/anolisa/skills/anolisa-guide/scripts")
-CURRENT_SCRIPT_DIR = Path(__file__).parent.resolve()
-
-if STATIC_SCRIPT_DIR.exists() and (STATIC_SCRIPT_DIR / "setup_env.py").exists():
-    SCRIPT_DIR = STATIC_SCRIPT_DIR
-else:
-    SCRIPT_DIR = CURRENT_SCRIPT_DIR
+# Use the helpers and reference pages shipped with this copy of the skill.
+SCRIPT_DIR = Path(__file__).resolve().parent
+STATIC_DIR = SCRIPT_DIR.parent / "reference"
 
 
 def get_crawl_time(filepath: Path) -> datetime | None:
