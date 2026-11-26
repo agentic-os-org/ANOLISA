@@ -189,6 +189,11 @@ def _is_powershell_event(tool_name: str) -> bool:
 
 
 def _qwenwork_retrieve_command(key: str, tool_name: str) -> str | None:
+    # The key is interpolated verbatim into the emitted command; accept only
+    # the 24-hex form the Marker grammar allows (both engines share this
+    # single rewrite exit).
+    if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{24}", key):
+        return None
     if _QWENWORK_RECOVERY is None:
         return None
     runtime = _QWENWORK_RECOVERY
