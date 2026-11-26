@@ -58,5 +58,10 @@ later shell `cd` does not change that boundary, and paths that escape it are
 rejected. Search results are bounded and report truncation when they are not
 complete. MCP output entering Agent context is limited to 64 KiB.
 
+For both forms of invocation failure (a tool result marked as an error or an
+error returned by the invocation itself), Core keeps at most 25,000 bytes and
+1,000 lines of the original error text. If the text exceeds either limit, Core
+appends a truncation notice.
+
 See [MCP setup](../mcp.md) for external tools and [Extensions](extensions.md)
 for extension-provided tools.
