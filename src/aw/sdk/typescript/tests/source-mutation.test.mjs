@@ -17,6 +17,12 @@ test("opt-in sourceCapabilities and lifecycle compatibility", () => {
   assert.equal(base.failure_actions, undefined);
   assert.equal(
     confirmSourceRoutes(base, {
+      hooks: [{ event: "tool.after", on_error: "block" }],
+    }),
+    false,
+  );
+  assert.equal(
+    confirmSourceRoutes(base, {
       hooks: [{ event: "tool.before", replace_input: true }],
     }),
     false,

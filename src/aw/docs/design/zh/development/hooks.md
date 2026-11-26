@@ -47,7 +47,8 @@ Scope 的映射，并在改变任一绑定前提供迁移方案和回归覆盖�
 （见 [Core 准入](../core-admission.md#多源-hook-求解与-shadow-plan-等价核对)）。
 声明式插桩合同 `aw_contracts::instrumentation::InstrumentationProfile`
 （`instrumentation-profile-v1alpha1`）同样已完成离线契约测试并可编译为
-`SourceCapability`。Python 应用可通过 SDK Source 激活该 Profile。[插桩 Profile](../core-admission.md#插桩-profile)
+`SourceCapability`。Python 与 JS 应用可在运行时通过现有 SDK Scope 启用可选 ProfileSource
+（见 [插桩 Profile](../core-admission.md#插桩-profile)）。
 当前 Adapter 提供准备后的能力和原生接线；引入共享抽象时保留现有可执行合同。未接入运行期主路径的
 SPI、wire 字段和 CLI 不得写成已激活的运行期功能。
 

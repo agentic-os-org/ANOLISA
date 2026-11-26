@@ -380,6 +380,53 @@ export async function deliverStrictToolResult(
   }
 }
 
+// Only an admitted after route needs snapshots or can delay native delivery.
+export function streamCollector({
+  observeAfter,
+  strictAfter,
+  bufferStream,
+  maxStreamItems,
+  maxStreamBytes,
+  snapshotResult,
+  customExtract = false,
+}) {
+  if (strictAfter && !bufferStream)
+    throw new AwError("source_stream_withhold_requires_buffering");
+  const buffered = observeAfter && bufferStream;
+  const items = observeAfter ? [] : undefined;
+  let bytes = 2;
+  function checkBytes() {
+    if (bytes > maxStreamBytes)
+      throw new AwError("source_stream_result_too_large");
+  }
+  return {
+    buffered,
+    items,
+    finish() {
+      if (items && maxStreamBytes !== undefined) checkBytes();
+    },
+    collect(value) {
+      if (!items) return;
+      if (items.length >= maxStreamItems)
+        throw new AwError("source_stream_result_too_large");
+      const copy = buffered
+        ? isolateStrictValue(value, {
+            snapshotResult,
+            requirePlainJson: true,
+            customExtract,
+          })
+        : customExtract
+          ? snapshotStreamChunk(value)
+          : normalizeJson(value);
+      if (maxStreamBytes !== undefined) {
+        bytes += jsonEncodedBytes(copy) + (items.length ? 1 : 0);
+        checkBytes();
+      }
+      items.push(copy);
+    },
+  };
+}
+
 export async function* runToolStream({
   session,
   receiver,
@@ -397,29 +444,34 @@ export async function* runToolStream({
   maxStreamBytes = DEFAULT_MAX_STREAM_BYTES,
   bufferStream,
 }) {
-  const strictAfter = session._strictAfter();
-  if (strictAfter && !bufferStream)
-    throw new AwError("source_stream_withhold_requires_buffering");
-  const observeAfter = session._observeAfter();
-  const bufferedAfter = strictAfter || (bufferStream && observeAfter);
-  const customExtract = Boolean(extractResult);
-  const items = observeAfter ? [] : null;
-  let bufferedBytes = 2;
+  const collector = streamCollector({
+    observeAfter: session._observeAfter(),
+    strictAfter: session._strictAfter(),
+    bufferStream,
+    maxStreamItems,
+    maxStreamBytes: bufferStream ? maxStreamBytes : undefined,
+    snapshotResult,
+    customExtract: Boolean(extractResult),
+  });
+  const { buffered, items } = collector;
   let afterDecision;
   let dispatched = false;
   function finish(close) {
     return session._runAdmittedCall(async () => {
       await close();
-      if (bufferedAfter && bufferedBytes > maxStreamBytes)
-        throw new AwError("source_stream_result_too_large");
+      collector.finish();
       if (session._observeAfter()) {
         afterDecision = await observeResult(
           items,
           callId,
           snapshot,
           signal,
-          bufferedAfter
-            ? { maxBytes: maxStreamBytes, isolateForExtract: true, isStream: true }
+          buffered
+            ? {
+                maxBytes: maxStreamBytes,
+                isolateForExtract: true,
+                isStream: true,
+              }
             : undefined,
         );
       }
@@ -438,35 +490,16 @@ export async function* runToolStream({
   );
   try {
     for await (const item of stream) {
-      if (bufferedAfter) {
-        if (items.length >= maxStreamItems)
-          throw new AwError("source_stream_result_too_large");
-        const isolated = isolateStrictValue(item, {
-          snapshotResult,
-          requirePlainJson: true,
-          customExtract,
-        });
-        bufferedBytes += jsonEncodedBytes(isolated) + (items.length ? 1 : 0);
-        if (bufferedBytes > maxStreamBytes)
-          throw new AwError("source_stream_result_too_large");
-        items.push(isolated);
-      } else {
-        if (items && session._observeAfter()) {
-          if (items.length >= maxStreamItems)
-            throw new AwError("source_stream_result_too_large");
-          items.push(
-            extractResult ? snapshotStreamChunk(item) : normalizeJson(item),
-          );
-        }
-        yield item;
-      }
+      if (buffered || (items && session._observeAfter()))
+        collector.collect(item);
+      if (!buffered) yield item;
     }
-    if (bufferedAfter) {
+    if (buffered) {
       const deliver =
         afterDecision && Object.hasOwn(afterDecision, "replaced_result")
           ? applyStreamResult(items, afterDecision.replaced_result, {
               applyResult,
-              customExtract,
+              customExtract: Boolean(extractResult),
             })
           : cloneBufferedChunks(items);
       for (const out of deliver) {

@@ -145,6 +145,9 @@ Profile 纯函数编译为 `python` 或 `js` 类型的 `SourceCapability`，供�
 - Python 应用可通过 `aw_sdk.profile_source.ProfileSource` 显式启用插桩 Profile。
   Python SDK 校验并包装声明的调用点，复用现有 SDK 准入和 Hook 路由。
   Service、CLI 和离线求解器沿用各自的职责。
+- Node.js SDK 的可选 ProfileSource 核验包身份、安装 CJS 或 ESM 绑定，并通过现有
+  SDK Scope 准入所支持的 Hook。Service 和 Provider 沿用应用直接接入 SDK 时的执行路由。
+  接入步骤见 [TypeScript SDK 指南](../../../sdk/typescript/README.md)。
 - **多目标保守合并**：同一 Profile 中多个目标声明同一语义 Hook 事件时，
   `source_capability` 对 `effects` 与 `failure_actions` 取交集，仅当该事件的全部目标均为
   `control` 时才保留 `HookAuthority::Control`；否则降级为 `HookAuthority::Observe`

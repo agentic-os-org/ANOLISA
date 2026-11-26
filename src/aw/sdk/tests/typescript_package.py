@@ -54,6 +54,7 @@ def assert_core_tarball_boundary(artifact: Path) -> None:
         "package/dist/sources.mjs",
         "package/dist/sources.d.ts",
         "package/dist/source-mutation.mjs",
+        "package/dist/vendor/es-module-lexer/LICENSE",
         "package/dist/native/shared/scope.mjs",
         "package/dist/native/shared/transport.mjs",
     ):
@@ -130,10 +131,12 @@ def main(binary: str, packages: tuple[Path, Path, Path, Path] | None = None) -> 
             """import assert from 'node:assert/strict';
 import { Instance } from '@anolisa/aw-sdk';
 import { LanguageSource } from '@anolisa/aw-sdk/sources';
+import { ProfileSource } from '@anolisa/aw-sdk/profile-source';
 import { runPiWorker } from '@anolisa/aw-sdk/pi';
 import { qoderOptions, createQoderBridge } from '@anolisa/aw-sdk/qoder';
 assert.equal(typeof Instance, 'function');
 assert.equal(typeof LanguageSource, 'function');
+assert.equal(typeof ProfileSource.probe, 'function');
 assert.throws(
   () => qoderOptions({}, {}),
   (error) => error.code === 'optional_adapter_not_installed' && error.message.includes('@anolisa/aw-sdk-qoder'),

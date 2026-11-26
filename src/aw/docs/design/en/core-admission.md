@@ -178,6 +178,10 @@ offline resolver can reason about candidate language-instrumentation Sources:
   `aw_sdk.profile_source.ProfileSource`. It verifies and wraps Python call sites
   and uses the existing SDK admission and Hook routes. Service, CLI and the
   offline resolver retain their existing responsibilities.
+- The optional Node.js SDK ProfileSource probes package identity, installs CJS
+  or ESM bindings, and admits its supported Hooks through the existing SDK Scope.
+  Service and Provider execution use the same routes as an application-owned
+  SDK integration. See the [TypeScript SDK guide](../../../sdk/typescript/README.md).
 - **Conservative multi-target merge**: when multiple targets in one profile
   declare the same semantic Hook event, `source_capability` intersects their
   `effects` and `failure_actions` and retains `HookAuthority::Control` only if

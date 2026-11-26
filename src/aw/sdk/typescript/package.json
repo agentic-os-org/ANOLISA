@@ -21,6 +21,16 @@
       "import": "./dist/sources.mjs",
       "default": "./dist/sources.mjs"
     },
+    "./profile-source": {
+      "types": "./dist/profile-source.d.ts",
+      "import": "./dist/profile-source.mjs",
+      "default": "./dist/profile-source.mjs"
+    },
+    "./profile-preload": {
+      "types": "./dist/profile-preload.d.ts",
+      "import": "./dist/profile-preload.mjs",
+      "default": "./dist/profile-preload.mjs"
+    },
     "./codex-gateway": {
       "types": "./dist/codex-gateway.d.ts",
       "import": "./dist/codex-gateway.mjs",

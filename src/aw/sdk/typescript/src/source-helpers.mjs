@@ -213,7 +213,7 @@ function withSignal(pending, signal, onSettled) {
   });
 }
 
-function isAbortReason(reason, signals) {
+export function isAbortReason(reason, signals) {
   return signals.some(
     (stop) =>
       stop?.aborted &&
