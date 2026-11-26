@@ -20,6 +20,53 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Identifies the step that needs post-permission adoption, if one is configured.
+///
+/// A first logical rewrite may also observe. A step that can deny and replace,
+/// or a rewrite following other checks, requires a terminal handoff.
+///
+/// # Errors
+/// Rejects multiple rewrites, invalid positions and fail-open enforcing steps.
+pub fn input_handoff<'a, E>(
+    steps: impl Iterator<Item = (&'a str, E, bool)>,
+) -> Result<Option<&'a str>, &'static str>
+where
+    E: Iterator<Item = &'a str> + Clone,
+{
+    let mut seen_rewrite = false;
+    let mut handoff = None;
+    let mut closed = true;
+    for (index, (id, mut effects, block)) in steps.enumerate() {
+        closed &= block;
+        if handoff.is_some() {
+            return Err(INPUT_REPLACEMENT_ORDER);
+        }
+        if effects.clone().any(|effect| effect == "replace_input") {
+            if seen_rewrite
+                || !effects
+                    .clone()
+                    .all(|effect| matches!(effect, "observe" | "block" | "replace_input"))
+            {
+                return Err(INPUT_REPLACEMENT_ORDER);
+            }
+            seen_rewrite = true;
+            if index > 0 || effects.any(|effect| effect == "block") {
+                handoff = Some(id);
+            }
+        }
+    }
+    if seen_rewrite && !closed {
+        return Err(INPUT_REPLACEMENT_ORDER);
+    }
+    Ok(handoff)
+}
+
+const INPUT_REPLACEMENT_ORDER: &str =
+    "input replacement requires one initial logical rewrite or terminal handoff and fail-closed before steps";
+
+/// Admission diagnostic when an entrypoint cannot adopt arguments after native checks.
+pub const HANDOFF_UNSUPPORTED: &str = "entrypoint lacks post-permission input handoff";
+
 /// Version of the resolved Hook plan contract understood by this build.
 pub const VERSION: &str = "aw-resolved-hook-plan/v1alpha1";
 
@@ -34,6 +81,9 @@ pub const SCHEMA_NAME: &str = "resolved-hook-plan-v1alpha1";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectedSource {
+    /// Whether this entrypoint adopts tool input after native permission checks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub post_permission: bool,
     /// Unique identifier of the selected Source.
     pub source_id: String,
     /// Mechanism class of the selected Source.
@@ -55,6 +105,7 @@ pub struct SelectedSource {
 impl SelectedSource {
     fn as_capability(&self) -> HookPointCapability {
         HookPointCapability {
+            post_permission: self.post_permission,
             mode: self.mode,
             effects: self.effects.clone(),
             failure_actions: self.failure_actions.clone(),
@@ -193,7 +244,6 @@ impl ResolvedHookPoint {
             .iter()
             .enumerate()
             .filter(|(_, step)| !step.shadow);
-        let first = enforcing.clone().next().map(|(index, _)| index);
         let last = enforcing.clone().next_back().map(|(index, _)| index);
         let mut seen_steps = BTreeSet::new();
         for (index, step) in self.steps.iter().enumerate() {
@@ -276,18 +326,19 @@ impl ResolvedHookPoint {
                     "result replacement must be the last applicable enabled event step",
                 )?;
             }
-            if step.effects.contains(&HookEffect::ReplaceInput) {
-                require(
-                    self.event == "tool.before"
-                        && Some(index) == first
-                        && step.effects == [HookEffect::ReplaceInput]
-                        && enforcing
-                            .clone()
-                            .all(|(_, step)| step.on_error == FailureAction::Block),
-                    "input replacement requires a first sole-effect step and fail-closed before steps",
-                )?;
-            }
         }
+        let handoff = input_handoff(enforcing.map(|(_, step)| {
+            (
+                step.step_id.as_str(),
+                step.effects.iter().map(|effect| effect.as_str()),
+                step.on_error == FailureAction::Block,
+            )
+        }))
+        .map_err(Error::Invariant)?;
+        require(
+            handoff.is_none() || dispatch_owner.post_permission,
+            HANDOFF_UNSUPPORTED,
+        )?;
         Ok(())
     }
 }

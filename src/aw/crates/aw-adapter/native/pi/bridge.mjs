@@ -23,6 +23,10 @@ export function validateRoutes(config) {
       !hook.step ||
       !["report", "block", "withhold_result"].includes(hook.on_error) ||
       (hook.on_error === "withhold_result" && hook.event !== "tool.after") ||
+      [hook.event_tools, hook.step_tools].some(selectors => selectors !== undefined &&
+        (!Array.isArray(selectors) || !selectors.length || selectors.some(s => typeof s !== "string"))) ||
+      (hook.post_permission !== undefined && typeof hook.post_permission !== "boolean") ||
+      (hook.post_permission === true && (hook.event !== "tool.before" || hook.replace_input !== true)) ||
       !Number.isInteger(hook.budget_ms) ||
       hook.budget_ms < 1 ||
       hook.budget_ms > 55000
@@ -41,6 +45,13 @@ export function validateRoutes(config) {
       "Pi replacement step must be the last configured after step",
     );
   return config;
+}
+
+// Pi retains the native name as the normalized tool name.
+function matchesTool(selectors, name) {
+  return selectors === undefined || selectors.some(selector => selector.startsWith("native:")
+    ? selector === `native:pi:${name}` || selector === "native:pi:*"
+    : selector === "*" || selector === name);
 }
 
 function identifier(value, label) {
@@ -88,8 +99,8 @@ async function invoke(config, hook, payload, signal) {
     throw new Error("unsupported_pi_directive");
   }
   if (Object.hasOwn(directive, "aw_updated_input") &&
-      (hook.event !== "tool.before" || Object.keys(directive).length !== 1 ||
-       !directive.aw_updated_input || typeof directive.aw_updated_input !== "object" ||
+      (hook.event !== "tool.before" ||
+       Object.keys(directive).length !== 1 || !directive.aw_updated_input || typeof directive.aw_updated_input !== "object" ||
        Array.isArray(directive.aw_updated_input))) throw new Error("invalid_pi_input_replacement");
   if (Object.hasOwn(directive, "aw_withheld") &&
       (hook.event !== "tool.after" || hook.on_error !== "withhold_result" ||
@@ -137,8 +148,21 @@ function validateReplacement(result, replacement) {
     throw new Error("pi_replacement_changed_native_metadata");
 }
 
+function isBoundBuiltin(session, context, name) {
+  // Pi loadouts can copy a tool to change its description while retaining its execute function.
+  const base = session._baseToolDefinitions?.get(name);
+  const execute = context.context?.tools?.find(tool => tool.name === name)?.execute;
+  return Object.hasOwn(session, "_baseToolsOverride") && !session._baseToolsOverride &&
+    base !== undefined && session.getToolDefinition?.(name) === base &&
+    typeof execute === "function" && session._toolRegistry?.get(name)?.execute === execute;
+}
+
 /** Install after createAgentSession returns; resolve durable session identity at each preparation. */
-export function installSessionBridge(session, scope = null, policy = configuration()) {
+export function installSessionBridge(session, cwd, scope = null, policy = configuration()) {
+  // Built-in tools retain the extension context's cwd string. A symlink alias can be retargeted.
+  const toolCwd = session.extensionRunner?.createContext?.().cwd;
+  if (typeof toolCwd !== "string" || toolCwd !== cwd)
+    throw new Error("Pi tool directory must match the admitted cwd");
   const config = { ...(scope ? validateRoutes(policy) : configuration(policy)), scope };
   const agent = session.agent;
   if (!agent || typeof session.sessionManager?.getSessionId !== "function") {
@@ -154,6 +178,7 @@ export function installSessionBridge(session, scope = null, policy = configurati
   const beforeRoutes = config.hooks.filter(
     (hook) => hook.event === "tool.before",
   );
+  const inputRoute = beforeRoutes.find(hook => hook.replace_input);
   const afterRoutes = config.hooks.filter(
     (hook) => hook.event === "tool.after",
   );
@@ -161,12 +186,16 @@ export function installSessionBridge(session, scope = null, policy = configurati
   const previousEvents = agent.processEvents;
   if (strict && typeof previousEvents !== "function")
     throw new Error("AW strict Pi output requires the native event dispatch seam");
-  const evaluate = async (routes, payload, signal) => {
+  const evaluate = async (routes, payload, signal, rewrite = false) => {
     let withhold = false;
     for (const hook of routes) {
       try {
         const directive = await invoke(config, hook, payload, signal);
-        if (directive.aw_updated_input) return { input: directive.aw_updated_input };
+        if (directive.aw_updated_input) {
+          // Service publishes checked arguments on the final callback, including early rewrites.
+          if (!rewrite || hook !== routes.at(-1)) throw new Error("invalid_pi_input_replacement");
+          return { input: directive.aw_updated_input };
+        }
         if (directive.aw_withheld) { withhold = true; continue; }
         if (Object.hasOwn(directive, "aw_replacement"))
           return withhold ? { withhold: true } : { replacement: directive.aw_replacement };
@@ -209,12 +238,28 @@ export function installSessionBridge(session, scope = null, policy = configurati
     }
     return withhold ? { withhold: true } : undefined;
   };
+  const nativeBefore = async (context, signal, checked) => {
+    if (!previousBefore) return;
+    if (!checked) return previousBefore.call(agent, context, signal);
+    // Pi retains validated args for execution, including while it prepares parallel calls.
+    const view = { ...context, args: structuredClone(context.args) };
+    const result = await previousBefore.call(agent, view, signal);
+    if (result?.block || isDeepStrictEqual(view.args, context.args)) return result;
+    return { block: true, reason: "Native callback changed checked arguments" };
+  };
   let before = async function (context, signal) {
     config.scope?.checkExecution();
     producer?.claim(context);
-    const rewrite = beforeRoutes.some(hook => hook.replace_input);
-    let original = rewrite ? undefined : await previousBefore?.call(agent, context, signal);
+    const toolName = identifier(context.toolCall.name, "tool name");
+    const rewrite = inputRoute && matchesTool(inputRoute.event_tools, toolName) &&
+      matchesTool(inputRoute.step_tools, toolName);
+    const postPermission = rewrite && inputRoute.post_permission === true;
+    const unsupportedHandoff = postPermission && !isBoundBuiltin(session, context, toolName);
+    const earlyRewrite = rewrite && !postPermission;
+    let original = earlyRewrite ? undefined : await nativeBefore(context, signal, postPermission);
     if (original?.block) return original;
+    if (unsupportedHandoff)
+      return { block: true, reason: "AW execution handoff requires a bound Pi built-in tool" };
     const call = identifier(context.toolCall.id, "tool call id");
     const identity = {
       invocation_id: scope ? call : randomUUID(),
@@ -224,7 +269,7 @@ export function installSessionBridge(session, scope = null, policy = configurati
       ),
       tool_call: {
         id: call,
-        name: identifier(context.toolCall.name, "tool name"),
+        name: toolName,
         input: JSON.parse(JSON.stringify(context.args)),
       },
     };
@@ -238,6 +283,7 @@ export function installSessionBridge(session, scope = null, policy = configurati
       beforeRoutes,
       { ...identity, event: "tool.before" },
       signal,
+      rewrite,
     );
     if (denied?.block) {
       if (config.scope) await config.scope.finish(identity.invocation_id);
@@ -245,15 +291,14 @@ export function installSessionBridge(session, scope = null, policy = configurati
     }
     if (denied?.input) {
       for (const key of Object.keys(context.args)) delete context.args[key];
-      Object.assign(context.args, structuredClone(denied.input));
-      identity.tool_call.input = structuredClone(denied.input);
+      Object.defineProperties(context.args, Object.getOwnPropertyDescriptors(structuredClone(denied.input)));
+      identity.tool_call.input = denied.input;
     }
-    if (rewrite) {
-      const checked = structuredClone(context.args);
-      original = await previousBefore?.call(agent, context, signal);
-      if (original?.block || !isDeepStrictEqual(context.args, checked)) {
+    if (earlyRewrite) {
+      original = await nativeBefore(context, signal, true);
+      if (original?.block) {
         if (config.scope) await config.scope.finish(identity.invocation_id);
-        return original?.block ? original : { block: true, reason: "Native callback changed checked arguments" };
+        return original;
       }
     }
     if (config.scope) await config.scope.validate();

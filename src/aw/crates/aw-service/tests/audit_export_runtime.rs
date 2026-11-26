@@ -50,6 +50,7 @@ fn qoder_and_qwenpaw_facts_export_after_service_shutdown_without_sight() {
                     Operation::Bind {
                         target: "qoder".into(),
                         capabilities: Capabilities {
+                            post_permission: false,
                             adapter: adapter.into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),
@@ -214,6 +215,7 @@ fn qoder_claude_and_openclaw_after_results_export_and_replay() {
                     Operation::Bind {
                         target: "qoder".into(),
                         capabilities: Capabilities {
+                            post_permission: false,
                             adapter: adapter.into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),

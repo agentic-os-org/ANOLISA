@@ -1,7 +1,7 @@
 /** Callback boundary tests use the real bridge and a bounded command fixture, without AW. */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { installSessionBridge } from "../../../../aw-adapter/native/pi/bridge.mjs";
@@ -11,6 +11,11 @@ const output = fileURLToPath(
   new URL("../../../../../target/pi-bridge-contract/", import.meta.url),
 );
 mkdirSync(output, { recursive: true });
+
+function sessionFor(agent, id = "session") {
+  return { agent, sessionManager: { getSessionId: () => id },
+    extensionRunner: { createContext: () => ({ cwd: process.cwd() }) } };
+}
 
 function fixture(
   t,
@@ -82,10 +87,7 @@ console.log(JSON.stringify({aw_replacement:result}));
   };
   const originalBefore = agent.beforeToolCall;
   const originalAfter = agent.afterToolCall;
-  const installed = installSessionBridge({
-    agent,
-    sessionManager: { getSessionId: () => "durable-session" },
-  });
+  const installed = installSessionBridge(sessionFor(agent, "durable-session"), process.cwd());
   t.after(() => {
     installed.dispose();
     rmSync(directory, { recursive: true, force: true });
@@ -261,8 +263,7 @@ test("unconfirmed input retirement fences the next prompt after drain", async (t
       return { code: 0, stdout: Buffer.alloc(0) };
     };
     scope.invoke = async () => ({ code: 0, stdout: Buffer.from("{}") });
-    const bridge = installSessionBridge({ agent: { subscribe: () => () => {}, abort() {} },
-      sessionManager: { getSessionId: () => "session" } }, scope);
+    const bridge = installSessionBridge(sessionFor({ subscribe: () => () => {}, abort() {} }), process.cwd(), scope);
     try {
       scope.begin();
       await assert.rejects(bridge.submit("input", "turn", new AbortController().signal));
@@ -323,7 +324,7 @@ console.log(JSON.stringify(p.event==='tool.before'?{aw_updated_input:{...p.tool_
     beforeToolCall: async context => { received.push(structuredClone(context.args)); },
     afterToolCall: async () => {}, subscribe: () => () => {},
   };
-  const bridge = installSessionBridge({ agent, sessionManager: { getSessionId: () => 'session' } }, null, {
+  const bridge = installSessionBridge(sessionFor(agent), process.cwd(), null, {
     executable: helper, binding: 'unused', ready_path: 'unused', ready_token: 'fixture',
     hooks: [{ event: 'tool.before', step: 'rewrite', on_error: 'block', budget_ms: 1000, replace_input: true }],
   });
@@ -332,4 +333,95 @@ console.log(JSON.stringify(p.event==='tool.before'?{aw_updated_input:{...p.tool_
   assert.equal(await agent.beforeToolCall(context), undefined);
   assert.deepEqual(context.args, { command: 'checked', timeout: 7 });
   assert.deepEqual(received, [{ command: 'checked', timeout: 7 }]);
+});
+
+test("terminal handoff checks the original command before AW", async t => {
+  const directory = mkdtempSync(join(output, "handoff-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const helper = join(directory, "callback");
+  const calls = join(directory, "calls");
+  writeFileSync(helper, `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+(async () => {
+  let input = "";
+  for await (const chunk of process.stdin) input += chunk;
+  const { tool_call } = JSON.parse(input);
+  const step = process.argv[process.argv.indexOf("--step") + 1];
+  appendFileSync(${JSON.stringify(calls)}, JSON.stringify([step, tool_call.input]) + "\\n");
+  console.log(JSON.stringify(step === "sandbox" && tool_call.name === "bash" ?
+    { aw_updated_input: { ...tool_call.input, command: "sandbox-launcher", ["__proto__"]: { label: "data" } } } : {}));
+})();
+`, { mode: 0o700 });
+  writeFileSync(calls, "");
+  const seen = [];
+  let retained;
+  const agent = {
+    beforeToolCall: async context => {
+      const { args } = context;
+      seen.push(structuredClone(args));
+      if (args.command === "native-deny") return { block: true, reason: "native denied" };
+      if (args.command === "native-allow") {
+        retained = args;
+        context.args = structuredClone(args);
+      }
+      if (args.path) args.path = args.path.replace("./", "");
+      if (args.command === "native-mutate") args.command = "different";
+    },
+    subscribe: () => () => {},
+  };
+  const bash = { name: "bash", execute() {} };
+  const builtin = { name: "bash" };
+  let definition = builtin;
+  const session = Object.assign(sessionFor(agent), {
+    _baseToolsOverride: undefined, _toolRegistry: new Map([["bash", bash]]),
+    _baseToolDefinitions: new Map([["bash", builtin]]), getToolDefinition: () => definition,
+  });
+  const bridge = installSessionBridge(session, process.cwd(), null, {
+    executable: helper, binding: "unused", ready_path: "unused", ready_token: "fixture",
+    hooks: [
+      { event: "tool.before", step: "scan", on_error: "block", budget_ms: 1000 },
+      { event: "tool.before", step: "sandbox", on_error: "block", budget_ms: 1000,
+        event_tools: ["native:pi:*"], step_tools: ["bash"], replace_input: true, post_permission: true },
+      { event: "tool.after", step: "audit", on_error: "report", budget_ms: 1000 },
+    ],
+  });
+  t.after(() => bridge.dispose());
+  const context = command => ({ toolCall: { id: command, name: "bash" }, args: { command, timeout: 7 }, context: { tools: [bash] } });
+  const unsupported = { block: true, reason: "AW execution handoff requires a bound Pi built-in tool" };
+  definition = { name: "bash" };
+  assert.deepEqual(await agent.beforeToolCall(context("custom")), unsupported);
+  definition = builtin;
+  const stale = context("stale");
+  stale.context.tools = [{ ...bash, execute() {} }];
+  assert.deepEqual(await agent.beforeToolCall(stale), unsupported);
+  session._baseToolsOverride = { bash };
+  assert.deepEqual(await agent.beforeToolCall(context("override")), unsupported);
+  session._baseToolsOverride = undefined;
+  assert.deepEqual(await agent.beforeToolCall(context("native-deny")), { block: true, reason: "native denied" });
+  assert.deepEqual(await agent.beforeToolCall(context("native-mutate")), {
+    block: true, reason: "Native callback changed checked arguments",
+  });
+  assert.equal(readFileSync(calls, "utf8"), "");
+  const allowed = context("native-allow");
+  allowed.context.tools = [{ ...bash, description: "Codemode loadout" }];
+  const executionArgs = allowed.args;
+  assert.equal(await agent.beforeToolCall(allowed), undefined);
+  retained.command = "late edit";
+  assert.deepEqual(executionArgs, { command: "sandbox-launcher", timeout: 7, ["__proto__"]: { label: "data" } });
+  assert.equal(Object.getPrototypeOf(executionArgs), Object.prototype);
+  assert.deepEqual(seen.map(args => args.command),
+    ["custom", "stale", "override", "native-deny", "native-mutate", "native-allow"]);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line)), [
+    ["scan", { command: "native-allow", timeout: 7 }],
+    ["sandbox", { command: "native-allow", timeout: 7 }],
+  ]);
+  const checked = structuredClone(executionArgs);
+  executionArgs["__proto__"].label = "tool-local";
+  await agent.afterToolCall({ ...allowed, result: { content: [] }, isError: false });
+  assert.deepEqual(JSON.parse(readFileSync(calls, "utf8").trim().split("\n").at(-1)), ["audit", checked]);
+  const read = { toolCall: { id: "read-1", name: "read" }, args: { path: "./docs/README.md" } };
+  assert.equal(await agent.beforeToolCall(read), undefined);
+  assert.equal(read.args.path, "docs/README.md");
+  assert.deepEqual(JSON.parse(readFileSync(calls, "utf8").trim().split("\n").at(-1)),
+    ["sandbox", { path: "docs/README.md" }]);
 });

@@ -124,14 +124,14 @@ must not enter Service, Core or Host to add a new Agent.
 
 ## Input replacement and native authorization
 
-Security denial and native permission denial retain precedence. An admitted
-`replace_input` step is the first applicable `tool.before` step, has that sole
-effect, and requires fail-closed before steps. Host binds the candidate input
-without renewing identity, claims or budget. Service checks all later Providers
-and native Hooks against that candidate and publishes it only with the final
-successful callback. Adapters adopt it within the same invocation and retain
-native authorization. Legacy Tokenless `block` suggestions remain explicit
-retry mode. Input replacement never emits native approval.
+A `tool.before` plan admits at most one enforcing `replace_input` step. All enforcing
+steps on that event must fail closed. A first logical rewrite can also declare
+`observe`. Host binds its candidate arguments to the current invocation, and
+Service publishes them only after the remaining checks succeed. A rewrite
+following another check, or one that also declares `block`, must be last and
+requires an entrypoint that adopts execution arguments after native permission.
+Both forms preserve the invocation identity, claims and budget. Native denial
+stops execution. A Tokenless retry suggestion starts a new invocation.
 
 ## Adding an Agent or changing support
 

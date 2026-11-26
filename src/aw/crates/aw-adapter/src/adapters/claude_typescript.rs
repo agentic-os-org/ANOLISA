@@ -79,6 +79,7 @@ pub(super) fn prepare(
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
+            post_permission: false,
             adapter: "claude-sdk".into(),
             version: self.profile["sdk"].as_str().unwrap_or_default().into(),
             entrypoint: "typescript-sdk-worker".into(),

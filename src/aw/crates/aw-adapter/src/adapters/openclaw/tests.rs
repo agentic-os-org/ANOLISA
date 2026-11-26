@@ -84,6 +84,7 @@ fn generated_profile_marks_only_the_admitted_replacement_step() {
     let steps: Vec<_> = ["observe", "compress"]
         .into_iter()
         .map(|id| AdmittedStep {
+            post_permission: false,
             event: "tool.after".into(),
             step_id: id.into(),
             provider: "fixture".into(),

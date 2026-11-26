@@ -121,6 +121,7 @@ impl Consumer {
                     ("tool.before".into(), vec!["observe".into(), "block".into()]),
                     ("tool.after".into(), vec!["observe".into()]),
                 ]),
+                post_permission: false,
                 failure_actions: Default::default(),
             },
             ProcessContext {

@@ -543,6 +543,7 @@ mod tests {
             Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    post_permission: false,
                     failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),

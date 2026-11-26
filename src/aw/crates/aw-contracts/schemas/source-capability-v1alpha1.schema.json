@@ -132,6 +132,7 @@
             "$ref": "#/$defs/hookEffect"
           }
         },
+        "post_permission": { "type": "boolean" },
         "failure_actions": {
           "type": "array",
           "minItems": 0,

@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Operation::Bind {
             target: "qoder".into(),
             capabilities: Capabilities {
+                post_permission: false,
                 failure_actions: Default::default(),
                 adapter: "qoder".into(),
                 version: "synthetic-example".into(),

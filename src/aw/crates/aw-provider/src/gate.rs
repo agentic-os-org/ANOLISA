@@ -18,7 +18,7 @@ pub enum GateKind {
 /// Authorized payload slot rewritable by a [`GateKind::Mutation`] Hook.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MutationSlot {
-    /// Initial pre-tool argument object (`replace_input`), retaining original keys.
+    /// Pre-tool argument object (`replace_input`), retaining original keys.
     PreToolInput,
     /// Final post-tool projected text slot (`replace_result`), never blocking completion.
     PostToolResult,

@@ -40,7 +40,7 @@ test("worker capabilities follow the seams the loaded worker provides", () => {
   const strict = workerBinding({ worker: runWorker, inputEnabled: true, strictOutput: true });
   assert.deepEqual(
     { ...strict.capabilities, events: undefined, failure_actions: undefined },
-    { ...piProfile, events: undefined, failure_actions: undefined },
+    { ...piProfile, post_permission: true, events: undefined, failure_actions: undefined },
   );
   assert.deepEqual(Object.keys(strict.capabilities.events).sort(), [
     "input.submit",

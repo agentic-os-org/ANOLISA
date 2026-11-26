@@ -85,22 +85,31 @@ the native session untouched, allowing the next prompt after drain.
 
 ## Tool semantics
 
-The original before callback runs first. Its exceptions and denials retain their
-Pi meaning; AW does not grant native permission. AW sees validated arguments
-including original callback mutations. AW denial returns `{block:true,reason}`;
-Pi skips execution and its after callback. Unknown tools, argument validation
+Each factory must use the canonical AW binding path as its tool directory.
+Pi retains the supplied path for execution, so a symlink alias is rejected.
+Pi exposes this directory through the SDK extension context. A resident task
+also checks its session manager directory. For a terminal handoff the bridge
+checks the tool selected for this turn against the current registry and its
+built-in origin. SDK and extension overrides can choose a different directory.
+
+For a matching logical rewrite, the native before callback checks the revised
+arguments. For a matching terminal handoff, it checks the original arguments
+before AW runs the Provider steps. In both cases the callback receives a copy.
+Changing its value blocks execution. AW writes the accepted arguments into the
+object Pi will pass to the tool. For other tools the native callback runs first
+and AW sees any in-place argument normalization. AW denial returns
+`{block:true,reason}`. Pi skips execution and its after callback. Unknown tools, argument validation
 errors, early abort and native before failures also skip after. Tool exceptions
-reach after with `isError:true`.
+reach after with `isError:true`. A `block` response can include the Provider's
+retry reason. Pi adds the denied result to the next model context. A model
+retry starts a new call through all before checks and native permissions.
 
 The original after callback runs first. AW observes its field-by-field replacement
 using Pi's nullish merge semantics, including image normalization, `isError`,
 and `structuredContent`. A content override without structured output drops
 the stale structured field; AW text replacement does the same.
 Native callback exceptions keep the SDK's error behavior; strict output uses a
-generic error message to avoid exposing unchecked callback data. AW before supports
-`observe`/`block`, including a Provider's literal retry reason. Pi adds the denied
-tool result to the next model context; AW never executes a suggestion or rewrites
-arguments. A model retry is a new call through all before checks and native permissions.
+generic error message to avoid exposing unchecked callback data.
 
 AW after supports `observe` and `replace_result`. Steps execute in configuration
 order against the same effective native result: observers and custom Hooks precede
@@ -177,7 +186,7 @@ owned process group. Native command output may be empty or a JSON object with
 only boolean `block` and optional string `reason`; blocking is valid for
 `input.submit` and `tool.before`. Resident submissions invoke the same dialect
 through `aw scope --action invoke` with their private task handle.
-Approvals, input rewriting and native result rewriting are rejected. Nonzero or
+Native command replies that request approval or modify tool arguments or results are rejected. Nonzero or
 signal exits and invalid output use the configured failure action. A native Hook
 cannot forge `aw_replacement`; only an admitted final structured replacement step
 can emit it through the protected AW configuration.

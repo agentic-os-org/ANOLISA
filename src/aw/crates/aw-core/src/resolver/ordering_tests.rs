@@ -25,6 +25,7 @@ fn replacement_order_only_counts_enforcing_steps() {
             BTreeMap::from([(
                 event.to_owned(),
                 HookPointCapability {
+                    post_permission: false,
                     mode: HookAuthority::Control,
                     effects: vec![HookEffect::Observe, effect],
                     failure_actions: vec![],
@@ -58,9 +59,10 @@ fn replacement_order_only_counts_enforcing_steps() {
         check_step_ordering(event, &[replacement.clone(), shadow.clone()], sources).unwrap();
         check_step_ordering(event, &[shadow, replacement.clone()], sources).unwrap();
         let misordered = if effect == HookEffect::ReplaceInput {
-            [enforce, replacement]
+            check_step_ordering(event, &[enforce.clone(), replacement.clone()], sources).unwrap();
+            vec![enforce.clone(), replacement, enforce]
         } else {
-            [replacement, enforce]
+            vec![replacement, enforce]
         };
         assert!(check_step_ordering(event, &misordered, sources).is_err());
     }

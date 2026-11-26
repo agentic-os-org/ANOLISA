@@ -283,6 +283,7 @@ fn adapters_keep_observers_and_user_hooks_before_one_final_replacement() {
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            post_permission: false,
                             failure_actions: Default::default(),
                             adapter: adapter.into(),
                             version: "fixture".into(),

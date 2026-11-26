@@ -116,8 +116,9 @@ if (process.env.AW_PI_PROBE === "1") {
     const { runWorker } = await import(new URL("./resident.mjs", import.meta.url));
     await runWorker(app, sdk, core, args);
   } else {
-  if (configuration().hooks.some(hook => hook.event === "input.submit"))
+  if (startup.hooks.some(hook => hook.event === "input.submit"))
     throw new Error("AW Pi input.submit requires the runWorker factory");
+  const cwd = JSON.parse(readFileSync(startup.binding, "utf8")).cwd;
   const installations = new Map();
   // All new/resume/fork/import replacements must use this common application factory.
   const createSession = async (options = {}) => {
@@ -134,7 +135,9 @@ if (process.env.AW_PI_PROBE === "1") {
     if (installations.has(session))
       throw new Error("Pi factory returned an already managed session");
     const bridge = await import(new URL("./bridge.mjs", import.meta.url));
-    const installed = bridge.installSessionBridge(session);
+    let installed;
+    try { installed = bridge.installSessionBridge(session, cwd, null, startup); }
+    catch (error) { await session.dispose(); throw error; }
     installations.set(session, installed);
     await installed.sessionStart();
     return result;

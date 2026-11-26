@@ -5,6 +5,7 @@ export class AgentSession {
   constructor(cwd) {
     this.agent = new Agent();
     this.sessionManager = { getSessionId: () => this.id, getCwd: () => cwd };
+    this.extensionRunner = { createContext: () => ({ cwd }) };
     this.id = randomUUID();
     this.agent.streamFunction = async () => {};
     this.agent.prompt = async messages => this.agent.streamFunction(null, { messages });

@@ -208,6 +208,12 @@ impl Host {
                 provider(&document["spec"]["providers"][id], &context)?,
             );
         }
+        if providers
+            .values()
+            .any(|provider| !provider.native && !provider.hook)
+        {
+            protocol.validate_cwd(&context.cwd)?;
+        }
         let package_leases =
             PackageLeases::acquire(providers.values_mut().map(|provider| &mut provider.command))?;
         check(deadline, cancelled)?;
@@ -455,6 +461,7 @@ fn same_capabilities(left: &AdapterCapabilities, right: &AdapterCapabilities) ->
         && left.version == right.version
         && left.entrypoint == right.entrypoint
         && left.events == right.events
+        && left.post_permission == right.post_permission
         && left.failure_actions == right.failure_actions
 }
 

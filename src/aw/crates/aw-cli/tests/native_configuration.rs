@@ -144,6 +144,7 @@ fn native_load_with(
 
 fn capabilities() -> AdapterCapabilities {
     AdapterCapabilities {
+        post_permission: false,
         adapter: "qoder".into(),
         version: "fixture".into(),
         entrypoint: "native-loader-consumer".into(),

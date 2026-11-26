@@ -134,7 +134,7 @@ fn cancellation_of_one_concurrent_event_does_not_cancel_its_neighbor() {
     assert_ne!(failed.record.request_id, survived.record.request_id);
     assert_eq!(
         fixture.call(&survived.record.request_id)["request"]["event"],
-        survivor_value
+        fixture.provider_event(&survivor_value)
     );
     fixture.assert_reaped();
 }

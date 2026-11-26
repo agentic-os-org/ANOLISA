@@ -25,6 +25,7 @@ fn prepared(profile: &Profile, mode: &str) -> Prepared {
 
 fn action(event: &str) -> AdmittedStep {
     AdmittedStep {
+        post_permission: false,
         event: event.into(),
         step_id: "record".into(),
         provider: "fixture".into(),

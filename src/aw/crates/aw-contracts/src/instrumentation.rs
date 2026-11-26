@@ -533,6 +533,7 @@ impl InstrumentationProfile {
             merged_hooks.insert(
                 event.to_owned(),
                 HookPointCapability {
+                    post_permission: false,
                     mode,
                     effects: effects.into_iter().collect(),
                     failure_actions: failure_actions.into_iter().collect(),

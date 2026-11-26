@@ -31,6 +31,9 @@ pub struct Identity {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
+    /// Whether this entrypoint adopts tool input after native permission checks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub post_permission: bool,
     /// Configured Adapter name.
     pub adapter: String,
     /// Validated native version; supplying it does not prove hook installation.
@@ -47,6 +50,7 @@ pub struct Capabilities {
 impl From<AdapterCapabilities> for Capabilities {
     fn from(value: AdapterCapabilities) -> Self {
         Self {
+            post_permission: value.post_permission,
             adapter: value.adapter,
             version: value.version,
             entrypoint: value.entrypoint,
@@ -59,6 +63,9 @@ impl From<AdapterCapabilities> for Capabilities {
 impl From<Capabilities> for AdapterCapabilities {
     fn from(value: Capabilities) -> Self {
         Self {
+            post_permission: value.post_permission
+                && aw_adapter::select(&value.adapter)
+                    .is_ok_and(|adapter| adapter.post_permission(&value.entrypoint)),
             adapter: value.adapter,
             version: value.version,
             entrypoint: value.entrypoint,

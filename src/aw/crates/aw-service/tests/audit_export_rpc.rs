@@ -96,6 +96,7 @@ impl Fixture {
         let binding = fixture.call(Operation::Bind {
             target: "qoder".into(),
             capabilities: Capabilities {
+                post_permission: false,
                 adapter: adapter.into(),
                 version: "fixture".into(),
                 entrypoint: "manual-rpc".into(),
@@ -117,6 +118,11 @@ impl Fixture {
         json!({"name":name,"agent":{"adapter":self.adapter,"binding_id":"qoder","instance_id":self.instance},
             "session_id":"session","tool":{"name":"bash","native_name":"bash","call_id":call,
                 "input":{"command":"private command"},"result":result},"native":{}})
+    }
+
+    fn provider_event(&self, mut event: Value) -> Value {
+        event["cwd"] = json!(self.root.path());
+        event
     }
 
     fn finish(&self, event: Value, status: Option<ResultStatus>) -> (String, Value) {
@@ -220,7 +226,7 @@ fn manual_completion_exports_provider_records_and_replays() {
                     fs::read_to_string(fixture.root.path().join("invocations.jsonl")).unwrap();
                 let forwarded: Value =
                     serde_json::from_str(invoked.lines().last().unwrap()).unwrap();
-                assert_eq!(forwarded, original);
+                assert_eq!(forwarded, fixture.provider_event(original));
                 snapshots.push((key, page));
             }
         }
@@ -245,7 +251,10 @@ fn legacy_completion_without_call_id_invokes_provider_and_keeps_audit_gap() {
     assert_eq!(reply["effects"][0]["type"], "replace_result");
     assert_eq!(fixture.read(&key)["error"], "projection_unavailable");
     let invoked = fs::read_to_string(fixture.root.path().join("invocations.jsonl")).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&invoked).unwrap(), event);
+    assert_eq!(
+        serde_json::from_str::<Value>(&invoked).unwrap(),
+        fixture.provider_event(event)
+    );
 }
 
 #[test]
@@ -368,7 +377,10 @@ fn manual_result_fields_only_affect_status_at_native_completion_callbacks() {
         let digest = aw_contracts::canonical::document_digest(&business_field).unwrap();
         assert_eq!(details["resultDigest"]["value"], digest, "{adapter}");
         let invoked = fs::read_to_string(fixture.root.path().join("invocations.jsonl")).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&invoked).unwrap(), event);
+        assert_eq!(
+            serde_json::from_str::<Value>(&invoked).unwrap(),
+            fixture.provider_event(event.clone())
+        );
 
         let mut native = event;
         let input = native["tool"]["input"].clone();
@@ -507,7 +519,10 @@ fn legacy_security_violation_keeps_projection_and_provider_behavior() {
         .unwrap()
         .remove("result_projection");
     let invoked = fs::read_to_string(fixture.root.path().join("invocations.jsonl")).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&invoked).unwrap(), event);
+    assert_eq!(
+        serde_json::from_str::<Value>(&invoked).unwrap(),
+        fixture.provider_event(event)
+    );
 }
 
 #[test]

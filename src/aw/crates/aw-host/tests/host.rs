@@ -33,6 +33,34 @@ use std::{
 };
 
 #[test]
+fn structured_provider_rejects_unrepresentable_cwd_before_discovery() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    let fixture = Fixture::new();
+    for cwd in [
+        PathBuf::from("/line\nbreak"),
+        PathBuf::from(format!("/{}", "x".repeat(4096))),
+        PathBuf::from(OsString::from_vec(vec![b'/', 0xff])),
+    ] {
+        let mut context = fixture.context();
+        context.cwd = cwd;
+        let result = Host::prepare(
+            &serde_json::to_vec(&fixture.document()).unwrap(),
+            "target",
+            capabilities(),
+            context,
+            Instant::now() + TIMEOUT,
+            &AtomicBool::new(false),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Protocol(aw_provider::Error::Invalid(_)))
+        ));
+    }
+    assert!(fixture.calls("describe").is_empty());
+}
+
+#[test]
 fn preparation_deduplicates_enabled_providers_and_skips_disabled_references() {
     let fixture = Fixture::new();
     let mut document = fixture.document();
@@ -235,7 +263,7 @@ fn tool_payloads_and_private_json_preserve_unicode_decimals_and_native_types() {
         let invocation = selected.invoke(step).unwrap();
         assert!(invocation.result.is_ok());
         let observed = fixture.call(&invocation.record.request_id);
-        assert_eq!(observed["request"]["event"], value);
+        assert_eq!(observed["request"]["event"], fixture.provider_event(&value));
         assert_eq!(
             observed["request"]["config"],
             document["spec"]["providers"]["policy"]["config"]

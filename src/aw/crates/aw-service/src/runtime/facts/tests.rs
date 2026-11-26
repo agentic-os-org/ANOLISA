@@ -43,6 +43,7 @@ impl Fixture {
             .bind(
                 "qoder".into(),
                 Capabilities {
+                    post_permission: false,
                     adapter: adapter.into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),

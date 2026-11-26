@@ -9,7 +9,7 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub(super) struct State {
     input: Option<Value>,
-    denied: bool,
+    pub(super) denied: bool,
 }
 
 impl Runtime {
@@ -22,9 +22,12 @@ impl Runtime {
         state: &Mutex<State>,
         last: bool,
     ) -> Result<Option<Value>> {
-        if original["name"] != "tool.before" || !event.callback_steps().first().is_some_and(|step| {
-            matches!(&step.execution, aw_core::admission::StepExecution::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input"))
-        }) {
+        if original["name"] != "tool.before"
+            || !event
+                .callback_steps()
+                .iter()
+                .any(|step| step.execution.replaces_input())
+        {
             return Ok(None);
         }
         let mut state = state
@@ -43,6 +46,7 @@ impl Runtime {
                             .iter()
                             .find(|effect| effect["type"] == "replace_input")
                     })
+                    .filter(|_| !state.denied)
                 {
                     let input = effect["input"].clone();
                     let native = aw_adapter::input::native(adapter, &original["native"], &input)

@@ -209,6 +209,9 @@ impl FailureAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookPointCapability {
+    /// Whether this entrypoint adopts tool input after native permission checks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub post_permission: bool,
     /// Whether this source can own synchronous control or only passive observation.
     pub mode: HookAuthority,
     /// Supported Provider effects at this semantic Hook point.
@@ -259,6 +262,12 @@ impl HookPointCapability {
         require(
             seen_effects.contains(&HookEffect::Observe),
             "Hook capability must include observe",
+        )?;
+        require(
+            !self.post_permission
+                || (self.mode == HookAuthority::Control
+                    && self.supports_effect(HookEffect::ReplaceInput)),
+            "post-permission handoff requires input replacement control",
         )?;
         let mut seen_actions = BTreeSet::new();
         for action in &self.failure_actions {
@@ -520,6 +529,7 @@ impl CapabilityCell {
                     )?;
                 }
                 HookPointCapability {
+                    post_permission: false,
                     mode,
                     effects: self.effects.clone(),
                     failure_actions: self.failure_actions.clone(),

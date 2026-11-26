@@ -22,6 +22,7 @@ pub(crate) struct Profile {
 impl Profile {
     pub fn capabilities(&self, version: &str, entrypoint: &str) -> Capabilities {
         Capabilities {
+            post_permission: self.adapter.post_permission(entrypoint),
             failure_actions: Default::default(),
             adapter: self.name.into(),
             version: version.into(),

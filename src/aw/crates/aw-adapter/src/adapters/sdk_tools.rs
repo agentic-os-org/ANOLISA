@@ -409,6 +409,7 @@ mod tests {
     #[test]
     fn skill_resolution_is_selected_only_for_its_operation_and_native_tool() {
         let mut step = AdmittedStep {
+            post_permission: false,
             event: "tool.before".into(),
             step_id: "skill".into(),
             provider: "security".into(),
@@ -480,6 +481,7 @@ mod tests {
         let mk_step =
             |event: &str, step_id: &str, provider: &str, on_error: &str, op: &str, fx: &[&str]| {
                 AdmittedStep {
+                    post_permission: false,
                     event: event.into(),
                     step_id: step_id.into(),
                     provider: provider.into(),
@@ -560,6 +562,7 @@ mod tests {
         ] {
             let doc = json!({"spec": {"agents": {"target": {"adapter": adapter}}, "events": {}, "execution": {"default_event_budget_ms": 2000}}});
             let caps = AdapterCapabilities {
+                post_permission: false,
                 adapter: adapter.into(),
                 version: "1.0.0".into(),
                 entrypoint: entrypoint.into(),
@@ -581,7 +584,7 @@ mod tests {
             );
             assert_eq!(
                 policy["hooks"][0].get("event_tools").is_some(),
-                adapter == "qwenpaw",
+                matches!(adapter, "qwenpaw" | "pi"),
                 "{adapter}"
             );
             assert_eq!(
@@ -619,6 +622,7 @@ mod tests {
         }
         // Semantic SDK validates tool observation budgets before projecting subscribed events.
         let sdk_caps = AdapterCapabilities {
+            post_permission: false,
             adapter: "sdk".into(),
             version: "aw-hook-source/v1".into(),
             entrypoint: "application".into(),
@@ -640,13 +644,11 @@ mod tests {
         // early at registration until the Source SPI takes over callback normalization.
         for entrypoint in ["application", "sdk", "sdk-worker", "factory"] {
             let doc = json!({"spec": {"agents": {"target": {"adapter": "sdk"}}, "events": {}, "execution": {"default_event_budget_ms": 3000}}});
-            let events = BTreeMap::from([("tool.before".into(), vec!["observe".into()])]);
             let caps = AdapterCapabilities {
-                adapter: "sdk".into(),
                 version: "1.0.0".into(),
                 entrypoint: entrypoint.into(),
-                events: events.clone(),
-                failure_actions: BTreeMap::new(),
+                events: BTreeMap::from([("tool.before".into(), vec!["observe".into()])]),
+                ..sdk_caps.clone()
             };
             let prepared = compile_standard_resident_routes(&doc, &[], &caps).unwrap();
             assert_eq!(
@@ -679,6 +681,7 @@ mod tests {
             ("future-source", "tui"),
         ] {
             let caps = AdapterCapabilities {
+                post_permission: false,
                 adapter: adapter.into(),
                 version: "1.0.0".into(),
                 entrypoint: entrypoint.into(),

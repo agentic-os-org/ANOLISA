@@ -113,6 +113,7 @@ struct Schemas {
     request: jsonschema::Validator,
     response: jsonschema::Validator,
     event: jsonschema::Validator,
+    cwd: jsonschema::Validator,
 }
 
 impl Protocol {
@@ -141,15 +142,32 @@ impl Protocol {
             serde_json::from_str(REQUEST_SCHEMA).map_err(|_| Error::InvalidSchema)?;
         let response: Value =
             serde_json::from_str(RESPONSE_SCHEMA).map_err(|_| Error::InvalidSchema)?;
+        let event = request
+            .pointer("/oneOf/2/properties/event")
+            .ok_or(Error::InvalidSchema)?;
         Ok(Schemas {
             request: compile(&request)?,
             response: compile(&response)?,
-            event: compile(
-                request
-                    .pointer("/oneOf/2/properties/event")
+            event: compile(event)?,
+            cwd: compile(
+                event
+                    .pointer("/properties/cwd")
                     .ok_or(Error::InvalidSchema)?,
             )?,
         })
+    }
+
+    /// Check the bound directory before preparing structured Providers.
+    ///
+    /// # Errors
+    /// Rejects paths that cannot be represented by the invoke event schema.
+    pub fn validate_cwd(&self, cwd: &std::path::Path) -> Result<(), Error> {
+        let path =
+            serde_json::to_value(cwd).map_err(|_| Error::Invalid("bound cwd requires UTF-8"))?;
+        if !self.schemas.cwd.is_valid(&path) {
+            return Err(Error::Invalid("invalid bound cwd"));
+        }
+        Ok(())
     }
 
     /// Validate a normalized event without constructing or invoking a Provider request.

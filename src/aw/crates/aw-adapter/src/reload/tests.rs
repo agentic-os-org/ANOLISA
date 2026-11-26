@@ -11,6 +11,7 @@ fn steps(event: &str, replacement: bool) -> Vec<AdmittedStep> {
     ["observe", "user", "compress"]
         .into_iter()
         .map(|id| AdmittedStep {
+            post_permission: false,
             event: event.into(),
             step_id: id.into(),
             provider: id.into(),
@@ -123,6 +124,7 @@ fn native_routes_use_only_the_targets_admitted_steps() {
         .parse(&serde_json::to_vec(&value).unwrap())
         .unwrap();
     let capabilities = AdapterCapabilities {
+        post_permission: false,
         adapter: "qoder-sdk".into(),
         version: "1.0.56".into(),
         entrypoint: "sdk-worker".into(),
@@ -392,6 +394,7 @@ fn policy_updates_use_native_entrypoints_across_framework_releases() {
     ] {
         for version in ["1.0.55", "1.0.57", "3.0.0-preview", "2026.10.29"] {
             let mut capabilities = AdapterCapabilities {
+                post_permission: false,
                 adapter: adapter.into(),
                 version: version.into(),
                 entrypoint: entrypoint.into(),
@@ -638,6 +641,7 @@ fn native_execution_claims_match_each_bridges_lifecycle_identity() {
 fn scope_routes_match_scope_policy_and_reject_mismatched_targets() {
     let doc = document("pi");
     let capabilities = AdapterCapabilities {
+        post_permission: false,
         adapter: "pi".into(),
         version: "1.5.2".into(),
         entrypoint: "sdk".into(),

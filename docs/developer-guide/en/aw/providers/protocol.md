@@ -128,6 +128,7 @@ write no audit record in this library and grant no native permission.
 | `config_revision` | SHA-256 of the caller's exact configuration document, encoded as 64 lowercase hex characters |
 | `budget_ms` | Positive remaining execution budget supplied and enforced by the Host |
 | `allowed_effects` | Effects admitted for this operation and event |
+| `event.cwd` | Optional Host-bound working directory. An absolute path starting with `/`, at most 4096 characters, with no control characters |
 | `event.agent` | Adapter, configured `binding_id` and nullable runtime `instance_id` |
 | `event.session_id`, `event.tool.call_id` | Native identifiers; non-empty string on `session.start`, `session.end`, `input.submit` and `turn.stop`, or null when unavailable on tool events |
 | `event.tool` | `name`, `native_name`, `call_id`, `input` and `result` on tool events (`tool.before`, `tool.after`, `security.violation`); before-tool `result` must be null |
@@ -293,12 +294,39 @@ Adapter replaces its authorized text slot and preserves the native envelope and
 failure status. This is a
 candidate, not proof that a model consumed it; AW's journal excludes the text.
 The schema additions retain the experimental v1alpha1 protocol. Deploy matching
-CLI, service and Providers from the same validated build; older implementations
-reject unsupported projections/effects rather than ignoring them.
+CLI, service and Providers from the same validated build. The Host adds
+`event.cwd` to every invoke request. Providers validating the older closed
+schema reject that field, so upgrade them together even when no sandbox
+policy is enabled.
 
 ### Tokenless composition
 
-PreTool can return one `replace_input` effect with an object `input` retaining every original argument key. It must be the first applicable before step and its sole effect; every before step uses `on_error: block`. Later checks see the candidate and the last successful callback publishes it under the same identity and budget, preserving native authorization. Legacy `block` retry suggestions remain supported. PostTool replaces only authorized text slots. SDK-managed MCP handler input replacement is rejected before checking the candidate; unchanged MCP calls and PostTool processing keep their existing routes.
+A `tool.before` event can have one enforcing step that declares `replace_input`.
+Every enforcing step on that event uses `on_error: block`. Put a logical
+rewrite first with `replace_input` and optional `observe`. Later checks see the
+revised arguments and the last successful callback publishes them. A replacement
+after a preceding check, or one that also declares `block`, is an execution
+handoff and must be last. A replacement reply carries one `replace_input`
+effect with an object `input` retaining every original key. A `block` reply
+records a policy denial.
+
+Pi supports the handoff in its managed and SDK workers. When the current tool
+matches both the event and step selectors, Pi checks the original arguments
+with its native before callback. On success, AW runs the checks and the final
+step can supply execution arguments for that call. Handoffs require the registered
+Pi built-in executor. A matching SDK or extension override is blocked before
+Provider invocation because it can use a different working directory. Unmatched tools retain their
+native callback behavior. Hermes supports first-step logical rewrites. AW
+rejects handoff policies for Hermes at admission because its terminal command
+checks run inside the tool after the native before hook.
+
+For Providers that need the binding's directory,
+use top-level `event.cwd`. Tool arguments such as `event.tool.input.cwd` or
+`workdir` can name another directory.
+
+Legacy `block` retry suggestions remain supported. PostTool replaces only
+authorized text slots. SDK-managed MCP handlers reject input replacement
+before checking the candidate.
 See the [Tokenless reference](tokenless.md) for RTK ownership, result classification and telemetry.
 Current recovery capability is `none`; Schema/BeforeModel and Retrieve seams are not available.
 See [Core execution](../../../../../src/aw/docs/design/en/core-execution.md) for the separate plan API contract.

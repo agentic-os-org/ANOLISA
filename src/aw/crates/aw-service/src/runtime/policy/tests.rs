@@ -72,6 +72,7 @@ impl Fixture {
                     Operation::Bind {
                         target: "target".into(),
                         capabilities: Capabilities {
+                            post_permission: false,
                             adapter: adapter.into(),
                             version: version.into(),
                             entrypoint: entrypoint.into(),

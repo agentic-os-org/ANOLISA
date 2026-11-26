@@ -95,6 +95,7 @@ fn poisoned_audit_prevents_context_publication() {
             Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    post_permission: false,
                     failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
@@ -299,6 +300,7 @@ fn observation_audit_failure_keeps_enforcing_admission_and_primary_audit_healthy
             Operation::Bind {
                 target: "qoder".into(),
                 capabilities: Capabilities {
+                    post_permission: false,
                     failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),

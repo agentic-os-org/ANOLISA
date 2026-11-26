@@ -509,6 +509,7 @@ mod tests {
             "events":{"tool.before":{"enabled":true,"steps":[]}}}});
         for on_error in ["block", "report"] {
             let step = AdmittedStep {
+                post_permission: false,
                 event: "tool.before".into(),
                 step_id: "skill".into(),
                 provider: "security".into(),

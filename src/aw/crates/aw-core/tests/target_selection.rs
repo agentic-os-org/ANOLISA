@@ -33,6 +33,7 @@ fn document() -> Value {
 
 fn capabilities(adapter: &str) -> AdapterCapabilities {
     let mut caps = AdapterCapabilities {
+        post_permission: false,
         adapter: adapter.into(),
         version: "fixture".into(),
         entrypoint: "fixture".into(),

@@ -241,6 +241,7 @@ fn packaged_templates_route_both_agents_without_losing_security_scans() {
                 before_effects.push("replace_input".into());
             }
             let capabilities = AdapterCapabilities {
+                post_permission: false,
                 adapter: adapter.into(),
                 version: "fixture".into(),
                 entrypoint: "fixture".into(),

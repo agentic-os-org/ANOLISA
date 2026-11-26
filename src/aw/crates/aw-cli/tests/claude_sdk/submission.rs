@@ -51,6 +51,7 @@ fn submission_provider_faults_and_rejection_close_before_recovery() {
                     Operation::Bind {
                         target: "claude".into(),
                         capabilities: Capabilities {
+                            post_permission: false,
                             failure_actions: Default::default(),
                             adapter: "claude-sdk".into(),
                             version: "0.2.88".into(),

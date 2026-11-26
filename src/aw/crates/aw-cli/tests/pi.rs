@@ -28,7 +28,7 @@ fn setup(fixture: &Fixture) -> Value {
     )
     .unwrap();
     for (name,source) in [("pi-agent-core","export class Agent { subscribe(){ return ()=>{}; } async processEvents(){} }".to_string()),
-        ("pi-coding-agent","import {Agent} from '@earendil-works/pi-agent-core'; export class AgentSession { constructor(){this.agent=new Agent();this.sessionManager={getSessionId:()=> 'session-1'};} dispose(){} }".to_string())] {
+        ("pi-coding-agent","import {Agent} from '@earendil-works/pi-agent-core'; export class AgentSession { constructor(){this.agent=new Agent();this.extensionRunner={createContext:()=>({cwd:process.cwd()})};this.sessionManager={getSessionId:()=> 'session-1'};} dispose(){} }".to_string())] {
         let path=fixture.root.join("node_modules/@earendil-works").join(name);fs::create_dir_all(path.join("dist")).unwrap();
         fs::write(path.join("package.json"),json!({"name":format!("@earendil-works/{name}"),"version":"0.84.2","type":"module","exports":{".":{"import":"./dist/index.js"}}}).to_string()).unwrap();
         fs::write(path.join("dist/index.js"),source).unwrap();
@@ -58,6 +58,53 @@ fn events(fixture: &Fixture) -> Vec<Value> {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
 }
+#[test]
+fn factory_tool_cwd_must_match_the_binding_even_when_session_storage_matches() {
+    for entry in [
+        "export function run() { throw Error('unexpected run'); }",
+        "export async function runWorker({createSession}) { await createSession(); }",
+    ] {
+        let fixture = Fixture::new();
+        let document = setup(&fixture);
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi/submission-sdk.mjs"),
+            fixture
+                .root
+                .join("node_modules/@earendil-works/pi-coding-agent/dist/index.js"),
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("app.mjs"),
+            format!(
+                r#"
+export function createSession({{ sdk }}) {{
+  const session = new sdk.AgentSession(process.env.PI_TOOL_CWD);
+  session.sessionManager.getCwd = () => process.cwd();
+  return {{session}};
+}}
+{entry}
+"#
+            ),
+        )
+        .unwrap();
+        let service = Service::start(&fixture, &document);
+        let alias = fixture.root.join("alias");
+        std::os::unix::fs::symlink(&fixture.root, &alias).unwrap();
+        for cwd in [Path::new("/"), &alias] {
+            let mut command = launch(&fixture);
+            command.env("PI_TOOL_CWD", cwd);
+            let output = fixture.run(command);
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("admitted cwd"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        service.released(&fixture);
+    }
+}
+
 #[test]
 fn foreground_factory_installs_both_hooks_and_releases_binding() {
     let fixture = Fixture::new();

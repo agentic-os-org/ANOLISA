@@ -93,7 +93,7 @@ export async function runWorker(app, sdk, core, args, {
       if (poisoned) throw new Error("AW worker requires restart after failed task cleanup");
       const nativeStream = session.agent.streamFunction;
       if (typeof nativeStream !== "function") throw new Error("Pi requires its public model stream function");
-      const bridge = installSessionBridge(session, scope, policy);
+      const bridge = installSessionBridge(session, cwd, scope, policy);
       scope.onFailure = () => session.agent.abort();
       const stream = bridge.model(nativeStream);
       // The SDK may schedule a final turn after abort; gate before any model transport.

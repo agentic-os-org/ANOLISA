@@ -43,6 +43,9 @@ impl Runtime {
         value: &Value,
     ) -> Result<Option<Execution>> {
         self.execution_admission(instance, id)?;
+        if value.get("cwd").is_some() {
+            return Err(rejected("event_cwd_reserved"));
+        }
         if !self.native_root(id)? {
             return Ok(None);
         }

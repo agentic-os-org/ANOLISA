@@ -355,7 +355,7 @@ impl Runtime {
             let automatic = native_input.is_some();
             let association = evidence::association(&host.capabilities().adapter, &value, native_input.as_deref());
             let candidate = value.clone();
-            let ordered = automatic && ((value["name"] == "tool.before" && host.steps().iter().any(|step| step.event == "tool.before" && matches!(&step.execution, aw_core::admission::StepExecution::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input")))) || aw_adapter::completion::ordered_after(&host.capabilities().adapter, &value,
+            let ordered = automatic && ((value["name"] == "tool.before" && host.steps().iter().any(|step| step.event == "tool.before" && step.execution.replaces_input())) || aw_adapter::completion::ordered_after(&host.capabilities().adapter, &value,
                 host.steps().iter().any(|step| step.event == "tool.after" && step.execution.replaces_result())));
             let binding_active = || runtime.check_provider_admission(&instance_id, execution.as_ref()).is_ok();
             let obligation_audit = |update: aw_host::ObligationUpdate<'_>| runtime.audit.obligation(&thread_key, update).is_ok();

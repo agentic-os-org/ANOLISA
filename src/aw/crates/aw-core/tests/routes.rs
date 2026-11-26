@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 fn step(event: &str, id: &str, operation: &str, effects: &[&str]) -> AdmittedStep {
     AdmittedStep {
+        post_permission: false,
         event: event.into(),
         step_id: id.into(),
         provider: "policy".into(),
@@ -34,6 +35,7 @@ fn step(event: &str, id: &str, operation: &str, effects: &[&str]) -> AdmittedSte
 #[test]
 fn standard_options_retain_declared_events_and_provide_o1_step_lookup() {
     let capabilities = AdapterCapabilities {
+        post_permission: false,
         adapter: "custom-source".into(),
         version: "1.0.0".into(),
         entrypoint: "application".into(),
@@ -87,7 +89,8 @@ fn project_after_validation_checks_unsubscribed_observed_budgets() {
 fn reverse_replacement_and_metadata_projections_stay_deterministic() {
     let mut skill = step("tool.before", "skill", "check_skill", &["observe", "block"]);
     skill.step_tools = vec!["native:custom:Skill".into()];
-    let rewrite = step("tool.before", "rewrite", "rewrite", &["replace_input"]);
+    let mut rewrite = step("tool.before", "rewrite", "rewrite", &["replace_input"]);
+    rewrite.post_permission = true;
     let observe = step("tool.after", "observe", "record", &["observe"]);
     let compress = step("tool.after", "compress", "compress", &["replace_result"]);
     let document = json!({
@@ -129,6 +132,7 @@ fn reverse_replacement_and_metadata_projections_stay_deterministic() {
     assert_eq!(hooks[2]["step_tools"], json!(["native:custom:Skill"]));
     assert_eq!(hooks[3]["step"], "rewrite");
     assert_eq!(hooks[3]["replace_input"], true);
+    assert_eq!(hooks[3]["post_permission"], true);
 }
 
 #[test]
