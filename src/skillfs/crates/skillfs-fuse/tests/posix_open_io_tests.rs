@@ -1902,3 +1902,41 @@ fn test_skill_dir_rename_noreplace() {
 
     cleanup(handle, mountpoint.path());
 }
+
+#[test]
+fn ftruncate_after_chmod_uses_open_handle() {
+    skip_if_no_fuse!();
+
+    let fx = common::MountFixture::normal(|src| {
+        create_skill_dir(src, "harness");
+        std::fs::write(src.join("harness/data"), b"abcdef").expect("seed passthrough file");
+    });
+    let path = fx.skill_path("harness").join("data");
+    let mut rw = std::fs::OpenOptions::new();
+    rw.read(true).write(true);
+    let writer = rw.open(&path).expect("open writable descriptor");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+
+    if unsafe { libc::geteuid() } != 0 {
+        let err = rw.open(&path).expect_err("new writable open after chmod");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    let reader = std::fs::File::open(&path).expect("open read-only descriptor");
+    writer
+        .set_len(2)
+        .expect("truncate through writable descriptor");
+    let err = reader
+        .set_len(1)
+        .expect_err("truncate through read-only descriptor");
+    assert!(
+        matches!(err.raw_os_error(), Some(libc::EBADF | libc::EINVAL)),
+        "{err}"
+    );
+
+    assert_eq!(writer.metadata().expect("fstat").len(), 2);
+    assert_eq!(
+        std::fs::read(fx.source_skill_path("harness").join("data")).expect("read backing file"),
+        b"ab"
+    );
+}
