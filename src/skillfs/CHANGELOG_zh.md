@@ -9,6 +9,32 @@
 
 ## [未发布]
 
+## [0.5.9] - 2026-11-26
+
+### 新增
+
+- 挂载前可运行 `skillfs explain --config PATH`，查看选中了哪个来源的 Skill，
+  以及该 Skill 是否出现在默认视图中。用 `--skill NAME` 查看单个 Skill，
+  用 `--format json` 获取结构化报告
+  ([#10100](https://github.com/agentic-os-org/ANOLISA/pull/10100))。
+
+### 修复
+
+- `max_skills` 按不同名称的 Skill 计数。跨分类出现同名 Skill 时仍会报告冲突，
+  其余 Skill 可继续使用剩余名额
+  ([#10560](https://github.com/agentic-os-org/ANOLISA/pull/10560))。
+- 从正文提取描述时在下一个 ATX 标题（以 # 标记的标题）处结束。后续顶层内容不会被误读为参数或返回值
+  ([#10497](https://github.com/agentic-os-org/ANOLISA/pull/10497)、
+  [#10651](https://github.com/agentic-os-org/ANOLISA/pull/10651))。
+- Markdown 列表项末尾的代码围栏随列表项结束，后续参数和返回值章节可以正常读取
+  ([#10709](https://github.com/agentic-os-org/ANOLISA/pull/10709))。
+- 条件块重复出现 `@else` 时保留原始 `SKILL.md`。命令适配会忽略正文中的指令引用和格式错误的指令标记
+  ([#10475](https://github.com/agentic-os-org/ANOLISA/pull/10475)、
+  [#10552](https://github.com/agentic-os-org/ANOLISA/pull/10552))。
+- 会话用量统计跳过目录等非普通日志文件，并使用 UTF-8 读取 JSON 配置和写入 JSON 报告
+  ([#10572](https://github.com/agentic-os-org/ANOLISA/pull/10572)、
+  [#10620](https://github.com/agentic-os-org/ANOLISA/pull/10620))。
+
 ## [0.5.8] - 2026-11-20
 
 ### 修复

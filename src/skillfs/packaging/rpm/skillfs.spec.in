@@ -77,6 +77,11 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/skills/skillfs-mount/
 
 %changelog
+* Thu Nov 26 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.9-1
+- Explain source selection and default view membership before mounting.
+- Fix skill load limits, Markdown parsing, and conditional command adaptation.
+- Skip non-file session logs and use UTF-8 for JSON configuration and reports.
+
 * Fri Nov 20 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.5.8-1
 - Report background mount readiness, startup errors, and timeouts.
 - Skip chat-log directories and stabilize session usage dates.
