@@ -226,6 +226,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Nov 26 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.17-1
+- Keep OpenClaw memory tools working during discovery and plugin reloads
+- Improve recall, empty search results, and indexing of unreadable files
+- Apply consent changes promptly and reject invalid automatic-write consent
+- Correct session call counts and task IDs and cap task progress
+- Report gzip finalization failures before exposing snapshots
+
 * Fri Nov 13 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.16-1
 - Preserve separate backups across repeated snapshot restores
 - Retain recovery data on failures and tolerate legacy rollback leftovers
