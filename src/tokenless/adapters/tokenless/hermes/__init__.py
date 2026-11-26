@@ -1,11 +1,13 @@
 """Tokenless lifecycle adapter for Hermes Agent.
 
-Hermes cannot replace tool arguments on older supported releases, so PreTool
-blocks a shell call and suggests the Core-rewritten command. PostTool sends the
-final model-bound result to Core and applies only the returned disposition.
-Schema compression is not available from the Hermes hook surface. Marker-directed
-recovery uses Hermes's existing shell tool and the trusted local Tokenless CLI.
-Tool Ready remains product-wide hard-disabled.
+PreTool RTK rewriting (``block_and_suggest``) is opt-in and disabled by default
+because Hermes cannot rewrite arguments in place. Set
+``TOKENLESS_HERMES_PRETOOL_RTK=1`` (or ``true`` / ``yes``) to enable PreTool
+command blocking and retry suggestions. PostTool sends the final model-bound
+result to Core and applies only the returned disposition. Schema compression is
+not available from the Hermes hook surface. Marker-directed recovery uses
+Hermes's existing shell tool and the trusted local Tokenless CLI. Tool Ready
+remains product-wide hard-disabled.
 
 Activation is controlled by the Hermes plugin system — list ``tokenless`` in
 ``plugins.enabled`` in ``config.yaml``, or enable via
@@ -117,7 +119,8 @@ _HOOK_UTILS_CALL_SHAPES: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...]
     #                           content_origin, output_optimization,
     #                           result_kind=..., recovery=..., session_id=...,
     #                           tool_use_id=..., replace_output=True,
-    #                           replace_with_text=True, command=...)
+    #                           replace_with_text=True, command=...,
+    #                           exit_code=...)
     (
         "build_post_tool_request",
         ("", "", "", "", "", ""),
@@ -129,6 +132,7 @@ _HOOK_UTILS_CALL_SHAPES: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...]
             "replace_output": True,
             "replace_with_text": True,
             "command": None,
+            "exit_code": None,
         },
     ),
     # Both hooks: run_compress(tokenless_bin, request, timeout, operation)
@@ -348,7 +352,24 @@ def _protocol_status(status: Any, result: str) -> str | None:
         parsed = json.loads(result)
     except json.JSONDecodeError:
         return "success"
-    return "error" if isinstance(parsed, dict) and parsed.get("error") else "success"
+    return (
+        "error"
+        if isinstance(parsed, dict)
+        and (
+            parsed.get("error")
+            or (
+                isinstance(parsed.get("exit_code"), int)
+                and not isinstance(parsed.get("exit_code"), bool)
+                and parsed["exit_code"] != 0
+            )
+            or (
+                isinstance(parsed.get("exitCode"), int)
+                and not isinstance(parsed.get("exitCode"), bool)
+                and parsed["exitCode"] != 0
+            )
+        )
+        else "success"
+    )
 
 
 def _content_origin(tool_name: str, args: Any) -> str:
@@ -409,6 +430,15 @@ def on_session_start(**kwargs: Any) -> None:
         logger.debug("tokenless: session_start session_id=%s", session_id)
 
 
+def _pre_tool_rtk_enabled() -> bool:
+    """Return whether opt-in PreTool RTK blocking/suggestions are enabled."""
+    return os.environ.get("TOKENLESS_HERMES_PRETOOL_RTK", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def on_pre_tool_call(
     tool_name: str = "",
     args: Any = None,
@@ -418,6 +448,8 @@ def on_pre_tool_call(
     **kwargs: Any,
 ) -> dict[str, str] | None:
     """Ask Core for an RTK rewrite and translate it to a Hermes block."""
+    if not _pre_tool_rtk_enabled():
+        return None
     if tool_name not in _SHELL_TOOLS or not isinstance(args, dict):
         return None
     tokenless_bin = _resolve_binary("tokenless", _TOKENLESS_FALLBACK)
@@ -473,31 +505,46 @@ def on_transform_tool_result(
     if not tokenless_bin:
         return None
     output_optimization = _output_optimization(args)
-    retrieve_result = protocol_status == "success" and is_tokenless_retrieve_command(
-        tool_name, args
-    )
+    is_retrieve_cmd = is_tokenless_retrieve_command(tool_name, args)
+    retrieve_result = protocol_status == "success" and is_retrieve_cmd
 
     # Hermes's terminal tool returns a JSON envelope whose `output` field is
-    # the model-visible command output. Compress that field so structured JSON
-    # produced by the command remains visible to JsonCompressor, then restore
-    # the host envelope below. Failed or stopped calls keep the whole result:
-    # Hermes can put their only diagnostic in `error` while `output` is empty.
+    # the model-visible command output. Compress that field for both success
+    # and error when `output` carries the text and `error` is absent; when a
+    # failure reports `error` with empty/no output, disable replacement and
+    # preserve the error field cleanly.
     shell_envelope = None
     content = result
+    exit_code: int | None = None
+    replace_output = True
     content_origin = _content_origin(tool_name, args)
     # Core reports a plain file print (`cat page.html`) as file_read from the
     # command line, so the page stays verbatim while data still compresses.
     command = None
-    if content_origin == "command_output" and isinstance(args, dict):
+    if isinstance(args, dict) and content_origin == "command_output":
         command = args.get("command")
-    if protocol_status == "success" and tool_name in _SHELL_TOOLS:
+    if protocol_status in ("success", "error") and tool_name in _SHELL_TOOLS:
         try:
             parsed_result = json.loads(result)
         except json.JSONDecodeError:
             parsed_result = None
-        if isinstance(parsed_result, dict) and isinstance(parsed_result.get("output"), str):
-            shell_envelope = parsed_result
-            content = parsed_result["output"]
+        if isinstance(parsed_result, dict):
+            for key in ("exit_code", "exitCode"):
+                raw_exit = parsed_result.get(key)
+                if isinstance(raw_exit, int) and not isinstance(raw_exit, bool):
+                    exit_code = raw_exit
+                    break
+            raw_output = parsed_result.get("output")
+            raw_error = parsed_result.get("error")
+            if (
+                isinstance(raw_output, str)
+                and raw_error is None
+                and (protocol_status == "success" or bool(raw_output))
+            ):
+                shell_envelope = parsed_result
+                content = raw_output
+            elif protocol_status == "error":
+                replace_output = False
 
     request = build_post_tool_request(
         content,
@@ -511,9 +558,13 @@ def on_transform_tool_result(
             "kind": (
                 "shell"
                 if (
-                    protocol_status == "success"
+                    replace_output
+                    and (
+                        protocol_status == "success"
+                        or (protocol_status == "error" and exit_code is not None)
+                    )
                     and output_optimization == "none"
-                    and not retrieve_result
+                    and not is_retrieve_cmd
                     and tokenless_retrieve_command_available()
                 )
                 else "none"
@@ -521,13 +572,16 @@ def on_transform_tool_result(
         },
         session_id=str(session_id),
         tool_use_id=str(tool_call_id),
-        replace_output=True,
-        replace_with_text=True,
+        replace_output=replace_output,
+        replace_with_text=replace_output,
         command=command if isinstance(command, str) else None,
+        exit_code=exit_code,
     )
     response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "post_tool")
     if not isinstance(response, dict):
         return None
+    additional_context = response.get("additional_context")
+    has_context = isinstance(additional_context, str) and bool(additional_context)
     if response.get("disposition") == "applied":
         output = response.get("output")
         if isinstance(output, str):
@@ -538,8 +592,7 @@ def on_transform_tool_result(
             return output
         return None
     if response.get("disposition") == "tool_error":
-        additional_context = response.get("additional_context")
-        if isinstance(additional_context, str) and additional_context:
+        if has_context:
             return f"{result}\n\n{additional_context}"
     return None
 
@@ -553,10 +606,16 @@ def register(ctx: Any) -> None:
     """Register all tokenless hooks with the Hermes plugin system."""
 
     ctx.register_hook("on_session_start", on_session_start)
-    ctx.register_hook("pre_tool_call", on_pre_tool_call)
+    pretool_rtk = _pre_tool_rtk_enabled()
+    if pretool_rtk:
+        ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("transform_tool_result", on_transform_tool_result)
 
-    features = ["pre-tool", "post-tool"] if _have("tokenless", _TOKENLESS_FALLBACK) else []
+    features = (
+        (["pre-tool", "post-tool"] if pretool_rtk else ["post-tool"])
+        if _have("tokenless", _TOKENLESS_FALLBACK)
+        else []
+    )
     logger.info(
         "tokenless: Hermes plugin registered — active features: %s",
         ", ".join(features) if features else "none (install tokenless binary)",

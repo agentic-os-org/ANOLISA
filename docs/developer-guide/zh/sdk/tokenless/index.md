@@ -257,7 +257,7 @@ result = await sdk.post_tool(
         attribution=attribution,
         command=None,  # shell 工具填实际执行的命令行
         exit_code=None,  # 进程退出码；传值时对 ERROR 状态启用 Level E1/E2 错误压缩流水线
-        stderr=None,  # 宿主分离捕获的 stderr，用于 [tokenless:env] 环境诊断兜底
+        stderr=None,  # 宿主分离捕获的 stderr 文本（可选）
         original_command=None,  # 宿主记录的改写前原始命令（可选）
         cwd=None,  # 命令执行工作目录（可选）
     )

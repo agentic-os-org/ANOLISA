@@ -488,6 +488,34 @@ class VersionMismatchTest(unittest.TestCase):
             # A later, complete candidate won — never the skewed one.
             self.assertNotEqual(plugin._HOOK_UTILS_RESOLVED, os.path.realpath(skewed))
 
+    def test_check_api_compat_rejects_pre_error_streaming_signature(self):
+        # A hook_utils.py that accepts `recovery=` and `command=` (pre-PR-04)
+        # but omits `exit_code` must be rejected up front.
+        plugin = _load_plugin(_PLUGIN_SRC, "hermes_api_compat_pre_error_stream")
+        hooks = os.path.join(self.tmp, "pre_error_stream", "common", "hooks")
+        os.makedirs(hooks, mode=0o755)
+        with open(os.path.join(hooks, "hook_utils.py"), "w") as f:
+            f.write(
+                "SHELL_TOOLS = {'shell', 'terminal'}\n"
+                "SKIP_TOOLS = set()\n"
+                "_TOKENLESS_FALLBACK = _TOKENLESS_LOCAL_LIB = _TOKENLESS_LOCAL_SHARE = ''\n"
+                "def resolve_binary(name, *fallbacks): return None\n"
+                "def build_pre_tool_request(*args, **kwargs): return {}\n"
+                "def build_post_tool_request(\n"
+                "    content, agent_id, tool_name, status, content_origin,\n"
+                "    output_optimization, *, result_kind, recovery,\n"
+                "    session_id='', tool_use_id='', replace_output=False,\n"
+                "    replace_with_text=False, command=None,\n"
+                "): return {}\n"
+                "def run_compress(*args, **kwargs): return None\n"
+                "def is_tokenless_retrieve_command(*args, **kwargs): return False\n"
+                "def tokenless_retrieve_command_available(): return False\n"
+            )
+        shutil.copy(os.path.join(_HOOKS_SRC, "tool_categories.json"), hooks)
+        reason = plugin._check_api_compat(hooks)
+        self.assertIsNotNone(reason)
+        self.assertIn("API mismatch", reason)
+        self.assertIn("build_post_tool_request", reason)
 
 
 if __name__ == "__main__":

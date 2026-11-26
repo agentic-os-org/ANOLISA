@@ -120,7 +120,7 @@ jq -n \
   PostTool 必须在 `command` 中传入注册的完整执行命令；命令缺失或被修改时保留旁路。
   输出已改变或无法确认时保留旁路；Token 估算持平不能授权回退。回执状态失败会发出警告并保留
   旁路，不会使 PostTool 操作失败。
-- 省略 `exit_code` 时，Tool Error 原样透传为 `tool_error`（兼容未改造的旧宿主），并可从 `content` 或 `stderr` 提取限长 `additional_context` 诊断。当调用方显式传入 `exit_code` 时，硬执行失败/信号退出码（`126`、`127`、`< 0`、`>= 128`）或字符数低于 `error_min_input_chars`（默认 `400` 字符）的错误进入 Level E1 原样透传；其余更长的失败进入 Level E2 压缩（覆盖 `BuildLogCompressor` 的 `DiagnosticFailure` 模式、Diff、JSON 与无损搜索路径共享，排除 HTML、Browser Snapshot、Tabular 和 Mixed 域），并在提交 Stash 前由 `FactInvariantGuard` 校验诊断事实（任一事实丢失或任一类别锚点超过 `256` 即回滚为 `tool_error`）。传入 `exit_code` 的 Opt-in 宿主在 `disposition` 为 `"applied"` 时也必须消费 `additional_context`。
+- 省略 `exit_code` 时，Tool Error 原样透传为 `tool_error`（兼容未改造的旧宿主）。当调用方显式传入 `exit_code` 时，硬执行失败/信号退出码（`126`、`127`、`< 0`、`>= 128`）或字符数低于 `error_min_input_chars`（默认 `400` 字符）的错误进入 Level E1 原样透传；其余更长的失败进入 Level E2 压缩（覆盖 `BuildLogCompressor` 的 `DiagnosticFailure` 模式、Diff、JSON 与无损搜索路径共享，排除 HTML、Browser Snapshot、Tabular 和 Mixed 域），并在提交 Stash 前由 `FactInvariantGuard` 校验诊断事实（任一事实丢失或任一类别锚点超过 `256` 即回滚为 `tool_error`）。环境错误归因（`additional_context`）已下线（恒为 `None`）。
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
 - 已识别的成功构建/测试/包安装输出使用 `BuildLogCompressor`。`terminal_cleanup` 清理 SGR
   颜色。现有 `build_log_reduction` 统一表示 pnpm 布局压紧与常规进度缩减，包括两者组合的结果。

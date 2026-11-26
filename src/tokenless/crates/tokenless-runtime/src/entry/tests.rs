@@ -1868,13 +1868,7 @@ fn post_tool_routes_statuses_before_the_json_pipeline() {
     let outcome = post_tool_with_store(&request, &options(), None).unwrap();
     assert_eq!(outcome.response.disposition, Disposition::ToolError);
     assert_eq!(outcome.response.output, request.content);
-    assert!(
-        outcome
-            .response
-            .additional_context
-            .unwrap()
-            .contains("ENV_DEPENDENCY_MISSING")
-    );
+    assert!(outcome.response.additional_context.is_none());
 }
 
 fn failing_build_log() -> String {
@@ -1889,7 +1883,7 @@ fn failing_build_log() -> String {
 }
 
 #[test]
-fn tool_error_build_log_compresses_when_exit_code_is_present_and_keeps_env_diagnosis() {
+fn tool_error_build_log_compresses_when_exit_code_is_present_without_env_diagnosis() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
     let request = PostToolRequest {
         status: ToolResultStatus::Error,
@@ -1920,18 +1914,11 @@ fn tool_error_build_log_compresses_when_exit_code_is_present_and_keeps_env_diagn
             .contains("error: linker command not found")
     );
     assert!(!outcome.response.output.contains("Compiling package-015"));
-    assert!(
-        outcome
-            .response
-            .additional_context
-            .as_deref()
-            .unwrap()
-            .contains("ENV_DEPENDENCY_MISSING")
-    );
+    assert!(outcome.response.additional_context.is_none());
 }
 
 #[test]
-fn tool_error_without_exit_code_keeps_original_build_log_and_diagnosis_even_with_recovery() {
+fn tool_error_without_exit_code_keeps_original_build_log_without_env_diagnosis() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
     for recovery in [
         tokenless_protocol::RecoveryMethod::None,
@@ -1953,14 +1940,7 @@ fn tool_error_without_exit_code_keeps_original_build_log_and_diagnosis_even_with
         assert_eq!(outcome.response.output, request.content);
         assert!(outcome.response.applied_operations.is_empty());
         assert!(outcome.response.stash_keys.is_empty());
-        assert!(
-            outcome
-                .response
-                .additional_context
-                .as_deref()
-                .unwrap()
-                .contains("ENV_DEPENDENCY_MISSING")
-        );
+        assert!(outcome.response.additional_context.is_none());
     }
 }
 
@@ -2355,7 +2335,7 @@ fn pre_tool_unified_wrapper_stripping_keeps_wrapped_build_test_native() {
 }
 
 #[test]
-fn post_tool_tokenless_retrieve_shell_command_bypasses_and_uses_stderr_for_env_diagnosis() {
+fn post_tool_tokenless_retrieve_shell_command_bypasses_and_skips_env_diagnosis() {
     let payload = serde_json::to_string_pretty(
         &(0..30)
             .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
@@ -2414,12 +2394,5 @@ fn post_tool_tokenless_retrieve_shell_command_bypasses_and_uses_stderr_for_env_d
     let err_outcome = post_tool_with_store(&err_req, &options(), None).unwrap();
     assert_eq!(err_outcome.response.disposition, Disposition::ToolError);
     assert_eq!(err_outcome.response.output, "failed to retrieve");
-    assert!(
-        err_outcome
-            .response
-            .additional_context
-            .as_deref()
-            .unwrap()
-            .contains("ENV_PERMISSION")
-    );
+    assert!(err_outcome.response.additional_context.is_none());
 }

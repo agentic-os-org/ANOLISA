@@ -160,6 +160,7 @@ class CodexRewriteHookTest(unittest.TestCase):
                     "capabilities": {
                         "replace_arguments": True,
                         "block_and_suggest": False,
+                        "post_tool_replacement": "none",
                     },
                 },
             },

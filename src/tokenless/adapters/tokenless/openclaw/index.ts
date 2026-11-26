@@ -310,6 +310,19 @@ function singleTextBlock(result: unknown): TextBlock | null {
   return block as TextBlock;
 }
 
+function extractExitCode(result: ToolResult): number | undefined {
+  const details = result.details;
+  if (typeof details !== "object" || details === null || Array.isArray(details)) {
+    return undefined;
+  }
+  const metadata = details as Record<string, unknown>;
+  if (metadata.timedOut === true) return undefined;
+  if (typeof metadata.exitCode === "number" && Number.isInteger(metadata.exitCode)) {
+    return metadata.exitCode;
+  }
+  return undefined;
+}
+
 function toolFailed(event: ToolResultEvent): boolean {
   if (event.isError === true) return true;
   const details = event.result.details;
@@ -589,6 +602,11 @@ export default {
           }
           if (!rtkEnabled || event.toolName !== "exec") return;
 
+          const postToolReplacement = !postToolActive
+            ? "none"
+            : recoverySessions.has(context.sessionId)
+              ? "full_retrievable"
+              : "lossless_only";
           const result = runOperation(
             "pre_tool",
             {
@@ -598,6 +616,7 @@ export default {
               capabilities: {
                 replace_arguments: true,
                 block_and_suggest: false,
+                post_tool_replacement: postToolReplacement,
               },
             },
             context,
@@ -658,16 +677,27 @@ export default {
                 : shellTools.has(normalizedToolName)
                   ? "command_output"
                   : "api_response";
+              const isError = toolFailed(event);
+              const isRetrieve = toolName === RETRIEVE_TOOL;
+              const exitCode =
+                contentOrigin === "command_output"
+                  ? extractExitCode(event.result)
+                  : undefined;
+              const recoveryAllowed =
+                !isRetrieve &&
+                state?.optimization !== "rtk" &&
+                (!isError || exitCode !== undefined) &&
+                recoverySessions.has(context.sessionId);
               const input: Record<string, unknown> = {
-                result_kind: toolName === RETRIEVE_TOOL ? "retrieve" : "tool",
+                result_kind: isRetrieve ? "retrieve" : "tool",
                 tool_name: toolName,
                 content: block.text,
-                status: toolFailed(event) ? "error" : "success",
+                status: isError ? "error" : "success",
                 content_origin: contentOrigin,
                 output_optimization: state?.optimization ?? "none",
                 capabilities: {
                   replace_output: true,
-                  recovery: state?.optimization !== "rtk" && recoverySessions.has(context.sessionId)
+                  recovery: recoveryAllowed
                     ? { kind: "tool", name: RETRIEVE_TOOL }
                     : { kind: "none" },
                   replace_with_text: true,
@@ -679,6 +709,7 @@ export default {
                     ? event.args.command
                     : state?.command;
                 if (command !== undefined) input.command = command;
+                if (exitCode !== undefined) input.exit_code = exitCode;
               }
               const result = runOperation("post_tool", input, context);
               if (result === null) return;

@@ -97,7 +97,8 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
 
         if operation_input["status"] == "error":
             context = None
-            if "command not found" in content.lower():
+            diag_text = (content + "\\n" + operation_input.get("stderr", "")).lower()
+            if "command not found" in diag_text:
                 context = "[tokenless:env] tool failed: ENV_DEPENDENCY_MISSING."
             respond(content, "tool_error", context)
             sys.exit(0)
@@ -146,6 +147,39 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
     elif behavior in ("wrong-protocol-version", "future-protocol-version"):
         version = 1 if behavior == "wrong-protocol-version" else 3
         script = prologue + f'respond(content[:40], "applied", protocol_version={version})\n'
+    elif behavior == "error-applied":
+        # Variant that returns an applied error-log candidate without additive
+        # additional_context (matching retired env attribution in Core).
+        script = textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json, os, sys
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "spawn_log"), "a") as log:
+                log.write(" ".join(sys.argv[1:]) + "\\n")
+            request = json.loads(sys.stdin.read())
+            operation_input = request["input"]
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "request.json"), "w") as captured:
+                json.dump(operation_input, captured)
+            content = operation_input["content"]
+            result = {
+                "output": content[:40],
+                "disposition": "applied",
+                "content_type": "build_log",
+                "applied_operations": ["build_log_reduction"],
+                "recoverability": "retrievable",
+                "before_tokens": 100,
+                "after_tokens": 20,
+                "stash_keys": [],
+                "tokenizer_id": "heuristic-v1",
+            }
+            print(json.dumps({
+                "protocol_version": 2,
+                "operation": "post_tool",
+                "attribution": request["attribution"],
+                "result": result,
+            }))
+        """)
     elif behavior == "force-applied":
         script = textwrap.dedent("""\
             #!/usr/bin/env python3
@@ -1041,9 +1075,9 @@ class TestClaudeVersionProbeFailure(unittest.TestCase):
                         self.assertFalse(
                             request["capabilities"]["replace_output"],
                             "the probe must still have run: capability stays off")
-                        # The payload is otherwise fully eligible for the text
-                        # slot, so replace_output is the only thing holding it.
-                        self.assertTrue(request["capabilities"]["replace_with_text"])
+                        # When replacement is disabled on the host, the text-replacement
+                        # capability stays off alongside replace_output.
+                        self.assertFalse(request["capabilities"]["replace_with_text"])
                         self.assertEqual(request["content_origin"], "api_response")
                         self.assertEqual(_spawn_log_lines(binary), ["compress"])
                         self.assertIn(
@@ -1263,6 +1297,10 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         with open(os.path.join(self.tmpdir, "request.json")) as captured:
             request = json.load(captured)
         self.assertFalse(request["capabilities"]["replace_output"])
+        self.assertFalse(request["capabilities"]["replace_with_text"])
+        self.assertNotIn("stderr", request)
+        self.assertNotIn("cwd", request)
+        self.assertNotIn("original_command", request)
         self.assertEqual(request["content"], stderr)
         specific = result["hookSpecificOutput"]
         self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
@@ -1305,12 +1343,35 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
 
     def test_qwenwork_rewrapped_envelope_preserves_metadata(self):
         log = "npm verbose progress line\n" * 150
-        # Non-empty stderr cannot be faithfully represented in QwenWork's single
-        # text replacement slot without dropping stderr or stringifying the object.
-        result = _run_hook(
+        # Non-empty stderr now compresses faithfully with explicit [stderr] preservation,
+        # while envelopes carrying unmodeled metadata fields stay non-replaceable.
+        with_stderr = _run_hook(
             {
                 "tool_name": "Bash",
                 "tool_response": self._bash_envelope(log, "warning"),
+                "session_id": "s",
+                "tool_use_id": "t-stderr",
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertEqual(
+            with_stderr["hookSpecificOutput"]["updatedToolOutput"],
+            f"{log[:40]}\n[stderr]\nwarning",
+        )
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            captured_req = json.load(captured)
+            self.assertTrue(captured_req["capabilities"]["replace_output"])
+            self.assertNotIn("stderr", captured_req)
+            self.assertNotIn("cwd", captured_req)
+            self.assertNotIn("original_command", captured_req)
+
+        extra_meta = {**self._bash_envelope(log, "warning"), "metadata": {"keep": True}}
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": extra_meta,
                 "session_id": "s",
                 "tool_use_id": "t",
             },
@@ -1434,9 +1495,28 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         long_out = "build output line\n" * 30
         with tempfile.TemporaryDirectory() as force_dir:
             force_applied = _create_mock_tokenless(force_dir, "force-applied")
+            for envelope, expected_part in (
+                (
+                    {"kind": "completed", "stdout": long_out, "stderr": "warn", "exitCode": 0},
+                    "[stderr]\nwarn",
+                ),
+                (
+                    {"kind": "completed", "stdout": long_out, "stderr": "", "exitCode": 1},
+                    "[exit code: 1]",
+                ),
+            ):
+                with self.subTest(faithful_envelope=envelope):
+                    result = _run_hook(
+                        {"tool_name": "Bash", "tool_response": envelope},
+                        agent_id="qwenwork",
+                        mock_tokenless_path=force_applied,
+                        isolated_home=self.isolated_home,
+                    )
+                    updated = result["hookSpecificOutput"]["updatedToolOutput"]
+                    self.assertIn(expected_part, updated)
+                    self.assertLess(len(updated), len(long_out) + len(expected_part))
+
             for bad_envelope in (
-                {"kind": "completed", "stdout": long_out, "stderr": "warn", "exitCode": 0},
-                {"kind": "completed", "stdout": long_out, "stderr": "", "exitCode": 1},
                 {"kind": "completed", "stdout": long_out, "stderr": "", "exitCode": False},
                 {"kind": "completed", "stdout": long_out, "stderr": "", "interrupted": True},
                 {"stdout": long_out, "stderr": "", "isImage": True},
@@ -1523,6 +1603,176 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         specific = failed["hookSpecificOutput"]
         self.assertIn("ENV_DEPENDENCY_MISSING", specific["additionalContext"])
         self.assertNotIn("updatedToolOutput", specific)
+
+    def test_error_stream_applied_forwards_exit_code_without_unread_fields(self) -> None:
+        error_applied = _create_mock_tokenless(self.tmpdir, "error-applied")
+        long_out = "Compiling dep v0.1.0\n" * 40
+        stderr = "bash: rg: command not found"
+        for agent_id in ("claude-code", "qoder-cli", "cosh-ng"):
+            with self.subTest(agent_id=agent_id):
+                shell = {"stdout": long_out, "stderr": stderr, "exit_code": 1}
+                response = (
+                    {"llmContent": json.dumps(shell), "returnDisplay": "err"}
+                    if agent_id == "cosh-ng"
+                    else shell
+                )
+                result = _run_hook(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "cargo test"},
+                        "tool_response": response,
+                        "cwd": "/repo/app",
+                    },
+                    agent_id=agent_id,
+                    mock_tokenless_path=error_applied,
+                    isolated_home=self.isolated_home,
+                )
+                with open(os.path.join(self.tmpdir, "request.json")) as captured:
+                    request = json.load(captured)
+                self.assertEqual(request["status"], "error")
+                self.assertEqual(request["exit_code"], 1)
+                self.assertNotIn("stderr", request)
+                self.assertNotIn("cwd", request)
+                self.assertNotIn("original_command", request)
+                self.assertTrue(request["capabilities"]["replace_output"])
+                self.assertEqual(request["capabilities"]["recovery"], {"kind": "shell"})
+                specific = result["hookSpecificOutput"]
+                self.assertNotIn("additionalContext", specific)
+                if agent_id == "cosh-ng":
+                    replaced = json.loads(specific["updatedToolResponse"])
+                else:
+                    replaced = specific["updatedToolOutput"]
+                self.assertEqual(replaced, {**shell, "stdout": long_out[:40]})
+
+    def test_qwenwork_error_composition_and_net_benefit(self) -> None:
+        error_applied = _create_mock_tokenless(self.tmpdir, "error-applied")
+        long_out = "x" * 240
+        stderr = "bash: rg: command not found"
+        # Shrunk composition (40 + len("[stderr]\n...") + len("\n[exit code: 2]")) < original (240 + ...)
+        # keeps composed replacement without additionalContext.
+        res = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {
+                    "kind": "completed",
+                    "stdout": long_out,
+                    "stderr": stderr,
+                    "exitCode": 2,
+                },
+            },
+            agent_id="qwenwork",
+            mock_tokenless_path=error_applied,
+            isolated_home=self.isolated_home,
+        )
+        specific = res["hookSpecificOutput"]
+        self.assertEqual(
+            specific["updatedToolOutput"],
+            f"{long_out[:40]}\n[stderr]\n{stderr}\n[exit code: 2]",
+        )
+        self.assertNotIn("additionalContext", specific)
+
+        # When replacement offers no net character/token reduction, pass through unchanged.
+        borderline = "x" * 205
+        adapters_dir = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), os.pardir, "adapters", "tokenless")
+        )
+        hooks_dir = os.path.join(adapters_dir, "common", "hooks")
+        sys.path.insert(0, hooks_dir)
+        sys.path.insert(0, adapters_dir)
+        try:
+            import hook_dispatch
+
+            qwenwork = hook_dispatch.load_adapter("qwenwork")
+        finally:
+            sys.path.remove(adapters_dir)
+            sys.path.remove(hooks_dir)
+
+        data = {
+            "tool_name": "Bash",
+            "tool_response": {
+                "kind": "completed",
+                "stdout": borderline,
+                "stderr": stderr,
+                "exitCode": 2,
+            },
+        }
+        tr = qwenwork.response(data)
+        self.assertEqual(
+            qwenwork.response_output(data, tr, "x" * 205, ""),
+            {},
+        )
+
+    def test_text_slot_and_non_envelope_json_errors_stay_replaceable(self) -> None:
+        adapters_dir = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), os.pardir, "adapters", "tokenless")
+        )
+        hooks_dir = os.path.join(adapters_dir, "common", "hooks")
+        sys.path.insert(0, hooks_dir)
+        sys.path.insert(0, adapters_dir)
+        try:
+            import hook_dispatch
+            from result_utils import post_tool_payload_fields
+
+            opencode = hook_dispatch.load_adapter("opencode")
+            claude = hook_dispatch.load_adapter("claude-code")
+        finally:
+            sys.path.remove(adapters_dir)
+            sys.path.remove(hooks_dir)
+
+        json_payload = json.dumps(
+            {
+                "stdout": "command data",
+                "exit_code": 0,
+                "records": [{"id": i, "status": "failed"} for i in range(25)],
+            },
+            indent=2,
+        )
+        oc_data = {
+            "tool_name": "bash",
+            "tool_response": json_payload,
+            "exit_code": 1,
+            "is_error": True,
+        }
+        oc_result = opencode.response(oc_data)
+        self.assertTrue(oc_result.text_slot)
+        self.assertEqual(oc_result.status, "error")
+        content, exit_code, replace_output = post_tool_payload_fields(
+            oc_result, oc_data
+        )
+        self.assertEqual(content, json_payload)
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(replace_output)
+
+        non_env_json = json.dumps(
+            {"records": [{"id": i, "status": "failed"} for i in range(25)]}, indent=2
+        )
+        cc_data = {
+            "tool_name": "Bash",
+            "tool_response": non_env_json,
+            "exit_code": 1,
+            "is_error": True,
+        }
+        with mock.patch.object(claude, "_claude_supports_replacement", return_value=True):
+            cc_result = claude.response(cc_data)
+        content, exit_code, replace_output = post_tool_payload_fields(
+            cc_result, cc_data
+        )
+        self.assertEqual(content, non_env_json)
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(replace_output)
+
+        serialized_env = json.dumps(
+            {"stdout": "", "stderr": "command failed", "exit_code": 1}
+        )
+        env_data = {"tool_name": "Bash", "tool_response": serialized_env}
+        with mock.patch.object(claude, "_claude_supports_replacement", return_value=True):
+            env_result = claude.response(env_data)
+        content, exit_code, replace_output = post_tool_payload_fields(
+            env_result, env_data
+        )
+        self.assertEqual(content, "command failed")
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(replace_output)
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
@@ -1798,15 +2048,16 @@ class TestNonReplacementAdapters(unittest.TestCase):
                          "Hosts without true replacement remain passthrough")
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
-    def test_qwencode_still_receives_env_attribution(self):
-        """Environment attribution is genuinely additive and stays."""
+    def test_qwencode_non_replaceable_error_passes_through_without_unread_fields(self):
+        """Non-replaceable hosts do not inject replacement output or forward unread fields."""
         result = _run_hook(
             {
                 "tool_name": "Bash",
-                "tool_response": {"stdout": "", "stderr": "bash: rg: command not found",
+                "tool_response": {"stdout": "", "stderr": "error: build aborted",
                                   "exit_code": 127},
                 "session_id": "s",
                 "tool_use_id": "t",
+                "cwd": "/repo/app",
             },
             agent_id="qwencode",
             mock_tokenless_path=self.mock_bin,
@@ -1815,23 +2066,32 @@ class TestNonReplacementAdapters(unittest.TestCase):
 
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
-        hso = result.get("hookSpecificOutput", {})
-        self.assertIn("[tokenless:env]", hso.get("additionalContext", ""))
-        self.assertNotIn("updatedToolOutput", hso)
+        self.assertEqual(result, {})
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            req = json.load(captured)
+        self.assertEqual(req["status"], "error")
+        self.assertEqual(req["exit_code"], 127)
+        self.assertFalse(req["capabilities"]["replace_output"])
+        self.assertFalse(req["capabilities"]["replace_with_text"])
+        self.assertNotIn("stderr", req)
+        self.assertNotIn("cwd", req)
+        self.assertNotIn("original_command", req)
 
-    def test_shell_diagnostic_uses_short_stderr_not_large_stdout(self):
+    def test_error_stream_omits_stderr_and_cwd_even_with_large_stdout(self):
+        large_stdout = "routine output\n" * 1_000
         result = _run_hook(
             {
                 "tool_name": "Bash",
                 "tool_response": {
-                    "stdout": "routine output\n" * 1_000,
+                    "stdout": large_stdout,
                     "stderr": "bash: rg: command not found",
                     "exit_code": 127,
                 },
                 "session_id": "s",
                 "tool_use_id": "t",
+                "cwd": "/repo/app",
             },
-            agent_id="qwencode",
+            agent_id="qoder-cli",
             mock_tokenless_path=self.mock_bin,
             isolated_home=self.isolated_home,
         )
@@ -1839,8 +2099,15 @@ class TestNonReplacementAdapters(unittest.TestCase):
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
-        self.assertIn("ENV_DEPENDENCY_MISSING", hso.get("additionalContext", ""))
+        self.assertNotIn("additionalContext", hso)
         self.assertNotIn("updatedToolOutput", hso)
+        with open(os.path.join(self.tmpdir, "request.json")) as captured:
+            req = json.load(captured)
+        self.assertEqual(req["content"], large_stdout)
+        self.assertEqual(req["exit_code"], 127)
+        self.assertNotIn("stderr", req)
+        self.assertNotIn("cwd", req)
+        self.assertNotIn("original_command", req)
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

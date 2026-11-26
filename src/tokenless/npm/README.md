@@ -53,7 +53,7 @@ adapter hooks are plain bash/python scripts — OS and architecture independent 
 so they work on both Linux and macOS.
 
 DeepSeek Harness uses its dedicated `tools/post-execute` seam to call the Protocol v2
-PostTool Pipeline for response compression and environment-error attribution.
+PostTool Pipeline for response and error-log compression.
 
 On install, they are copied to the user-level data directory searched by the
 hook dispatcher:

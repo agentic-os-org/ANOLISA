@@ -273,7 +273,7 @@ result = await sdk.post_tool(
         attribution=attribution,
         command=None,  # the executed command line for a shell tool
         exit_code=None,  # process exit status; opts ERROR results into Level E1/E2 error pipeline
-        stderr=None,  # separate stderr text for [tokenless:env] diagnosis fallback
+        stderr=None,  # separate stderr text captured by the host (optional)
         original_command=None,  # pre-rewrite command, when tracked by the host
         cwd=None,  # working directory, when tracked by the host
     )

@@ -22,6 +22,10 @@ recovery_available = tokenless_retrieve_command_available
 is_retrieve_result = is_tokenless_retrieve_command
 
 
+def post_tool_replacement_capability() -> str:
+    return "none"
+
+
 def prepare_input(data: dict) -> dict:
     return data
 

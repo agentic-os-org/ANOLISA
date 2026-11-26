@@ -534,7 +534,43 @@ test("PreTool sends one Protocol v2 operation and applies all returned arguments
   assert.deepEqual(logged[0].request.input.capabilities, {
     replace_arguments: true,
     block_and_suggest: false,
+    post_tool_replacement: "lossless_only",
   });
+});
+
+test("PreTool declares post_tool_replacement none without PostTool and full_retrievable with recovery", () => {
+  const noPostHooks = new Map();
+  plugin.register({
+    pluginConfig: { rtk_enabled: true, post_tool_enabled: false, tool_ready_enabled: false },
+    on(name, hook) { noPostHooks.set(name, hook); },
+  });
+  noPostHooks.get("before_tool_call")(
+    { toolName: "exec", toolCallId: "no-post", params: { command: "cargo test" } },
+    { toolName: "exec", sessionId: "session-no-post" },
+  );
+  assert.equal(
+    requests().at(-1).request.input.capabilities.post_tool_replacement,
+    "none",
+  );
+
+  rmSync(requestLog, { force: true });
+  const recoveryHooks = new Map();
+  let retrieveFactory;
+  plugin.register({
+    pluginConfig: { rtk_enabled: true, post_tool_enabled: true, tool_ready_enabled: false },
+    registerTool(value) { retrieveFactory = value; },
+    registerAgentToolResultMiddleware() {},
+    on(name, hook) { recoveryHooks.set(name, hook); },
+  });
+  retrieveFactory({ sessionId: "session-full-recovery" });
+  recoveryHooks.get("before_tool_call")(
+    { toolName: "exec", toolCallId: "with-recovery", params: { command: "cargo test" } },
+    { toolName: "exec", sessionId: "session-full-recovery" },
+  );
+  assert.equal(
+    requests().at(-1).request.input.capabilities.post_tool_replacement,
+    "full_retrievable",
+  );
 });
 
 test("PreTool requires a stable tool call ID and fails open", () => {
@@ -776,6 +812,54 @@ test("PostTool appends Core diagnostics without replacing the tool error", () =>
   });
   assert.equal(requests()[0].request.input.status, "error");
   assert.equal(requests()[0].request.input.content_origin, "command_output");
+  assert.equal(requests()[0].request.input.exit_code, 127);
+  assert.equal("cwd" in requests()[0].request.input, false);
+  assert.equal("stderr" in requests()[0].request.input, false);
+});
+
+test("PostTool forwards integer exit_code outside timeouts and replaces applied error without additional_context", () => {
+  const originalFakeTokenless = readFileSync(fakeTokenless, "utf8");
+  writeFileSync(
+    fakeTokenless,
+    [
+      "#!/usr/bin/env node",
+      'const fs = require("node:fs");',
+      `const requestLog = ${JSON.stringify(requestLog)};`,
+      'const request = JSON.parse(fs.readFileSync(0, "utf8"));',
+      'fs.appendFileSync(requestLog, JSON.stringify({ argv: process.argv.slice(2), request }) + "\\n");',
+      'const result = request.operation === "post_tool" && request.input.exit_code === 2',
+      '  ? { output: "compressed error log", disposition: "applied" }',
+      '  : { output: request.input.content, disposition: "passthrough" };',
+      'process.stdout.write(JSON.stringify({ protocol_version: 2, operation: request.operation, attribution: request.attribution, result }));',
+    ].join("\n"),
+  );
+  chmodSync(fakeTokenless, 0o755);
+  try {
+    const errMsg = {
+      role: "toolResult",
+      content: [{ type: "text", text: "x".repeat(500) }],
+      details: { exitCode: 2 },
+    };
+    const applied = postTool("exec", "err-applied", errMsg, { sessionId: "session-err-applied" }, { isError: true, args: { command: "cargo test", cwd: "/repo" } });
+    assert.deepEqual(applied.result.content, [
+      { type: "text", text: "compressed error log" },
+    ]);
+    assert.equal(requests().at(-1).request.input.exit_code, 2);
+    assert.equal("cwd" in requests().at(-1).request.input, false);
+    assert.equal("stderr" in requests().at(-1).request.input, false);
+
+    postTool(
+      "exec",
+      "err-timedout",
+      { content: [{ type: "text", text: "timed out" }], details: { exitCode: 124, timedOut: true } },
+      { sessionId: "session-err-applied" },
+      { isError: true },
+    );
+    assert.equal("exit_code" in requests().at(-1).request.input, false);
+  } finally {
+    writeFileSync(fakeTokenless, originalFakeTokenless);
+    chmodSync(fakeTokenless, 0o755);
+  }
 });
 
 test("PostTool rejects lossy output without authorized recovery and fails open", () => {

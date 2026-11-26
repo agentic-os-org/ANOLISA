@@ -125,7 +125,14 @@ const exec = {
 delete process.env.TOKENLESS_DATA_DIR
 delete process.env.TOKENLESS_STATS_DB
 delete process.env.TOKENLESS_STASH_DB
-const listener = register({ tokenlessBin: binary })
+assert.equal(register({ tokenlessBin: binary }).preTool, undefined, 'pre-tool RTK is off by default')
+for (const enabled of [true, 1, 'true', 'TRUE', 'yes', '1']) {
+  assert.equal(typeof register({ tokenlessBin: binary, rtkEnabled: enabled }).preTool, 'function', String(enabled))
+}
+for (const disabled of [false, 0, 'false', '0', '', null, undefined]) {
+  assert.equal(register({ tokenlessBin: binary, rtkEnabled: disabled }).preTool, undefined, String(disabled))
+}
+const listener = register({ tokenlessBin: binary, rtkEnabled: true })
 const shellExec = { ...exec, name: 'bash', arguments: { command: 'git status', description: 'status' } }
 const shellSnapshot = structuredClone(shellExec.arguments)
 const allow = { kind: 'allow' }
@@ -548,7 +555,30 @@ await listener(pwshExec, success('rendered PowerShell output', {
 request = requests()[0].request
 assert.equal(request.input.status, 'error')
 assert.equal(request.input.content_origin, 'command_output')
-assert.equal(request.input.capabilities.replace_output, false)
+assert.equal(request.input.capabilities.replace_output, true)
+assert.equal(request.input.exit_code, 1)
+assert.equal('stderr' in request.input, false)
+assert.equal('cwd' in request.input, false)
+assert.equal('original_command' in request.input, false)
+assert.equal(request.input.content, 'rendered PowerShell output')
+
+// Replaceable structured command errors apply replacement without appending additional_context.
+const prevMode = process.env.TOKENLESS_TEST_MODE
+process.env.TOKENLESS_TEST_MODE = 'applied'
+const errorText = 'verbose compile log\n'.repeat(30)
+clearRequests()
+const appliedError = await listener(pwshExec, {
+  isError: false,
+  value: { kind: 'foreground', exitCode: 2, signal: null, timedOut: false, stdout: { text: errorText }, stderr: { text: 'warn' } },
+  content: [{ type: 'text', text: errorText }],
+}, async () => ({ kind: 'accept', additionalContexts: [downstreamContext] }))
+assert.deepEqual(appliedError.content, [{ type: 'text', text: '{"ok":true}' }])
+assert.deepEqual(appliedError.additionalContexts, [downstreamContext])
+assert.equal(requests()[0].request.input.exit_code, 2)
+assert.equal('stderr' in requests()[0].request.input, false)
+assert.equal('cwd' in requests()[0].request.input, false)
+if (prevMode === undefined) delete process.env.TOKENLESS_TEST_MODE
+else process.env.TOKENLESS_TEST_MODE = prevMode
 
 clearRequests()
 await listener(bashExec, success('[killed by signal: SIGTERM]', {

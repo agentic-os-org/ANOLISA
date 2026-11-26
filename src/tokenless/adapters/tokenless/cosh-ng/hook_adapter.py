@@ -61,6 +61,14 @@ recovery_available = tokenless_retrieve_command_available
 is_retrieve_result = is_tokenless_retrieve_command
 
 
+def post_tool_replacement_capability() -> str:
+    return (
+        "none"
+        if detect_cosh_ng_runtime() in (None, (0, 0, 0))
+        else "full_retrievable"
+    )
+
+
 def prepare_input(data: dict) -> dict:
     return data
 

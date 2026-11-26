@@ -1151,22 +1151,15 @@ pub(crate) fn post_tool_with_store(
             run.unrecoverable_truncations,
         )
     };
-    if request.status == ToolResultStatus::Error {
-        response.additional_context = diagnose_tool_error(&request.tool_name, &request.content)
-            .or_else(|| {
-                request
-                    .stderr
-                    .as_deref()
-                    .and_then(|stderr| diagnose_tool_error(&request.tool_name, stderr))
-            });
-        if matches!(
+    if request.status == ToolResultStatus::Error
+        && matches!(
             response.disposition,
             Disposition::Passthrough
                 | Disposition::NoSavings
                 | Disposition::RecoverabilityUnavailable
-        ) {
-            response.disposition = Disposition::ToolError;
-        }
+        )
+    {
+        response.disposition = Disposition::ToolError;
     }
     let measured = matches!(
         response.disposition,
@@ -1201,54 +1194,6 @@ pub(crate) fn post_tool_with_store(
         stash_errors,
         stash_size,
     })
-}
-
-fn diagnose_tool_error(tool_name: &str, content: &str) -> Option<String> {
-    let lower = content.to_ascii_lowercase();
-    let (category, hint) = if ["command not found", "not installed", "unable to locate"]
-        .iter()
-        .any(|pattern| lower.contains(pattern))
-    {
-        (
-            "ENV_DEPENDENCY_MISSING",
-            "Install the missing dependency or ask the user for guidance.",
-        )
-    } else if lower.contains("permission denied") || lower.contains("operation not permitted") {
-        (
-            "ENV_PERMISSION",
-            "Check file or directory permissions and required access.",
-        )
-    } else if lower.contains("no such file or directory") || lower.contains("enoent") {
-        (
-            "ENV_FILE_MISSING",
-            "Verify the path or create the required file or directory.",
-        )
-    } else if [
-        "connection refused",
-        "network is unreachable",
-        "could not resolve host",
-    ]
-    .iter()
-    .any(|pattern| lower.contains(pattern))
-    {
-        (
-            "ENV_NETWORK",
-            "Check DNS, proxy, firewall, and network connectivity.",
-        )
-    } else if ["modulenotfounderror", "no module named", "importerror"]
-        .iter()
-        .any(|pattern| lower.contains(pattern))
-    {
-        (
-            "ENV_PACKAGE_MISSING",
-            "Install the required package or module.",
-        )
-    } else {
-        return None;
-    };
-    Some(format!(
-        "[tokenless:env] {tool_name} failed: {category} ({hint})."
-    ))
 }
 
 pub(crate) fn retrieve_authorized_with_store(

@@ -184,11 +184,18 @@ test("OpenClaw compresses Diff by default and restores all original context", as
 
 test("DSH executes the actual RTK suggestion without modifying audited arguments", async () => {
   const { apply } = await import("../adapters/tokenless/dsh/dist/index.js");
+  const defaultHandlers = new Map();
+  apply({
+    shellEnv: { register() {} },
+    on(name, callback) { defaultHandlers.set(name, callback); },
+  });
+  assert.equal(defaultHandlers.has("tools/pre-execute"), false, "PreTool RTK must default to off");
+
   const handlers = new Map();
   apply({
     shellEnv: { register() {} },
     on(name, callback) { handlers.set(name, callback); },
-  });
+  }, { rtkEnabled: true });
   const repo = join(sandbox, "repo");
   mkdirSync(repo);
   execFileSync("git", ["init", "--quiet", repo]);

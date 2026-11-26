@@ -12,12 +12,12 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 |-----------|-------|------------|------------------|-------------------|------|--------|
 | cosh-ng | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Passthrough; no static recovery tool |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces single-text tool results before model consumption | Core-selected for replaceable text | — |
-| Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
+| Hermes | `hermes` | Hard-disabled | Off by default; set `TOKENLESS_HERMES_PRETOOL_RTK=1` to block the first call and suggest Core's rewrite | Replaces accepted terminal/error results; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
 | QwenWorkCN (macOS) | `qwenwork` | — | Routes standalone recovery commands to the bundled CLI | Replaces eligible full results; telemetry-only MCP wrappers pass through | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
-| Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
-| DeepSeek Harness | `dsh` | — | Blocks the first call and suggests Core's rewrite | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
+| Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original (PostTool environment diagnostics retired as silent pass-through) | — | — |
+| DeepSeek Harness | `dsh` | — | Off by default; set `rtkEnabled: true` to block the first call and suggest Core's rewrite | Delegates accepted single-text and replaceable command-error results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | Passthrough in the V1 plugin |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 | QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
@@ -46,7 +46,7 @@ browser-snapshot compression are on by default; mixed-region compression is off 
 | OpenClaw | Static `tokenless_retrieve` enables recoverable PostTool compression when the tool factory receives a conversation UUID. Keep this tool allowed by the host tool policy. Without the tool API or UUID, only lossless candidates apply. Prompt hooks expose messages but cannot replace tool schemas. Multi-block and multimodal results pass through. |
 | Cosh-NG / legacy Copilot Shell | Cosh-NG can replace supported results, but the Common BeforeModel hook cannot publish an executable static recovery tool. Legacy Copilot Shell cannot replace PostTool results. |
 | OpenCode V1 plugin | `tool.definition` lacks session/model-call context for marker-scoped static recovery and excludes MCP definitions; Schema stays unchanged. OpenCode's V2 plugin API is a separate migration, not supported by this V1 adapter. This is not a claim that V2 cannot support Schema compression. |
-| Qoder, QwenWork, Hermes, DSH | Their current integration seams do not expose a mutable model-tool-schema list with static retrieval authorization. Hermes and DSH use block-and-suggest for RTK; DSH freezes and audits arguments before its pre-execute hook, so direct argument mutation is prohibited. |
+| Qoder, QwenWork, Hermes, DSH | Their current integration seams do not expose a mutable model-tool-schema list with static retrieval authorization. Hermes and DSH default PreTool RTK to off (extra round trip) and support opt-in block-and-suggest (`TOKENLESS_HERMES_PRETOOL_RTK=1` or `rtkEnabled: true`); DSH freezes and audits arguments before its pre-execute hook, so direct argument mutation is prohibited. |
 | QwenWork shell recovery | The macOS recovery hook routes to the bundled CLI and the same Stash. Workspace Shell and plugin-private runtimes use lossless candidates when this path is unavailable. |
 | QwenPaw / AgentScope | All current Core domains are connected, including Schema and static retrieval. Intermediate stream chunks and non-text blocks remain unchanged. Custom AgentScope tools require an explicit content-origin contract. |
 
@@ -55,11 +55,10 @@ isolated by conversation UUID. History refresh removes compacted-away markers; `
 and session end do not authorize another conversation's originals. Retrieved content bypasses
 compression. Stash expiry still applies.
 
-Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool failure attribution is independent.
+Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool environment-error attribution (`[tokenless:env]`) is also retired.
 
 `additionalContext` is an additive hook field. The shared hook does not place compressed copies
-there because the original would remain visible and total context would grow. It uses that field
-only for additive environment-error guidance. A statistics record proves that a candidate became
+there because the original would remain visible and total context would grow. A statistics record proves that a candidate became
 smaller, not by itself that the host removed the original from its model request.
 
 PostTool leaves the entire JSON response unchanged when its parser cannot preserve a numeric value. Otherwise, cleanup and record reduction can proceed; Core selects TOON only when decoding it recovers the same retained values and types.
@@ -94,14 +93,14 @@ skip obvious non-JSON skill files only to avoid an unnecessary subprocess.
 Native shell envelopes expose their dominant `stdout` or `stderr` text from 200 characters
 onward, so short logs reach the same domain compressors as plain text. Qoder's native Bash
 selects only string `stdout`, including short or empty values. If `stdout` is missing or is
-not a string, the original result is not replaced. `stderr` and other fields stay unchanged;
-error diagnostics can still inspect `stderr`.
-Qoder's native Bash stdout and Claude Code keep object replacements. QwenWork replaces
-single-stream native shell `stdout` with text strings, passes through multi-stream, failed, or
-unfamiliar shell envelopes (retaining error diagnostics), and keeps object and array types for
-structured non-shell MCP results. Cosh-NG unwraps shell JSON carried in `llmContent` and
-serializes the updated envelope into its required string replacement; OpenCode keeps its string
-output contract.
+not a string, the original result is not replaced. `stderr` and other fields stay unchanged.
+Qoder's native Bash stdout and Claude Code keep object replacements. QwenWork forwards
+`exit_code` on shell results, composes any local `[stderr]`, `[stdout]`, and `[exit code: N]`
+into a single text string only when net benefit holds and no unrecognized metadata, interruption,
+or image is present, passes through non-replaceable envelopes untouched, and keeps object and array types for structured non-shell MCP results. Cosh-NG
+unwraps shell JSON carried in `llmContent` and serializes the updated envelope into its required
+string replacement; OpenCode keeps its string output contract and forwards integer `metadata.exit`
+as `exit_code`.
 
 The Common BeforeModel hook likewise has no marker-authorized recovery path. Current schema
 transformations are lossy, so Core passes the tools through unchanged, including OpenCode's V1
@@ -303,16 +302,18 @@ selected profiles and their resolved DSH home in the adapter receipt, so later
 status, disable, and re-enable operations continue to address the same profile
 tree.
 
-The plugin uses `tools/pre-execute` to deny a supported shell command with an RTK retry suggestion,
-preserving the arguments already recorded by DSH. Only an otherwise allowed root call is eligible;
-existing denials, cancellations, and approvals remain unchanged. The exact suggested command is
-allowed on retry and its output retains RTK ownership to avoid repeated compression. This costs
-one extra tool round trip. Set `rtkEnabled: false` to disable suggestions.
+PreTool RTK rewriting (`tools/pre-execute`) defaults to disabled (`rtkEnabled: false`) to avoid
+extra tool-call round trips. When `rtkEnabled: true` is set, the plugin denies an otherwise
+allowed supported root shell command with Core's RTK retry suggestion while preserving the
+arguments already recorded by DSH; existing denials, cancellations, and approvals remain unchanged.
+The exact suggested command is allowed on retry and its output retains RTK ownership to avoid
+repeated compression.
 
 The plugin runs on DSH's `tools/post-execute` waterfall and sends replaceable
-root results containing one text block to `tokenless compress`. Core owns
-content detection, JSON and Build Log compression, TOON selection, size gates,
-tool-origin thresholds, and final acceptance. Unsupported content domains and
+root results containing one text block — as well as replaceable non-`isError`, non-signaled,
+non-timed-out structured command failures — to `tokenless compress`, forwarding `exit_code`. Core owns
+content detection, JSON, Build Log, and diagnostic error compression, TOON selection, size gates,
+tool-origin thresholds, and final acceptance (`additional_context` attribution is retired). Unsupported content domains and
 file-content results pass through. When bare `tokenless` resolves on DSH's shell `PATH` to the same
 executable selected for the Core call, a Marker can ask the model to run a
 standalone `tokenless retrieve` command; its successful output bypasses
@@ -336,7 +337,7 @@ Add an override for the installed row to
 ```yaml
 - id: anolisa-tokenless
   config:
-    rtkEnabled: true
+    rtkEnabled: false
     responseCompressionEnabled: true
     timeoutMs: 5000
     maxBuffer: 4194304
@@ -348,7 +349,8 @@ that need to differ.
 
 | Option | Default | Behavior |
 |--------|---------|----------|
-| `responseCompressionEnabled` | `true` | Enables response compression. Setting it to `false` does not disable environment-error attribution. |
+| `rtkEnabled` | `false` | Opt-in switch for PreTool `tools/pre-execute` block-and-suggest RTK rewriting (off by default to avoid extra tool round trips). |
+| `responseCompressionEnabled` | `true` | Enables response and replaceable command-error compression. |
 | `tokenlessBin` | `$TOKENLESS_BIN`, then `tokenless` | Selects the Tokenless CLI executable. A non-empty plugin value takes precedence over the environment variable. Marker recovery additionally requires bare `tokenless` on the shell `PATH` to resolve to this same executable. |
 | `timeoutMs` | `3000` | Bounds one Tokenless child process in milliseconds. Only a positive integer is accepted. |
 | `maxBuffer` | `2097152` | Bounds captured child-process output in bytes. Only a positive integer is accepted. |
@@ -356,9 +358,7 @@ that need to differ.
 
 The plugin maps DSH's built-in read/search tools to `file_content`, command
 tools to `command_output`, and unknown tools to `api_response`. These mappings
-only describe host facts; Core owns the resulting policy. Raw DSH failures and
-structured command failures are sent to Core for environment diagnosis even
-when compression is disabled. When a later waterfall listener replaces the
+only describe host facts; Core owns the resulting policy. When a later waterfall listener replaces the
 canonical `value`, Tokenless examines only that replacement and never applies
 content compression to it.
 
@@ -518,7 +518,7 @@ Extensions are discovered at startup. Restart Cosh-NG, run a shell-tool task, an
 
 ### OpenClaw
 
-The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. OpenClaw 2026.6.6 or later is required. Explicitly enable the Tokenless plugin so its declared tool-result middleware can replace text before the same-turn model request. Response compression and RTK rewriting default to enabled; Core selects eligible lossless TOON candidates. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. OpenClaw 2026.6.6 or later is required. Explicitly enable the Tokenless plugin so its declared tool-result middleware can replace text before the same-turn model request. Response compression and RTK rewriting default to enabled; PreTool declares `post_tool_replacement` (`full_retrievable`, `lossless_only`, or `none`) so Core can coordinate native command handling and RTK exemption, while PostTool forwards integer `exit_code` for error-log compression. Core selects eligible lossless TOON candidates. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
 
 The plugin declares `tokenless_retrieve` in its manifest; the host tool policy must
 allow it for recovery to be usable. Prompt submission rebuilds authorization from
@@ -585,10 +585,13 @@ migration is required.
 
 ### Hermes
 
-The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the
-block-and-retry rewrite, then run a JSON-returning tool to verify result replacement. When bare
+The plugin takes effect in a new Hermes session. Restart Hermes and run a JSON-returning or noisy
+command tool to verify result replacement; PreTool RTK block-and-retry rewriting defaults to off
+and activates only when `TOKENLESS_HERMES_PRETOOL_RTK=1` is set in the Hermes environment. When bare
 `tokenless` resolves on the shell `PATH`, a Marker can ask Hermes to run `tokenless retrieve`; the
-successful recovery result is returned without another compression pass.
+successful recovery result is returned without another compression pass. For failing shell commands
+without a separate host `error` envelope field, Hermes forwards `exit_code`
+so Core can compress large diagnostic output while preserving facts cleanly.
 
 ### Qoder
 

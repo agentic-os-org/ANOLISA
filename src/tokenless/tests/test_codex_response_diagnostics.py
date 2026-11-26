@@ -104,7 +104,7 @@ class CodexResponseDiagnosticsTest(unittest.TestCase):
             "Codex diagnostics must not invoke the compression pipeline",
         )
 
-    def test_environment_failure_adds_diagnostic_only(self) -> None:
+    def test_environment_failure_passes_through_silently_while_retired(self) -> None:
         result = _run_hook(
             {
                 "stdout": "",
@@ -114,15 +114,7 @@ class CodexResponseDiagnosticsTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        output = json.loads(result.stdout)
-        hook_output = output["hookSpecificOutput"]
-        self.assertEqual(hook_output["hookEventName"], "PostToolUse")
-        context = hook_output["additionalContext"]
-        self.assertIn("[tokenless:env:ENV_DEPENDENCY_MISSING]", context)
-        self.assertIn(" — fix the environment first.", context)
-        self.assertNotIn("[tokenless:compressed]", context)
-        self.assertNotIn("updatedMCPToolOutput", hook_output)
-        self.assertNotIn("suppressOutput", output)
+        self.assertEqual(result.stdout, "")
 
     def test_non_object_payload_passes_through_silently(self) -> None:
         """Valid JSON that is not an object must take the silent skip path.

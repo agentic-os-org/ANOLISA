@@ -2,7 +2,7 @@
 
 ## 一、功能概述
 
-PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给七个领域之一：JSON、Build Log、Tabular、Search Results 路径共享、HTML 页面转写与 Browser Snapshot 重编码默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功及带 `exit_code` 的失败 `command_output` 或 `file_read`（失败路径启用 `BuildLogMode::DiagnosticFailure`），沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略；Browser Snapshot 重编码把 Playwright MCP 的无障碍快照无损重写为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀，解析失败时整体透传；chrome-devtools-mcp 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）。这三个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 按 `exit_code` 分级处理：未携带 `exit_code` 或属于硬执行失败/短错误（Level E1）时保留原始输出并只追加环境诊断；携带正常退出码且长度达到门槛的失败进入 Level E2 安全压缩并由 `FactInvariantGuard` 守卫事实；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给七个领域之一：JSON、Build Log、Tabular、Search Results 路径共享、HTML 页面转写与 Browser Snapshot 重编码默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功及带 `exit_code` 的失败 `command_output` 或 `file_read`（失败路径启用 `BuildLogMode::DiagnosticFailure`），沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略；Browser Snapshot 重编码把 Playwright MCP 的无障碍快照无损重写为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀，解析失败时整体透传；chrome-devtools-mcp 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）。这三个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 按 `exit_code` 分级处理：未携带 `exit_code` 或属于硬执行失败/短错误（Level E1）时保留原始输出；携带正常退出码且长度达到门槛的失败进入 Level E2 安全压缩并由 `FactInvariantGuard` 守卫事实（环境错误归因已下线，`additional_context` 恒为 `None`）；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
 候选全部未命中时，按显式定界的 typed region 逐段压缩混合输出（见「三、递归处理顺序」
 之后的「Mixed Content 领域」一节）。
 
@@ -101,9 +101,9 @@ pnpm 只处理完整 LF 记录。CRLF、裸 CR、TAB、OSC、光标控制或残�
 仍将 Stash 错误提升为操作错误，宿主可能保留原输出，不能宣称此时布局已生效。
 Runtime 只执行一次全局 **UTF-8 字节数、字符数、估算 Token 三重严格递减仲裁** 和 Stash Commit/Rollback，保留 dry-run、时限与归属保护。
 Tool Error 分层进入管线（向后兼容未传入新字段的旧宿主）：
-- **显式准入前提**：当 `status == error` 时，只有请求显式携带 `exit_code`（`request.exit_code.is_some()`）才会退出兼容直通门，避免未改造 `main` Adapter（如 OpenClaw）丢失 `[tokenless:env]` 诊断；未携带 `exit_code` 时直接透传并在 `tool_error` 分支保留环境诊断。
-- **Level E1（原样直通 + `[tokenless:env]`）**：`exit_code` 为 `126`、`127`、`< 0` 或 `>= 128`（硬执行错误/信号中止），或字符数低于 `error_min_input_chars`（默认 `400` 字符）时，直接保持原样输出并从 `content` 或 `stderr` 提取环境诊断。
-- **Level E2（安全压缩 + 事实守卫）**：其余达到阈值的失败输出跳过 HTML / Browser Snapshot / Tabular / Mixed 等易损域，允许进入 Build Log（`BuildLogMode::DiagnosticFailure`，关闭 `detect_generic` 并保护错误/断言/行首诊断锚点）、Diff 或 JSON branch；提交 Stash 前强制经 `FactInvariantGuard` 校验（提取文本与 JSON/TOON 叶子中的错误码、Summary 行、失败测试名、`file:line` 诊断位置及断言/异常信号，任一丢失或任一类别追踪锚点超出 `256` 上限即触发 fail-safe 回滚并置回 `ToolError`）。传入 `exit_code` 启用错误压缩的宿主在收到 `disposition == "applied"` 时同样必须消费响应中的 `additional_context`，而不能只在 `tool_error` 分支读取它（否则匹配到的 `[tokenless:env]` 诊断会被丢弃）。
+- **显式准入前提**：当 `status == error` 时，只有请求显式携带 `exit_code`（`request.exit_code.is_some()`）才会退出兼容直通门；未携带 `exit_code` 时直接透传为 `tool_error`（环境错误归因已下线，`additional_context` 恒为 `None`）。
+- **Level E1（原样直通）**：`exit_code` 为 `126`、`127`、`< 0` 或 `>= 128`（硬执行错误/信号中止），或字符数低于 `error_min_input_chars`（默认 `400` 字符）时，直接保持原样输出并报告 `tool_error`。
+- **Level E2（安全压缩 + 事实守卫）**：其余达到阈值的失败输出跳过 HTML / Browser Snapshot / Tabular / Mixed 等易损域，允许进入 Build Log（`BuildLogMode::DiagnosticFailure`，关闭 `detect_generic` 并保护错误/断言/行首诊断锚点）、Diff 或 JSON branch；提交 Stash 前强制经 `FactInvariantGuard` 校验（提取文本与 JSON/TOON 叶子中的错误码、Summary 行、失败测试名、`file:line` 诊断位置及断言/异常信号，任一丢失或任一类别追踪锚点超出 `256` 上限即触发 fail-safe 回滚并置回 `ToolError`）。
 
 两种转换内部统一为 `BuildLogOperation::Reduction`，映射到现有 `AppliedOperation::BuildLogReduction`。
 Wire 保持 Protocol v2，旧调用方省略 `PreToolCapabilities.post_tool_replacement` 与 `PostToolRequest` 可选错误字段时保持既有默认语义；由于 Protocol v2 请求体使用 `#[serde(deny_unknown_fields)]`，向后兼容（旧 SDK/Adapter → 新 Core）成立，但**不前向兼容**——发送新字段的 SDK/Adapter 必须配合或晚于新版 Core 升级，否则旧 Core 会拒绝未知字段。
@@ -216,9 +216,12 @@ OpenClaw 的 PreTool 同样调用一次 `tokenless compress`，并把 Core 返�
 OpenClaw 对 RTK 输出声明 `recovery: none`，回退仅接受无损候选。Ledger 按 24 小时 TTL、
 1024 条上限和 Session 结束事件清理。
 
-OpenClaw 不提供 Marker 授权恢复路径，因此需要恢复的 Lossy Candidate 以
-`recoverability_unavailable` 透传。本地 `tokenless retrieve` 是受信运维入口，不能替代 Agent
-授权。插件要求 OpenClaw 2026.6.6 或更高版本，Manifest 必须声明
+OpenClaw 启用静态 `tokenless_retrieve` 工具按会话 ID 授权 Marker 恢复：PreTool 请求显式
+申报 `post_tool_replacement`（可用静态恢复时为 `full_retrievable`，关闭或缺失策略授权时为
+`lossless_only`，关闭 `post_tool_enabled` 时为 `none`），PostTool 对 `command_output` 透传
+整型 `exit_code` 供 Core 错误日志压缩使用。当对话缺少工具注册或策略禁用 `tokenless_retrieve` 时，需要恢复的
+Lossy Candidate 以 `recoverability_unavailable` 透传；本地 `tokenless retrieve` 仍是受信
+运维入口，不能替代 Agent 授权。插件要求 OpenClaw 2026.6.6 或更高版本，Manifest 必须声明
 `contracts.agentToolResultMiddleware: ["openclaw"]`，且插件须显式启用。
 `registerAgentToolResultMiddleware` 返回的结果直接进入同轮模型请求，并由宿主持久化；
 插件不再注册 `tool_result_persist`，避免重复压缩与统计。仅单个 Text Block 可以替换，
@@ -354,31 +357,33 @@ PostTool 事件时遗留的状态会在后续 PreTool 调用中按 24 小时 TTL
 ### 路径 3：Hermes Agent 插件（`transform_tool_result` hook）
 
 ```
-pre_tool_call 将 Shell 参数发送给 Tokenless Core
+默认关闭 pre_tool_call RTK（设置 TOKENLESS_HERMES_PRETOOL_RTK=1 时向 Core 发送 Shell 参数并阻止建议重试）
    ↓
-旧版兼容模式：阻止原调用并建议执行 Core 返回的 RTK 命令
+工具执行完成并触发 transform_tool_result
    ↓
-Hermes 执行重试命令并触发 transform_tool_result
+Adapter 映射 Status、Content Origin、exit_code 和 RTK Wrapper 事实
    ↓
-Adapter 映射 Status、Content Origin 和 RTK Wrapper 事实
-   ↓
-tokenless compress 执行 PostTool 路由与内容域 Pipeline
+tokenless compress 执行 PostTool 路由与内容域 Pipeline（含可替换失败输出压缩）
    ↓
 Core 返回 Applied / Tool Error / Passthrough 等 Disposition
    ↓
-Adapter 仅替换 Applied 输出或追加错误指引；其他结果原样透传
+Adapter 替换 Applied 输出；其他结果原样透传
 ```
 
 Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON 选择或最终大小仲裁。
+当 Shell 失败结果携带非空 `output` 且不存在独立 `error` 字段时，Hermes Adapter 同样提取并
+透传 `exit_code`（带 `recovery` 能力），让 Core 对大体积诊断日志执行结构化
+压缩（环境错误归因已下线，不会附加 `[tokenless:env]`）。
 缩减结果中的 Marker 会提示 Hermes 通过已有 Shell Tool 执行 `tokenless retrieve`；Adapter
 根据 `transform_tool_result` 收到的实际 `args.command` 识别成功的单条恢复命令，并让结果绕过
-二次压缩。为兼容只支持 Block 的 Hermes 版本，Adapter 不要求 `pre_tool_call modify`。
+二次压缩。为兼容只支持 Block 的 Hermes 版本，PreTool RTK 仍默认关闭且仅以 opt-in 方式提供
+阻止后重试兼容模式，Adapter 不要求 `pre_tool_call modify`。
 
 ### 路径 4：Qoder CLI 插件（`PostToolUse` hook）
 
 Qoder 通过原生插件目录 `hooks/hooks.json` 加载 hook，并在运行时展开 `${QODER_PLUGIN_ROOT}`。插件内的 `hooks/run-hook.sh` 再从 ANOLISA adapter 目录定位共享的 `compress_response_hook.py`，无需改写 `~/.qoder/settings.json` 或将机器相关绝对路径写入插件缓存。
 
-Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。原生 Bash 只允许替换字符串 `stdout`，包括较短或为空的值；压缩后回填到原对象，`stderr` 和其他字段保持不变。`stdout` 缺失或不是字符串时不替换原结果，错误诊断仍可读取 `stderr`。其他可替换的结构化结果沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 仅在显式提供时传递追加上下文（环境错误归因已下线）。原生 Bash 只允许替换字符串 `stdout`，包括较短或为空的值；压缩后回填到原对象，`stderr` 和其他字段保持不变。`stdout` 缺失或不是字符串时不替换原结果。其他可替换的结构化结果沿用 JSON 字符串返回。Bash 对象的其他字段保持原值，由 Qoder 决定其模型可见的渲染方式；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
 
 这也意味着原生 Bash 对象中的独立 `stderr` 字段不再压缩或生成检索标记；Hook 返回 `{}`
 表示不替换工具结果，不表示给模型返回空文本。Qoder 1.1.78 的真实 Bash 探针中，进程的
@@ -398,20 +403,21 @@ stdout/stderr 合并进入 `tool_response.stdout`，`tool_response.stderr` 为�
 
 通过 `run-hook.sh` 调度器定位共享 hook 脚本，调用 `compress_response_hook.py`。Claude Code 复制插件到版本化缓存目录，因此 `run-hook.sh` 通过 FHS 路径查找共享 hook。
 
-与其他 agent 不同，Claude Code 的 `additionalContext` 是**追加式**的（模型会同时看到原始工具结果和注入内容），因此压缩结果通过 `hookSpecificOutput.updatedToolOutput`（Claude Code >= 2.1.121）**替换**模型可见的工具结果，`additionalContext` 仅保留真正追加式的诊断信息（环境错误归因）。替换时会回填被压缩剥离的空 schema 字段（如 Bash 的 `stderr`/`interrupted`/`isImage`），保持内置工具输出结构不变；结构化响应不做 TOON 编码（TOON 为文本格式，会破坏 schema）。Marker 中的 `tokenless retrieve` 命令可以通过 Bash 执行，成功结果原样旁路。旧版本 Claude Code（< 2.1.121）或版本无法探测时 fail-open：直接透传原始结果，不注入重复内容。版本探测结果缓存于 `~/.tokenless/.claude-version`（0600 权限、拒绝符号链接，与其他 hook 状态文件一致），缓存键为 claude 二进制的路径+mtime+大小，升级 Claude Code 后自动失效重探，避免每次 PostToolUse 都启动 node CLI。
+与其他 agent 不同，Claude Code 的 `additionalContext` 是**追加式**的（模型会同时看到原始工具结果和注入内容），因此压缩结果通过 `hookSpecificOutput.updatedToolOutput`（Claude Code >= 2.1.121）**替换**模型可见的工具结果，`additionalContext` 仅保留显式追加信息（环境错误归因已下线）。替换时会回填被压缩剥离的空 schema 字段（如 Bash 的 `stderr`/`interrupted`/`isImage`），保持内置工具输出结构不变；结构化响应不做 TOON 编码（TOON 为文本格式，会破坏 schema）。Marker 中的 `tokenless retrieve` 命令可以通过 Bash 执行，成功结果原样旁路。旧版本 Claude Code（< 2.1.121）或版本无法探测时 fail-open：直接透传原始结果，不注入重复内容。版本探测结果缓存于 `~/.tokenless/.claude-version`（0600 权限、拒绝符号链接，与其他 hook 状态文件一致），缓存键为 claude 二进制的路径+mtime+大小，升级 Claude Code 后自动失效重探，避免每次 PostToolUse 都启动 node CLI。
 
 ### 路径 6：Codex 插件（`PostToolUse` hook）
 
 Codex 的 PostToolUse 不能替换或抑制原始输出。通过 `additionalContext` 追加压缩内容
 会同时保留原文，增加模型首轮可见 Payload，因此 Codex Adapter 不运行响应压缩或
-TOON。独立脚本 `response-diagnostics` 只在识别出环境失败时追加修复提示。支持的 Shell
-除已交给 Build Log 领域的构建/测试命令外，受支持 Shell 命令由 PreToolUse Hook 通过 RTK
-在执行前重写，工具从源头产生更小的输出。Codex 当前不能替换 PostTool 输出，因此其构建/测试
-命令在这一阶段保持原始输出。
+TOON；独立脚本 `response-diagnostics` 也已随 `[tokenless:env]` 环境诊断下线改为静默透传。支持的 Shell
+命令由 PreToolUse Hook 通过 RTK 在执行前重写（向 Core 申报 `post_tool_replacement: "none"`），工具从源头产生更小的输出。
 
 ### 路径 7：DeepSeek Harness 插件（`tools/post-execute`）
 
-DSH 把可替换的单文本结果交给 PostTool Core。普通成功结果声明恢复可用；Marker 中的
+DSH 默认关闭 `tools/pre-execute` RTK 重试建议（设置 `rtkEnabled: true` 可按需开启）。
+PostTool 阶段，DSH 把可替换的单文本结果——以及非 `isError`、无 `signal`、非 `timedOut` 的
+可替换结构化命令失败结果——连同 `exit_code` 和 `replace_output: true`
+交给 PostTool Core（环境错误归因已下线）。普通成功结果与可替换结构化失败均声明恢复可用；Marker 中的
 `tokenless retrieve` 由已有 Shell Tool 执行后，Adapter 从实际的
 `exec.arguments.command` 识别成功的单条恢复命令，并把输出标记为 Retrieve Result，确保
 恢复内容不会再次压缩。只有裸 `tokenless` 能从 Shell `PATH` 解析到 Adapter 为 Core 选中的
@@ -640,7 +646,7 @@ Rust 调用方应移除 `JsonCompressionConfig.drop_nulls`、`drop_empty_fields`
 | Hermes 插件 | `adapters/tokenless/hermes/__init__.py` |
 | Qoder 插件配置 | `adapters/tokenless/qoder/hooks/hooks.json` |
 | Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
-| Codex 响应诊断 Hook | `adapters/tokenless/codex/scripts/response-diagnostics` |
+| Codex 响应诊断 Hook（已硬关闭） | `adapters/tokenless/codex/scripts/response-diagnostics` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.7.0（TOON spec v4.4） |
 | JSON 压缩测试 | `crates/tokenless-compressors/src/json/tests.rs` |
 | Build Log 压缩测试与 Fixture | `crates/tokenless-compressors/src/build_log/tests.rs`、`crates/tokenless-compressors/tests/fixtures/build_logs/` |

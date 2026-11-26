@@ -2756,7 +2756,7 @@ fn compress_post_tool_unittest_logs_preserve_summary_and_recover_original() {
 }
 
 #[test]
-fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
+fn compress_post_tool_error_build_log_without_exit_code_stays_original() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
@@ -2790,12 +2790,7 @@ fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
         response["result"]["applied_operations"],
         serde_json::json!([])
     );
-    assert!(
-        response["result"]["additional_context"]
-            .as_str()
-            .unwrap()
-            .contains("ENV_DEPENDENCY_MISSING")
-    );
+    assert!(response["result"].get("additional_context").is_none());
 }
 
 #[test]
@@ -7104,12 +7099,7 @@ fn compress_post_tool_error_with_exit_code_routes_level_e1_and_e2() {
         e2_json["result"]["applied_operations"],
         serde_json::json!(["build_log_reduction"])
     );
-    assert!(
-        e2_json["result"]["additional_context"]
-            .as_str()
-            .unwrap()
-            .contains("ENV_DEPENDENCY_MISSING")
-    );
+    assert!(e2_json["result"].get("additional_context").is_none());
     let compressed = e2_json["result"]["output"].as_str().unwrap();
     assert!(compressed.contains("error[E0308]"));
     assert!(compressed.contains("src/main.rs:12"));
@@ -7159,6 +7149,7 @@ fn compress_post_tool_error_with_exit_code_routes_level_e1_and_e2() {
     assert_eq!(e1_json["result"]["disposition"], "tool_error");
     assert_eq!(e1_json["result"]["output"], content);
     assert_eq!(e1_json["result"]["stash_keys"], serde_json::json!([]));
+    assert!(e1_json["result"].get("additional_context").is_none());
 }
 
 #[test]

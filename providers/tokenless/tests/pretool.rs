@@ -25,7 +25,7 @@ if mode == 'failed': sys.exit(1)
 if mode == 'slow': time.sleep(2)
 if r['operation'] == 'pre_tool':
     replace = r['input']['capabilities']['replace_arguments']
-    assert r['input']['capabilities'] == {{'replace_arguments': replace, 'block_and_suggest': not replace}}
+    assert r['input']['capabilities'] == {{'replace_arguments': replace, 'block_and_suggest': not replace, 'post_tool_replacement': 'lossless_only'}}
     args = r['input']['arguments'].copy()
     args['command'] = ('env TOKENLESS_AGENT_ID=' + r['attribution']['agent_id']
         + ' TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=blocked-call TOKENLESS_DATA_DIR='

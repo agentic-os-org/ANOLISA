@@ -672,7 +672,9 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 attribution=attribution,
             )
         )
-        self.assertIn("ENV_DEPENDENCY_MISSING", error.additional_context or "")
+        self.assertEqual(error.disposition.value, "tool_error")
+        self.assertEqual(error.output, "/bin/sh: jq: command not found")
+        self.assertIsNone(error.additional_context)
 
         retrieved = await sdk.post_tool(
             PostToolRequest(

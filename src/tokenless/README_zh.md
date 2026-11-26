@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
+LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 事实守卫错误日志压缩。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
 
 随包提供的 RTK 0.49.0 保留原生 `grep -l` / `-m` 语义，保守处理 Pipeline 重写，
 并让 `sudo` 命令保持原样。RTK 恢复提示使用 `tokenless rtk recall`，保留的输出以宿主 OS 用户为作用域，
@@ -117,19 +117,19 @@ SDK、QwenPaw 和 AgentScope 继承与 CLI 相同的压缩环境开关，显式 
 
 - **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和实时 PostTool 优化，提供按会话授权的静态恢复工具；宿主 Prompt Hook 不支持替换 Schema
 - **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 透传 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
-- **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core，并通过已有 Shell Tool 支持 Marker 命令恢复；无 Schema 压缩
+- **Hermes Agent 插件** — 把模型可见终端及错误结果优化委托给 Core，通过已有 Shell Tool 支持 Marker 命令恢复；PreTool 阻止后建议式改写默认关闭（`TOKENLESS_HERMES_PRETOOL_RTK=1` 按需开启），无 Schema 压缩
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline + Marker 命令恢复
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
-- **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
+- **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写（PostTool 环境诊断脚本已下线为静默透传）；Codex
   协议不支持替换原始输出，因此不追加压缩副本
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON + Marker 命令恢复；V1 插件缺少静态恢复授权，Schema 透传
-- **DeepSeek Harness 插件** — 通过 DSH 工具生命周期接入 RTK 重试建议、响应压缩、Marker 命令恢复和环境错误归因
+- **DeepSeek Harness 插件** — 通过 DSH 工具生命周期接入响应压缩与可替换命令错误压缩、按需开启的 RTK 重试建议（`rtkEnabled: true`）以及 Marker 命令恢复
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 - **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
 
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
-`tokenless compress`，`registerAgentToolResultMiddleware` 在同轮模型请求之前，把实时工具
-结果交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、TOON、阈值、诊断与最终仲裁；Plugin
+`tokenless compress`（并上报 `post_tool_replacement` 能力），`registerAgentToolResultMiddleware` 在同轮模型请求之前，把实时工具
+结果（含 `command_output` 的整型 `exit_code`）交给同一 Protocol v2 入口。Core 持有 RTK、JSON 检测、格式压紧、错误日志压缩、TOON、阈值与最终仲裁；Plugin
 把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool。只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，
 Core 才恢复原命令以检查文件来源并继续处理；已改变或无法确认的输出保持旁路。
 RTK 回退仅接受无损候选。其他结果可通过静态 `tokenless_retrieve` 工具恢复 HTML、Diff、浏览器快照、
@@ -240,7 +240,7 @@ dsh --profile <profile>
 
 ### `compress` 压缩入口
 
-共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；成功且未旁路的（以及显式携带 `exit_code` 的失败）PostTool JSON、符合条件的命令输出 Build Log 和 Diff 会进入 Runtime 内部 Pipeline，纯成功路径还会处理 CSV/TSV 表格、HTML、浏览器快照与混合区域。省略 `exit_code` 的 Tool Error 与 Level E1 硬退出/短错误会旁路压缩、保留原始输出，并由 Core 追加 `[tokenless:env]` 环境诊断（支持回退读取 `stderr`）；携带 `exit_code` 且满足阈值（默认 `400` 字符）的失败进入受 `FactInvariantGuard` 守卫的 Level E2 压缩，Opt-in 宿主在 `tool_error` 与 `applied` 两种响应中都必须消费 `additional_context`。
+共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；成功且未旁路的（以及显式携带 `exit_code` 的失败）PostTool JSON、符合条件的命令输出 Build Log 和 Diff 会进入 Runtime 内部 Pipeline，纯成功路径还会处理 CSV/TSV 表格、HTML、浏览器快照与混合区域。省略 `exit_code` 的 Tool Error 与 Level E1 硬退出/短错误会旁路压缩、保留原始输出（环境错误归因已下线，`additional_context` 恒为 `None`）；携带 `exit_code` 且满足阈值（默认 `400` 字符）的失败进入受 `FactInvariantGuard` 守卫的 Level E2 压缩。
 
 在默认的 `post_tool_replacement: "full_retrievable"` 能力下，PreTool 会跨直接调用和内置 Wrapper（含 `env -C`/`-S`、`timeout`、`time`、`nice`、`nohup`、`uv run` 等）保持已识别的 Cargo、pytest、npm/Jest、Go、Make 构建/测试命令以及原生预览/搜索调用（`find`、`head`、`tail`、`grep`、`rg`）不变，使其输出只由 PostTool 处理。声明 `lossless_only` 的宿主仅对预览/搜索保留原生形式，声明 `none` 则关闭豁免并恢复 RTK 改写。其他受支持命令仍可由 RTK 改写；只有完整执行回执确认输出字节未变，且 PostTool 提供注册的完整执行命令，成功结果才继续进入 PostTool，并保留原命令对应的文件来源保护。
 
@@ -439,9 +439,11 @@ make qwenpaw-install
 
 ### DeepSeek Harness 插件
 
-DSH 原生 Bundle 通过 `tools/post-execute` 把可替换的单文本工具结果交给 Tokenless
-PostTool Core。内容检测、JSON 格式压紧、TOON 选择、最终接受和环境错误诊断均由 Core
-负责。缩减结果包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
+DSH 原生 Bundle 默认关闭 PreTool RTK（`rtkEnabled: false`），设置 `rtkEnabled: true` 可按需
+开启阻止后建议式重试；在 `tools/post-execute` 阶段把可替换的单文本工具结果——以及非 `isError`、
+无 signal、未超时的可替换结构化命令失败结果——连同 `exit_code` 交给 Tokenless
+PostTool Core。内容检测、JSON 格式压紧、错误日志压缩、TOON 选择与最终接受均由 Core
+负责；环境错误归因已下线，压缩开启且失败结果可替换时只返回优化后的输出。缩减结果包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
 `tokenless retrieve` 命令。Adapter 从 `exec.arguments.command` 检查成功执行的单条恢复命令，
 并让其结果绕过 Core 压缩、原样返回。只有裸 `tokenless` 能从 Shell 的 `PATH` 解析到
 `tokenlessBin` 或 `TOKENLESS_BIN` 为 Core 选中的同一个可执行文件时，Adapter 才启用可恢复压缩；
