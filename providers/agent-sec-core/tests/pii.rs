@@ -648,3 +648,39 @@ fn redaction_errors_follow_the_invocation_error_path() {
         d.assert_stopped();
     }
 }
+
+#[test]
+fn paired_bash_mask_checks_the_complete_retained_result() {
+    let native = json!({"aw_result_gate":true, "nested":false, "tool_call":{"name":"bash","input":{}},
+        "tool_response":{"isError":false,"content":[{"type":"text","text":SLOT}],
+            "value":{"kind":"foreground","stdout":{"text":SLOT},"stderr":{"text":""}},
+            "meta":{"cwd":"/workspace"}}});
+    let mut req = mask_request(SLOT);
+    req["event"]["tool"]["result"] = native["tool_response"].clone();
+    req["event"]["tool"]["result_projection"] =
+        aw_adapter::projection::project("deepseek-harness", &native).unwrap();
+    let d = support::Directory::new(json!({"pii":true}));
+    let response = run(req.clone(), &d);
+    assert_eq!(
+        response["effects"][0]["text"], "contact [MASKED] for delivery",
+        "{response}"
+    );
+
+    for path in ["/value/stderr/text", "/meta/cwd"] {
+        let mut changed = req.clone();
+        *changed["event"]["tool"]["result"]
+            .pointer_mut(path)
+            .unwrap() = json!(SLOT);
+        assert_eq!(run(changed, &d)["error_code"], "unsupported_pii_result");
+    }
+    // The two declared paths must still agree and the retained object may
+    // contain risk visible only in the serialized context of the original.
+    let mut changed = req.clone();
+    changed["event"]["tool"]["result"]["value"]["stdout"]["text"] = json!("different");
+    assert_eq!(run(changed, &d)["error_code"], "unsupported_pii_result");
+    req["event"]["tool"]["result"]["value"]["stdout"]["unit"] = json!("private");
+    let d = support::Directory::new(
+        json!({"pii":true,"pii_pattern":r#"SENSITIVE|(?<=for delivery","unit":")private"#}),
+    );
+    assert_eq!(run(req, &d)["error_code"], "unsupported_pii_result");
+}

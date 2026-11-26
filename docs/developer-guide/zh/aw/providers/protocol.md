@@ -234,6 +234,9 @@ printf '%s\n' '{"api_version":"aw-provider/v1alpha1","method":"validate_config",
 只有已准入的替换步骤获得可选投影，既有观察步骤保持原事件形态。Adapter 可提供 `event.tool.result_projection`，包含 `text`、`status`、
 `content_origin` 及可选 Shell `command`。原 `result` 和原生载荷保留，并参与请求绑定。
 
+可选的 `text_paths` 包含两个相对于 `tool.result` 的不同 JSON Pointer。两者须指向与投影一致的文本。
+Adapter 向两处同时写入同一个替换文本，保留其他字段。
+
 `replace_result` 效果要求字符串 `text`；`block` 可携带非空、有界的 `text` 原因，其他效果拒绝该字段。响应最多包含一个
 替换，且要求输入中存在投影。缺少投影时只允许不替换的结果。Adapter 替换选定文本
 槽并保留原生 envelope 和失败状态。这是候选效果，不证明模型已消费；AW Journal 不记录文本。

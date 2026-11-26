@@ -282,6 +282,10 @@ observers keep their original event shape. The Adapter supplies `event.tool.resu
 `status`, `content_origin` and an optional shell `command`. The original `result`
 and native payload remain available and participate in the request binding.
 
+An optional `text_paths` pair contains two distinct JSON Pointers relative to
+`tool.result`. Both must resolve to the projected string. The Adapter adopts
+one replacement text at both locations and preserves the remaining fields.
+
 A `replace_result` effect requires a string `text`. A `block` effect may include
 a nonempty bounded `text` reason; all other effect types reject that field. Responses allow at most one replacement and require an input
 projection. A missing projection permits only a no-replacement result. The

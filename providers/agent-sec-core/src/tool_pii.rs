@@ -90,14 +90,26 @@ pub(super) fn invoke(
             let slot = event["tool"]["result_projection"]["text"]
                 .as_str()
                 .ok_or("unsupported_pii_result")?;
-            replacement(
-                value,
-                slot,
-                policy.output_mode,
-                serialized_json_risk,
-                &check,
-                |text| scan(text, true),
-            )?
+            if let Some(paths) = event["tool"]["result_projection"].get("text_paths") {
+                paired_replacement(
+                    value,
+                    slot,
+                    paths,
+                    policy.output_mode,
+                    serialized_json_risk,
+                    &check,
+                    |text| scan(text, true),
+                )?
+            } else {
+                replacement(
+                    value,
+                    slot,
+                    policy.output_mode,
+                    serialized_json_risk,
+                    &check,
+                    |text| scan(text, true),
+                )?
+            }
         } else {
             WITHHELD.into()
         };
@@ -107,6 +119,94 @@ pub(super) fn invoke(
         ("input_digest".into(), request["input_digest"].clone()),
         ("effects".into(), json!([effect])),
     ]))
+}
+
+// Explicit aliases must agree. The complete original is scanned in serialized
+// context too: removing an alias before this check could conceal a retained risk.
+fn paired_replacement(
+    result: &Value,
+    slot: &str,
+    paths: &Value,
+    mode: OutputMode,
+    serialized_risk: bool,
+    check: &impl Fn(&str) -> Result<Verdict, &'static str>,
+    redact: impl Fn(&str) -> Result<pii::ScannedText, &'static str>,
+) -> Result<String, &'static str> {
+    let [a, b] = paths.as_array().ok_or("unsupported_pii_result")?.as_slice() else {
+        return Err("unsupported_pii_result");
+    };
+    let paths = [
+        a.as_str().ok_or("unsupported_pii_result")?,
+        b.as_str().ok_or("unsupported_pii_result")?,
+    ];
+    let write = |value: &mut Value, text: &str| -> Result<(), &'static str> {
+        for path in paths {
+            let field = value.pointer_mut(path).ok_or("unsupported_pii_result")?;
+            if !field.is_string() {
+                return Err("unsupported_pii_result");
+            }
+            *field = json!(text);
+        }
+        Ok(())
+    };
+    if paths[0] == paths[1]
+        || paths
+            .iter()
+            .any(|p| result.pointer(p).and_then(Value::as_str) != Some(slot))
+    {
+        return Err("unsupported_pii_result");
+    }
+    let mut retained = result.clone();
+    write(&mut retained, "")?;
+    if scan_value(&retained, check)?.verdict == Verdict::Risk {
+        return Err("unsupported_pii_result");
+    }
+
+    let raw = result.to_string();
+    let candidate = if mode == OutputMode::Mask {
+        redact(slot)?.changed_redaction(slot)
+    } else {
+        None
+    };
+    let mut text = candidate.as_deref().unwrap_or(WITHHELD);
+    if mode == OutputMode::Mask || serialized_risk {
+        let full = redact(&raw)?;
+        if full.verdict == Verdict::Risk {
+            let masked = full
+                .changed_redaction(&raw)
+                .ok_or("unsupported_pii_result")?;
+            let mut decoded = aw_provider::view::decode(masked.as_bytes())
+                .map_err(|_| "unsupported_pii_result")?;
+            let canonical = decoded.to_string();
+            if canonical != masked {
+                return Err("unsupported_pii_result");
+            }
+            if paths
+                .iter()
+                .any(|p| decoded.pointer(p).and_then(Value::as_str) != Some(text))
+            {
+                text = WITHHELD;
+            }
+            write(&mut decoded, "")?;
+            if decoded != retained {
+                return Err("unsupported_pii_result");
+            }
+        } else if serialized_risk {
+            return Err("unsupported_pii_result");
+        }
+    }
+    loop {
+        write(&mut retained, text)?;
+        if retained.to_string().len() <= aw_provider::MAX_MESSAGE_BYTES
+            && scan_value(&retained, check)?.verdict != Verdict::Risk
+        {
+            return Ok(text.into());
+        }
+        if text == WITHHELD {
+            return Err("unsupported_pii_result");
+        }
+        text = WITHHELD;
+    }
 }
 
 fn replacement(

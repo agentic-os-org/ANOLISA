@@ -330,6 +330,10 @@ the Provider clears the Adapter-authorized text slot in a private copy and scans
 the retained fields, including stderr and metadata. A missing or ambiguous slot
 or a risk in the retained fields returns `unsupported_pii_result`.
 
+With an explicit `text_paths` pair, the Provider verifies both original strings,
+scans the retained envelope with both slots cleared and rechecks the reconstructed
+result. Changes outside either authorized path in a full JSON redaction fail the check.
+
 - `replace_result` replaces the whole slot with
   `Sensitive data detected by AW; content withheld.`
 - `mask` requests a redaction of the authorized slot and scans the proposed

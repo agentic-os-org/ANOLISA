@@ -282,6 +282,9 @@ pub fn project(adapter: &str, native: &Value) -> Option<Value> {
         return None;
     }
     let mut projection = json!({"text":text, "status":status, "content_origin":origin});
+    if adapter == "deepseek-harness" && crate::adapters::deepseek::mirrored_stdout(native) {
+        projection["text_paths"] = json!(crate::adapters::deepseek::BASH_TEXT_PATHS);
+    }
     if let Some(command) = command {
         projection["command"] = json!(command);
     }
@@ -309,6 +312,9 @@ pub fn reply(adapter: &str, native: &Value, text: &str) -> Result<HookOutput> {
     *value
         .pointer_mut(&pointer)
         .ok_or("native result slot disappeared")? = json!(text);
+    if adapter == "deepseek-harness" && crate::adapters::deepseek::mirrored_stdout(native) {
+        value["value"]["stdout"]["text"] = json!(text);
+    }
     let response = match adapter {
         "codex" => json!({"continue":false,"reason":text}),
         "qoder" | "qoder-sdk" => {

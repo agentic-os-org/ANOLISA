@@ -253,6 +253,13 @@
                         "denied"
                       ]
                     },
+                    "text_paths": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "uniqueItems": true,
+                      "items": { "type": "string", "pattern": "^/", "maxLength": 128 }
+                    },
                     "content_origin": {
                       "enum": [
                         "command_output",
