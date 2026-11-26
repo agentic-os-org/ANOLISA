@@ -1432,24 +1432,38 @@ impl SkillFs {
             }
         };
 
-        // 1. Handle size (truncate) — preserve existing logic
+        // 1. Handle size (truncate)
         if let Some(new_size) = size {
-            let open_result = match std::fs::OpenOptions::new().write(true).open(&physical) {
-                Ok(f) => Ok(f),
-                Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
-                    match self.open_parent_dir_for(&path) {
-                        Ok((parent_fd, leaf)) => openat_leaf(&parent_fd, &leaf, libc::O_WRONLY, 0),
-                        Err(_) => Err(e),
+            let result = if let Some(fh) = fh {
+                // ftruncate retains the access granted at open, even after chmod.
+                // create(O_RDONLY) can hold a writable backing fd, so check the
+                // caller's access mode as well as the inode and backing file.
+                self.handles
+                    .with_handle(fh, |entry| {
+                        if entry.ino != ino || entry.flags & libc::O_ACCMODE == libc::O_RDONLY {
+                            return None;
+                        }
+                        entry.file.as_ref().map(|file| file.set_len(new_size))
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| Err(std::io::Error::from_raw_os_error(libc::EBADF)))
+            } else {
+                match std::fs::OpenOptions::new().write(true).open(&physical) {
+                    Ok(f) => Ok(f),
+                    Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+                        match self.open_parent_dir_for(&path) {
+                            Ok((parent_fd, leaf)) => {
+                                openat_leaf(&parent_fd, &leaf, libc::O_WRONLY, 0)
+                            }
+                            Err(_) => Err(e),
+                        }
                     }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
+                .and_then(|file| file.set_len(new_size))
             };
-            match open_result {
-                Ok(f) => {
-                    if let Err(e) = f.set_len(new_size) {
-                        reply.error(errno(&e));
-                        return;
-                    }
+            match result {
+                Ok(()) => {
                     // SKILL.md truncate triggers store reparse
                     if let PathType::SkillMd { ref skill_name } = path_type {
                         self.send_sync(SyncEvent::Reparse {
