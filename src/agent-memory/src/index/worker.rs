@@ -641,14 +641,15 @@ fn full_scan(
                 }
             };
             let mtime = super::store::mtime_ms_of(&meta);
-            // Match the incremental fingerprint: timestamps alone can survive
-            // a rewrite, for example when a restored file retains its mtime.
-            // Same-mtime, same-size rewrites remain undetected.
-            if let Some(known) = store.index_stat_for(&rel) {
-                if known.mtime_ms == mtime && known.size == meta.len() {
-                    seen.insert(rel.clone());
+            match store.matches_scan_entry(&rel, mtime, meta.len(), &body) {
+                Ok(true) => {
+                    seen.insert(rel);
                     continue;
                 }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    "index full-scan lookup failed for {rel}, retrying with upsert: {e}"
+                ),
             }
             if let Err(e) = store.upsert(&rel, mtime, meta.len(), &body, agent_id.as_deref()) {
                 tracing::warn!("index full-scan upsert failed for {rel}: {e}");

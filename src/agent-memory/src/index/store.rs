@@ -227,6 +227,26 @@ impl BM25Store {
         Ok(())
     }
 
+    /// Restores can preserve both metadata fields even when the body changes.
+    pub(super) fn matches_scan_entry(
+        &self,
+        rel_path: &str,
+        mtime_ms: i64,
+        size: u64,
+        body: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM files_fts
+                WHERE rowid = (SELECT rowid FROM files
+                               WHERE path = ?1 AND mtime_ms = ?2 AND size = ?3)
+                  AND body = ?4
+             )",
+            params![rel_path, mtime_ms, size, body],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Insert or replace a file's index entry. `body` is the extracted
     /// text. All writes happen inside one transaction so a crash mid-
     /// upsert can't leave `files` and `files_fts` out of sync.
