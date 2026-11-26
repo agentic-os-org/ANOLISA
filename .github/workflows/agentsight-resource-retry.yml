@@ -1,0 +1,39 @@
+name: AgentSight resource scheduling
+
+on:
+  workflow_run:
+    workflows: ["CI / Components"]
+    types: [completed]
+
+permissions:
+  actions: write
+  checks: write
+  contents: read
+  pull-requests: read
+
+# Serialize retry waits across PRs so backoff cannot exhaust shared runners.
+concurrency:
+  group: ${{ github.repository }}-agentsight-resource-retry
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  retry:
+    name: Retry preempted resource job
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Requeue only scheduling preemption
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: python3 .github/scripts/retry_agentsight_resource.py
