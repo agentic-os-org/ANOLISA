@@ -127,13 +127,24 @@ fn resolved_hook_plan_enforces_control_authority_and_step_ordering_rules() {
         json!(["python-monitoring", "js-final-gate"]);
     assert!(parse(&aux_control_observer).is_ok());
 
-    // Input replacement cannot appear after another step.
-    let mut misordered_rewrite = base.clone();
-    misordered_rewrite["hooks"]["tool.before"]["steps"]
+    let mut terminal = base.clone();
+    let steps = terminal["hooks"]["tool.before"]["steps"]
+        .as_array_mut()
+        .unwrap();
+    steps.swap(0, 1);
+    steps[1]["effects"] = json!(["observe", "block", "replace_input"]);
+    let mut later = steps[0].clone();
+    later["step_id"] = json!("later");
+    assert!(parse(&terminal).is_err());
+    terminal["hooks"]["tool.before"]["control_owner"]["post_permission"] = json!(true);
+    assert!(parse(&terminal).is_ok());
+
+    let mut misordered = terminal;
+    misordered["hooks"]["tool.before"]["steps"]
         .as_array_mut()
         .unwrap()
-        .swap(0, 1);
-    assert!(parse(&misordered_rewrite).is_err());
+        .push(later);
+    assert!(parse(&misordered).is_err());
 
     // Input replacement requires fail-closed before steps, with a read-only shadow exception.
     let mut non_blocking_before = base;

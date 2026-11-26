@@ -208,6 +208,10 @@ pub fn block_reason(adapter: &str, reply: &mut HookOutput, text: &str) -> Result
 
 /// Native dialect implementation; no service state or RPC ownership crosses this port.
 pub trait Adapter: Sync {
+    /// Whether this entrypoint adopts execution arguments after native permission checks.
+    fn post_permission(&self, _entrypoint: &str) -> bool {
+        false
+    }
     /// Validate native configuration and probe the selected runtime with cancellation.
     fn prepare(
         &self,

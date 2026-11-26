@@ -137,6 +137,7 @@ fn backpressured_ordinary_reply_preserves_control_capacity() {
                     Operation::Bind {
                         target: "qoder".into(),
                         capabilities: crate::Capabilities {
+                            post_permission: false,
                             adapter: "qoder".into(),
                             version: "fixture".into(),
                             entrypoint: "fixture".into(),
@@ -279,6 +280,7 @@ fn preparation_returns_success_and_failure_with_an_idle_peer() {
             operation: Operation::Bind {
                 target: target.into(),
                 capabilities: crate::Capabilities {
+                    post_permission: false,
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),

@@ -51,6 +51,7 @@ fn matrix_capabilities() -> BTreeMap<String, AdapterCapabilities> {
                 .map(|(e, fx)| (e.clone(), fx.as_object().unwrap().keys().cloned().collect()))
                 .collect();
             let caps = AdapterCapabilities {
+                post_permission: false,
                 adapter: adapter.clone(),
                 version: "catalog/v1".into(),
                 entrypoint: "native".into(),
@@ -154,6 +155,7 @@ fn hook_cap(
     failure_actions: &[FailureAction],
 ) -> HookPointCapability {
     HookPointCapability {
+        post_permission: false,
         mode,
         effects: effects.to_vec(),
         failure_actions: failure_actions.to_vec(),

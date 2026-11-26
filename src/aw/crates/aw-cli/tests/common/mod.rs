@@ -86,6 +86,7 @@ impl Fixture {
         Operation::Bind {
             target: "target".into(),
             capabilities: Capabilities {
+                post_permission: false,
                 failure_actions: Default::default(),
                 adapter: "qoder".into(),
                 version: "fixture-version".into(),

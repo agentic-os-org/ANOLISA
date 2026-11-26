@@ -109,6 +109,7 @@ Host 一起部署；旧 Host 在发现阶段会拒绝未知字段。
 | `config_revision` | 调用方精确配置文档的 SHA-256，以 64 位小写十六进制表示 |
 | `budget_ms` | Host 提供并执行的正数剩余预算 |
 | `allowed_effects` | 为本次操作和事件准入的效果 |
+| `event.cwd` | 可选。Host 绑定的工作目录，以 `/` 开头，最多 4096 个字符，且不含控制字符 |
 | `event.agent` | Adapter、配置的 `binding_id` 和可空的运行时 `instance_id` |
 | `event.session_id`、`event.tool.call_id` | 原生标识；`session.start`、`session.end`、`input.submit` 与 `turn.stop` 上 `session_id` 非空，工具事件缺失时为 null |
 | `event.tool` | 工具事件（`tool.before`、`tool.after`、`security.violation`）上的 `name`、`native_name`、`call_id`、`input`、`result`；工具执行前的 `result` 必须为 null |
@@ -240,12 +241,27 @@ Adapter 向两处同时写入同一个替换文本，保留其他字段。
 `replace_result` 效果要求字符串 `text`；`block` 可携带非空、有界的 `text` 原因，其他效果拒绝该字段。响应最多包含一个
 替换，且要求输入中存在投影。缺少投影时只允许不替换的结果。Adapter 替换选定文本
 槽并保留原生 envelope 和失败状态。这是候选效果，不证明模型已消费；AW Journal 不记录文本。
-Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务及 Provider 须使用经共同验证的兼容版本；
-旧实现会拒绝不支持的投影或效果，不会静默忽略。
+Schema 增量沿用实验性的 v1alpha1 协议。CLI、服务和 Provider 须按同一验证构建配套部署。
+Host 在每个 invoke 请求中写入 `event.cwd`。按旧版 Schema 校验的 Provider 会拒绝该字段，即使没有启用沙箱策略也须同步升级。
 
 ### Tokenless 组合
 
-PreTool 可返回单个 `replace_input` 效果，以对象 `input` 提供候选参数并保留全部原参数键。该步骤须位于首个适用 before 位置，只声明该效果，所有 before 步骤使用 `on_error: block`。后续检查接收候选参数，最后一个成功回调沿用原身份和预算交付改写，保留原生授权。旧 `block` 重试建议继续受支持；PostTool 只替换获准文本槽。 SDK 托管 MCP handler 的输入替换在候选检查前拒绝；未改写的 MCP 调用及 PostTool 沿用既有路径。
+`tool.before` 最多有一个执行策略的步骤声明 `replace_input`，所有执行策略的步骤
+统一使用 `on_error: block`。逻辑改写放在首位，声明 `replace_input`，可附带 `observe`。
+后续检查看到改写后的参数，最后一个成功回调交付参数。改写前已有其他检查，或改写步骤同时声明
+`block` 时，该步骤属于执行交接，必须放在末位。选择改写的响应只返回一个 `replace_input`
+效果，对象 `input` 保留原参数的全部键。返回 `block` 会记为策略拒绝。
+
+Pi 的受管和 SDK worker 支持执行交接。当前工具同时命中事件和交接步骤的工具选择器时，
+Pi 先用原生前置回调检查原始参数。放行后 AW 执行检查，末位步骤可为同一次调用提供执行参数。
+交接要求当前执行器为 Pi 注册的内建工具。同名 SDK 或扩展工具可使用独立工作目录，
+命中交接时会在调用 Provider 前阻断。未命中的工具沿用原生回调行为。Hermes 支持首位逻辑改写。其终端命令检查发生在前置 Hook 返回后的
+工具内部，因此 AW 在准入阶段拒绝 Hermes 的执行交接策略。
+
+Provider 需要绑定的工作目录时，读取顶层 `event.cwd`。工具参数中的 `cwd` 或 `workdir` 可以指定其他目录。
+
+旧 `block` 重试建议继续受支持。PostTool 只替换获准的文本槽。SDK 托管的 MCP
+handler 会在检查候选参数前拒绝输入改写。
 RTK 归属、结果分类和遥测设置见[Tokenless 参考](tokenless.md)。
 当前接入的恢复能力为 `none`，Schema/BeforeModel 与 Retrieve 接点尚未开放。
 Core 计划 API 的独立合同见[Core 执行](../../../../../src/aw/docs/design/zh/core-execution.md)。

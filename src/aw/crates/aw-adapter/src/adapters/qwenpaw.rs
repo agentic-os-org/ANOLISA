@@ -577,6 +577,7 @@ mod tests {
         let steps: Vec<_> = ["observe", "user", "compress"]
             .into_iter()
             .map(|id| AdmittedStep {
+                post_permission: false,
                 event: "tool.after".into(),
                 step_id: id.into(),
                 provider: id.into(),

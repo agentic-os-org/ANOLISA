@@ -90,11 +90,12 @@ Resolved Hook Plan 表达接入绑定，与独立 `Core::prepare/execute` 计划
 
 ## 输入替换与原生授权
 
-安全拒绝和原生权限拒绝优先。经准入的 `replace_input` 是首个适用的 `tool.before`
-步骤，只声明该效果，并要求 before 步骤失败关闭。Host 绑定候选输入，不刷新身份、
-claims 或预算；Service 对候选输入执行后续 Provider 和原生 Hook，只在最终回调
-成功时发布。Adapter 在同一调用内采用输入并保留原生授权。旧 Tokenless `block`
-建议仍为显式重试模式，输入替换不产生原生批准。
+一次 `tool.before` 最多准入一个声明 `replace_input` 的执行步骤，所有执行步骤都须配置
+`on_error: block`。首位逻辑改写可同时声明 `observe`。Host 将候选参数绑定到当前调用，
+Service 在后续检查全部通过后才交付参数。如果改写前已有检查，或改写步骤同时声明
+`block`，该步骤必须放在末位，并要求 Adapter 入口支持在原生权限检查后采用执行参数。
+两种改写都沿用本次调用的身份、claims 和预算。原生拒绝会阻止执行。按 Tokenless
+建议重试会发起新调用。
 
 ## 新增 Agent 或调整支持
 

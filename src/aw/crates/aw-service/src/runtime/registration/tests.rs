@@ -72,6 +72,7 @@ impl Fixture {
             cwd: self.directory.path().to_str().unwrap().into(),
             environment: BTreeMap::new(),
             capabilities: Capabilities {
+                post_permission: false,
                 adapter: "qoder-sdk".into(),
                 version: "1.0.56".into(),
                 entrypoint: "sdk-worker".into(),

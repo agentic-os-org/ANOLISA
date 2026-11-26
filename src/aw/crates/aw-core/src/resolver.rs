@@ -14,6 +14,7 @@ use aw_config::{
     requirements::{step_enabled, HookRequirement, StepRequirement},
     Configuration,
 };
+use aw_contracts::hook_plan::input_handoff;
 pub use aw_contracts::{
     hook_plan::{
         Coverage, CoverageGap, CoverageGapReason, CoverageGapStatus, ResolvedHookPlan,
@@ -41,8 +42,6 @@ const ERR_VER_EP: &str = "Adapter evidence requires a version and entrypoint";
 const ERR_TARGET_MISMATCH: &str = "Adapter evidence does not match the configured target";
 const ERR_SRC_ADAPTER: &str = "candidate source adapter does not match target adapter";
 const ERR_REPLACE_RES: &str = "result replacement must be the last applicable enabled event step";
-const ERR_REPLACE_IN: &str =
-    "input replacement requires a first sole-effect step and fail-closed before steps";
 
 /// Pure Hook Source resolution failures without configuration values in diagnostics.
 #[derive(Debug, thiserror::Error)]
@@ -174,7 +173,7 @@ pub fn resolve(
         }
 
         let mut steps = parse_steps(req)?;
-        check_step_ordering(event, &steps, sources)?;
+        let handoff = check_step_ordering(event, &steps, sources)?;
 
         let needs_native = steps.iter().any(|s| s.native);
         let mut req_fx = BTreeSet::new();
@@ -222,6 +221,7 @@ pub fn resolve(
 
         let primary = cands.iter().copied().find(|(s, c)| {
             (steps.is_empty() || s.kind() != SourceKind::Sight)
+                && (!handoff || c.post_permission)
                 && (!needs_native || s.kind() == SourceKind::Native)
                 && (!needs_ctrl || c.mode == HookAuthority::Control)
                 && need_fx.iter().all(|e| c.supports_effect(*e))
@@ -229,7 +229,7 @@ pub fn resolve(
         });
 
         let Some((primary_src, primary_cap)) = primary else {
-            let diag = diagnose_gap(&cands, needs_native, &req_fx, &need_act);
+            let diag = diagnose_gap(&cands, needs_native, handoff, &req_fx, &need_act);
             if req.required {
                 return Err(unsatisfied(event, diag));
             }
@@ -298,6 +298,9 @@ pub fn source_from_adapter(caps: &AdapterCapabilities) -> Result<SourceCapabilit
     if caps.version.trim().is_empty() || caps.entrypoint.trim().is_empty() {
         return Err(BadSrc(ERR_VER_EP));
     }
+    if !caps.valid_handoff() {
+        return Err(BadSrc(ERR_SURF));
+    }
     if caps
         .failure_actions
         .keys()
@@ -326,6 +329,7 @@ pub fn source_from_adapter(caps: &AdapterCapabilities) -> Result<SourceCapabilit
         hooks.insert(
             event.clone(),
             HookPointCapability {
+                post_permission: event == "tool.before" && caps.post_permission,
                 mode,
                 effects,
                 failure_actions,
@@ -418,8 +422,11 @@ pub fn resolve_shadow_preflight(
 
     let mut steps = Vec::new();
     for req in &requirements {
+        let handoff = crate::admission::admitted_handoff(req, caps)?;
         for s in &req.steps {
-            steps.push(compile_shadow_step(spec, req, s, &source)?);
+            let mut step = compile_shadow_step(spec, req, s, &source)?;
+            step.post_permission = handoff == Some(s.step_id);
+            steps.push(step);
         }
     }
 
@@ -491,7 +498,7 @@ fn check_step_ordering(
     event: &str,
     steps: &[ResolvedStepPlan],
     sources: &[SourceCapability],
-) -> Result<(), ResolveError> {
+) -> Result<bool, ResolveError> {
     let enforcing = steps.iter().filter(|step| !step.shadow);
     if enforcing
         .clone()
@@ -505,24 +512,24 @@ fn check_step_ordering(
         s.hook(event)
             .is_some_and(|c| c.supports_effect(HookEffect::ReplaceInput))
     });
-    for (idx, step) in enforcing.clone().enumerate() {
-        if step.effects.contains(&HookEffect::ReplaceInput)
-            && any_replace_input
-            && !(idx == 0
-                && step.effects == [HookEffect::ReplaceInput]
-                && enforcing
-                    .clone()
-                    .all(|candidate| candidate.on_error == FailureAction::Block))
-        {
-            return Err(BadReq(ERR_REPLACE_IN));
-        }
+    if !any_replace_input {
+        return Ok(false);
     }
-    Ok(())
+    Ok(input_handoff(enforcing.map(|step| {
+        (
+            step.step_id.as_str(),
+            step.effects.iter().map(|effect| effect.as_str()),
+            step.on_error == FailureAction::Block,
+        )
+    }))
+    .map_err(BadReq)?
+    .is_some())
 }
 
 fn diagnose_gap(
     candidates: &[(&SourceCapability, &HookPointCapability)],
     needs_native: bool,
+    handoff: bool,
     requested_effects: &BTreeSet<HookEffect>,
     needed_actions: &BTreeSet<FailureAction>,
 ) -> GapDiagnosis {
@@ -530,7 +537,9 @@ fn diagnose_gap(
     ranked.sort_by_key(|(s, c)| (c.mode, s.kind(), s.source_id()));
     let ctrl = HookAuthority::Control;
     let ok_fx = |c: &HookPointCapability, e: HookEffect| {
-        c.supports_effect(e) && (!e.is_control() || c.mode == ctrl)
+        c.supports_effect(e)
+            && (!e.is_control() || c.mode == ctrl)
+            && (e != HookEffect::ReplaceInput || !handoff || c.post_permission)
     };
     let effects_ok: Vec<_> = ranked
         .iter()
@@ -570,6 +579,7 @@ fn to_selected(
     dispatches_steps: bool,
 ) -> SelectedSource {
     SelectedSource {
+        post_permission: cap.post_permission,
         source_id: src.source_id().to_owned(),
         kind: src.kind(),
         contract: src.contract().to_owned(),
@@ -674,6 +684,7 @@ fn compile_shadow_step(
         return Err(Reject(ERR_ACT));
     }
     Ok(AdmittedStep {
+        post_permission: false,
         event: event.to_owned(),
         step_id: step_req.step_id.to_owned(),
         provider: step_req.provider.to_owned(),

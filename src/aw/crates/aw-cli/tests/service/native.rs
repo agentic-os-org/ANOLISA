@@ -78,6 +78,7 @@ fn native_callback_environment_replaces_binding_without_changing_provider_input_
             .iter()
             .find(|call| call["request"]["event"]["tool"]["call_id"] == value["tool"]["call_id"])
             .unwrap();
+        value["cwd"] = json!(fixture.0);
         assert_eq!(observed["request"]["event"], value);
         assert_eq!(
             observed["environment"]["AW_SERVICE_MARKER"],

@@ -128,7 +128,10 @@ fn lifecycle_events_observe_once_and_never_escalate_to_blocking() {
         assert!(bound.invoke(step_id).is_err());
 
         let observed = fixture.call(&invocation.record.request_id);
-        assert_eq!(observed["request"]["event"], payload);
+        assert_eq!(
+            observed["request"]["event"],
+            fixture.provider_event(&payload)
+        );
         assert!(observed["request"]["event"].get("tool").is_none());
         assert!(observed["request"]["event"].get("turn_id").is_none());
 
@@ -200,7 +203,10 @@ fn turn_stop_decision_gate_enforces_claims_cancellation_and_deadlines() {
     assert_eq!(second.failure_action, Some(FailureAction::Report));
 
     let observed = fixture.call(&first.record.request_id);
-    assert_eq!(observed["request"]["event"], payload);
+    assert_eq!(
+        observed["request"]["event"],
+        fixture.provider_event(&payload)
+    );
     assert!(observed["request"]["event"].get("tool").is_none());
     assert!(observed["request"]["event"].get("input").is_none());
 

@@ -68,6 +68,7 @@ fn digest(bytes: &[u8]) -> String {
 
 fn capabilities(adapter: &str) -> AdapterCapabilities {
     AdapterCapabilities {
+        post_permission: false,
         failure_actions: Default::default(),
         adapter: adapter.into(),
         version: "fixture-1".into(),
@@ -252,6 +253,32 @@ fn adapter_evidence_cannot_expand_the_implemented_surface() {
         assert_eq!(
             admit_policy(&doc, "qoder", &adapter, &providers).unwrap_err(),
             "Adapter evidence exceeds the supported failure action surface"
+        );
+    }
+}
+
+#[test]
+fn post_permission_evidence_requires_tool_before_input_replacement() {
+    let mut doc = document();
+    doc["spec"]["events"] = json!({});
+    let config = CONFIGURATION.parse(&bytes(&doc)).unwrap();
+    let mut caps = capabilities("pi");
+    caps.post_permission = true;
+    for (effects, valid) in [
+        (None, false),
+        (Some(vec!["observe".into()]), false),
+        (Some(vec!["observe".into(), "replace_input".into()]), true),
+    ] {
+        caps.events.remove("tool.before");
+        if let Some(effects) = effects {
+            caps.events.insert("tool.before".into(), effects);
+        }
+        let active = preflight(&config, "pi", &caps);
+        let shadow = aw_core::resolver::resolve_shadow_preflight(&config, "pi", &caps);
+        assert_eq!(active.is_ok(), valid);
+        assert_eq!(
+            active.err().map(|e| e.to_string()),
+            shadow.err().map(|e| e.to_string())
         );
     }
 }
@@ -477,7 +504,7 @@ mod engine;
 mod gates;
 
 #[test]
-fn input_replacement_requires_one_initial_fail_closed_provider_step() {
+fn input_replacement_requires_one_initial_or_terminal_fail_closed_step() {
     let mut doc = document();
     let mut caps = capabilities("qoder");
     caps.events
@@ -486,23 +513,47 @@ fn input_replacement_requires_one_initial_fail_closed_provider_step() {
         .push("replace_input".into());
     let rewrite = json!({"id":"rewrite","provider":"policy","operation":"rewrite","effects":["replace_input"],"on_error":"block"});
     let scan = doc["spec"]["events"]["tool.before"]["steps"][0].clone();
-    doc["spec"]["events"]["tool.before"]["steps"] = json!([rewrite, scan]);
-    let config = CONFIGURATION.parse(&bytes(&doc)).unwrap();
-    assert!(preflight(&config, "qoder", &caps).is_ok());
     let mut report = scan.clone();
     report["on_error"] = json!("report");
+    let mut later = scan.clone();
+    later["id"] = json!("later");
     let mut mixed = rewrite.clone();
-    mixed["effects"] = json!(["replace_input", "block"]);
+    mixed["effects"] = json!(["observe", "block", "replace_input"]);
     let mut second = rewrite.clone();
     second["id"] = json!("rewrite-two");
-    for steps in [
-        json!([scan, rewrite]),
-        json!([rewrite, second]),
-        json!([rewrite, report]),
-        json!([mixed]),
+    let mut observed = rewrite.clone();
+    observed["effects"] = json!(["observe", "replace_input"]);
+    for (steps, allowed, handoff) in [
+        (json!([rewrite, scan]), true, None),
+        (json!([observed]), true, None),
+        (json!([scan, rewrite]), true, Some("rewrite")),
+        (json!([scan, mixed]), true, Some("rewrite")),
+        (json!([mixed]), true, Some("rewrite")),
+        (json!([mixed, scan]), false, None),
+        (json!([scan, rewrite, later]), false, None),
+        (json!([rewrite, second]), false, None),
+        (json!([rewrite, report]), false, None),
+        (json!([report, mixed]), false, None),
     ] {
         doc["spec"]["events"]["tool.before"]["steps"] = steps;
         let config = CONFIGURATION.parse(&bytes(&doc)).unwrap();
-        assert!(preflight(&config, "qoder", &caps).is_err());
+        for supported in [false, true] {
+            caps.post_permission = supported;
+            let result = preflight(&config, "qoder", &caps);
+            let shadow = aw_core::resolver::resolve_shadow_preflight(&config, "qoder", &caps);
+            let admitted = allowed && (handoff.is_none() || supported);
+            assert_eq!(result.is_ok(), admitted);
+            assert_eq!(shadow.is_ok(), admitted);
+            if let Ok(steps) = result {
+                assert_eq!(shadow.unwrap().1, steps);
+                assert_eq!(
+                    steps
+                        .iter()
+                        .find(|s| s.post_permission)
+                        .map(|s| s.step_id.as_str()),
+                    handoff
+                );
+            }
+        }
     }
 }

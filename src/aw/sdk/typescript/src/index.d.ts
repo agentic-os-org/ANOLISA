@@ -4,6 +4,7 @@ export interface Capabilities {
   version: string;
   entrypoint: string;
   events: Record<string, string[]>;
+  post_permission?: boolean;
   failure_actions?: Record<string, string[]>;
 }
 export interface Hook {
@@ -12,6 +13,9 @@ export interface Hook {
   on_error: string;
   budget_ms: number;
   replace_input?: boolean;
+  post_permission?: boolean;
+  event_tools?: string[];
+  step_tools?: string[];
   replace_result?: boolean;
   skill_check?: boolean;
 }

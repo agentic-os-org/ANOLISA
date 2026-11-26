@@ -37,6 +37,7 @@ fn typescript_receipts_close_real_service_events_once() {
                     Operation::Bind {
                         target: "claude".into(),
                         capabilities: Capabilities {
+                            post_permission: false,
                             adapter: "claude-sdk".into(),
                             version: "0.3.325".into(),
                             entrypoint: "sdk-worker".into(),

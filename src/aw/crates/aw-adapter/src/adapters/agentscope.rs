@@ -309,6 +309,7 @@ mod tests {
     #[test]
     fn skill_routes_select_only_the_admitted_native_operation() {
         let mut step = AdmittedStep {
+            post_permission: false,
             event: "tool.before".into(),
             step_id: "skill".into(),
             provider: "security".into(),
@@ -336,6 +337,7 @@ mod tests {
         let steps: Vec<_> = ["observe", "user", "compress"]
             .into_iter()
             .map(|id| AdmittedStep {
+                post_permission: false,
                 event: "tool.after".into(),
                 step_id: id.into(),
                 provider: id.into(),
@@ -402,6 +404,7 @@ mod tests {
         let steps: Vec<_> = ["prompt", "pii"]
             .into_iter()
             .map(|id| AdmittedStep {
+                post_permission: false,
                 event: "input.submit".into(),
                 step_id: id.into(),
                 provider: "security".into(),

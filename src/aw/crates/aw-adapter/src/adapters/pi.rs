@@ -23,6 +23,9 @@ struct Prepared {
 }
 
 impl Adapter for Pi {
+    fn post_permission(&self, entrypoint: &str) -> bool {
+        entrypoint == "sdk"
+    }
     fn prepare(
         &self,
         mut input: LaunchInput,
@@ -260,7 +263,7 @@ pub(crate) const fn route_options() -> aw_core::routes::RouteOptions<'static> {
         reverse_on_result_replacement: false,
         include_replace_result: false,
         include_replace_input: true,
-        include_tool_selectors: false,
+        include_tool_selectors: true,
         skill_check: aw_core::routes::SkillCheck::InputSubmit,
     }
 }

@@ -155,6 +155,15 @@
                 "security.violation"
               ]
             },
+            "cwd": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^/",
+              "not": {
+                "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]"
+              }
+            },
             "agent": {
               "type": "object",
               "additionalProperties": false,

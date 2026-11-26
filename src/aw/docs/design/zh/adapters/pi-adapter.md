@@ -64,16 +64,22 @@ abort/dispose 先封锁 scope 并取消输入传输，再等待原生清理。wo
 
 ## 工具语义
 
-原 before callback 先执行，其异常与拒绝保留 Pi 原生语义；AW 不授予原生权限。
-AW 接收包含原 callback 修改的已校验参数。AW 拒绝返回 `{block:true,reason}`，
+工厂返回会话时，AW 从 SDK 扩展上下文读取内建工具的工作目录。Pi 执行时沿用该路径，
+因此这里只接受 AW 已规范化的绑定路径，符号链接别名会被拒绝。
+常驻任务还会核对会话管理器的目录。末位交接时，bridge 核对本次选中的执行器与当前注册表，
+只向内建工具交付执行参数。同名 SDK 或扩展工具可以使用独立的工作目录。
+
+工具命中首位逻辑改写时，原生 before 回调检查改写后的参数。命中末位交接时，回调先检查
+原参数，放行后 AW 再运行 Provider 步骤。两种情况下回调都收到参数副本，改变参数值会
+阻止执行。AW 将通过检查的参数写入 Pi 交给工具的对象。其他工具先运行原生回调，
+AW 接收回调就地规范化后的参数。AW 拒绝返回 `{block:true,reason}`，
 Pi 跳过工具执行与 after。未知工具、参数校验失败、提前取消、原生 before 异常
 同样不产生 after；工具执行异常进入 after，携带 `isError:true`。
 
 原 after callback 先执行。AW 按 Pi 的 nullish 字段合并语义观察其替换结果，包含
 图片归一化与 `isError`。原 callback 异常继续遵循 SDK 错误行为。
-AW before 支持 `observe`/`block`，包含 Provider 的字面重试理由。Pi 将拒绝结果加入
-下一次模型上下文；AW 不执行建议或修改参数。模型重试是新调用，须重新通过全部
-before 检查与原生权限。
+`block` 可携带 Provider 给出的重试理由。Pi 将拒绝结果加入下一次模型上下文。模型重试
+会发起新调用，重新通过 before 检查与原生权限检查。
 
 AW after 支持 `observe` 和 `replace_result`。步骤按配置顺序处理同一有效原生结果：
 观察器和自定义 Hook 位于唯一、最后的结构化替换步骤之前。只有这个受保护步骤
@@ -126,8 +132,7 @@ AW 生成的 binding/config 文件属于前台启动的私有资源。Callback �
 `aw hook --adapter pi`，限制 stdin、stdout、stderr 和等待时间；取消会终止并等待
 自己创建的进程组。原生命令输出可为空，或仅包含布尔 `block` 与可选字符串
 `reason` 的 JSON 对象，`input.submit` 和 `tool.before` 可阻断。常驻输入通过
-`aw scope --action invoke` 携带私有任务句柄，复用相同回复方言。审批、输入改写、
-原生结果改写均拒绝。
+`aw scope --action invoke` 携带私有任务句柄，复用相同回复方言。原生命令回复若请求审批或修改工具参数、结果，AW 会拒绝。
 非零/信号退出、非法输出按配置的失败动作处理。native Hook 不得伪造
 `aw_replacement`；只有通过准入的最后结构化替换步骤通过受保护 AW 配置输出。
 

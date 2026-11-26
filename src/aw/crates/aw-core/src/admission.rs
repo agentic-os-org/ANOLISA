@@ -38,6 +38,7 @@ mod rules;
 mod selection;
 
 pub use aw_provider::ProviderEvidence;
+pub(crate) use rules::admitted_handoff;
 pub use rules::{admit, preflight};
 pub use selection::{matches_tool_selectors, projected_out_steps, ProjectedOutStep};
 
@@ -53,6 +54,8 @@ use std::fmt;
 /// claims. Admission does not probe the Agent or certify the supplied version.
 #[derive(Clone, Debug)]
 pub struct AdapterCapabilities {
+    /// Whether this entrypoint adopts tool input after native permission checks.
+    pub post_permission: bool,
     /// One of the adapters declared by the configuration contract.
     pub adapter: String,
     /// The actual Agent version whose capabilities were established by the caller.
@@ -65,6 +68,16 @@ pub struct AdapterCapabilities {
     pub failure_actions: BTreeMap<String, Vec<String>>,
 }
 
+impl AdapterCapabilities {
+    pub(crate) fn valid_handoff(&self) -> bool {
+        !self.post_permission
+            || self
+                .events
+                .get("tool.before")
+                .is_some_and(|effects| effects.iter().any(|effect| effect == "replace_input"))
+    }
+}
+
 /// One configured step checked against the implementation and Adapter.
 ///
 /// Structured steps returned by [`admit`] have also passed Provider admission;
@@ -74,6 +87,8 @@ pub struct AdapterCapabilities {
 /// binding, budgets, process ownership and adoption remain Host concerns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdmittedStep {
+    /// Whether this step adopts execution arguments after native permission checks.
+    pub post_permission: bool,
     /// The event that selects this step.
     pub event: String,
     /// The step identifier within its event.
@@ -129,6 +144,11 @@ pub enum StepExecution {
 }
 
 impl StepExecution {
+    /// Whether this structured step requests a pre-tool input replacement.
+    pub fn replaces_input(&self) -> bool {
+        matches!(self, Self::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_input"))
+    }
+
     /// Whether this structured step requests a model-visible text replacement.
     pub fn replaces_result(&self) -> bool {
         matches!(self, Self::Provider { effects, .. } if effects.iter().any(|effect| effect == "replace_result"))

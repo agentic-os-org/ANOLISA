@@ -512,6 +512,7 @@ mod tests {
         let document = json!({"spec":{"execution":{"default_event_budget_ms":1000},
             "observation":{"enabled":true},"agents":{"qoder":{}},"events":{}}});
         let step = aw_core::admission::AdmittedStep {
+            post_permission: false,
             event: "tool.after".into(),
             step_id: "record".into(),
             provider: "fixture".into(),
@@ -578,6 +579,7 @@ mod tests {
 
     fn qoder_step(event: &str, step_tools: Vec<&str>, on_error: &str) -> AdmittedStep {
         AdmittedStep {
+            post_permission: false,
             event: event.into(),
             step_id: "scan-code".into(),
             provider: "security".into(),

@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cancelled = AtomicBool::new(false);
     // Synthetic capabilities exercise composition; they certify no Agent version.
     let capabilities = AdapterCapabilities {
+        post_permission: false,
         failure_actions: Default::default(),
         adapter: "qoder".into(),
         version: "host-example".into(),

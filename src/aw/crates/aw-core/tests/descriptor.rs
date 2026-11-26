@@ -27,6 +27,7 @@ fn document() -> Value {
 
 fn capabilities() -> AdapterCapabilities {
     AdapterCapabilities {
+        post_permission: false,
         adapter: "qoder".into(),
         version: "fixture/v1".into(),
         entrypoint: "native".into(),

@@ -60,6 +60,7 @@ export function workerBinding({ worker, inputEnabled, strictOutput }) {
   }
   const capabilities = {
     ...piProfile,
+    post_permission: true,
     events,
     ...(strictOutput
       ? { failure_actions: { "tool.after": ["withhold_result"] } }

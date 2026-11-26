@@ -212,6 +212,7 @@ pub struct HookRoute {
     budget_ms: u64,
     replace_result: Option<bool>,
     replace_input: bool,
+    post_permission: bool,
     skill_check: bool,
     tool_selectors: Option<(Vec<String>, Vec<String>)>,
 }
@@ -250,6 +251,9 @@ impl HookRoute {
         }
         if self.replace_input {
             hook["replace_input"] = json!(true);
+        }
+        if self.post_permission {
+            hook["post_permission"] = json!(true);
         }
         if let Some((event_tools, step_tools)) = &self.tool_selectors {
             hook["event_tools"] = json!(event_tools);
@@ -444,6 +448,7 @@ pub fn compile(
                     budget_ms: budget,
                     replace_result: options.include_replace_result.then_some(false),
                     replace_input: false,
+                    post_permission: false,
                     skill_check: false,
                     tool_selectors: options
                         .include_tool_selectors
@@ -470,12 +475,7 @@ pub fn compile(
             if !retained {
                 continue;
             }
-            let replace_input = options.include_replace_input
-                && matches!(
-                    &step.execution,
-                    StepExecution::Provider { effects, .. }
-                        if effects.iter().any(|effect| effect == "replace_input")
-                );
+            let replace_input = options.include_replace_input && step.execution.replaces_input();
             hooks.push(HookRoute {
                 event: event.into(),
                 step: step.step_id.clone(),
@@ -485,6 +485,7 @@ pub fn compile(
                     .include_replace_result
                     .then(|| step.execution.replaces_result()),
                 replace_input,
+                post_permission: replace_input && step.post_permission,
                 skill_check,
                 tool_selectors: options.include_tool_selectors.then(|| {
                     if is_shadow(document, step) {

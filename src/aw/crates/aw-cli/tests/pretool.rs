@@ -71,6 +71,7 @@ print(json.dumps(reply))
                     Operation::Bind {
                         target: "agent".into(),
                         capabilities: Capabilities {
+                            post_permission: false,
                             failure_actions: Default::default(),
                             adapter: adapter.into(),
                             version: "fixture".into(),

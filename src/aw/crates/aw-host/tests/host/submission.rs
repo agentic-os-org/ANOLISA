@@ -35,7 +35,10 @@ fn input_submission_preserves_identity_and_shares_claims_and_budget() {
     assert!(event.invoke("check").is_err());
     let requests = fixture.calls("invoke");
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["request"]["event"], value);
+    assert_eq!(
+        requests[0]["request"]["event"],
+        fixture.provider_event(&value)
+    );
     assert!(requests[0]["request"]["event"].get("tool").is_none());
     let cancelled_event = host
         .event(value.clone(), Instant::now() + TIMEOUT, &cancelled)

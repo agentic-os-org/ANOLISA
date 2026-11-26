@@ -161,6 +161,9 @@ impl Runtime {
                             })
                             .is_err()
                         {
+                            if let Ok(mut state) = rewrite.lock() {
+                                state.denied = true;
+                            }
                             completed_mask.fetch_or(bit, Ordering::Release);
                             deliver(reply, Err(self.overload("call_limit")));
                             continue;
@@ -168,9 +171,14 @@ impl Runtime {
                         let deliver = &deliver;
                         let completed_mask = &completed_mask;
                         let rewrite = &rewrite;
+                        let replaces_input = callbacks[index].execution.replaces_input();
+                        let terminal_rewrite = index > 0 && replaces_input;
                         children.push(scope.spawn(move || {
                             let call = CallGuard(&self.calls);
                             let result = (|| {
+                                if replaces_input && !automatic {
+                                    return Err(rejected("native_input_replacement_required"));
+                                }
                                 while ordered
                                     && completed_mask.load(Ordering::Acquire) & (bit - 1) != bit - 1
                                 {
@@ -187,6 +195,19 @@ impl Runtime {
                                     .append(key, json!({"phase": "started", "step_id": step}))?;
                                 // Queueing and durable audit can outlive the admitted owner.
                                 self.check_execution_admission(instance_id, execution)?;
+                                if terminal_rewrite
+                                    && rewrite
+                                        .lock()
+                                        .map_err(|_| rejected("input_replacement_state"))?
+                                        .denied
+                                {
+                                    self.audit.append(
+                                        key,
+                                        json!({"kind":"skipped", "phase":"completed",
+                                        "status":"ok", "call":{"step_id":step}}),
+                                    )?;
+                                    return Ok(audit::shadow_reply());
+                                }
                                 let mut invocation = match native_environment {
                                     Some(environment) => {
                                         event.invoke_with_native_environment(&step, &environment)
@@ -236,6 +257,11 @@ impl Runtime {
                                 self.audit.append(key, record)?;
                                 Ok(result)
                             })();
+                            if result.is_err() {
+                                if let Ok(mut state) = rewrite.lock() {
+                                    state.denied = true;
+                                }
+                            }
                             completed_mask.fetch_or(bit, Ordering::Release);
                             drop(call);
                             deliver(reply, result);

@@ -113,6 +113,12 @@ impl Fixture {
             .collect()
     }
 
+    pub fn provider_event(&self, original: &Value) -> Value {
+        let mut expected = original.clone();
+        expected["cwd"] = json!(self.0);
+        expected
+    }
+
     pub fn call(&self, request_id: &str) -> Value {
         serde_json::from_slice(&fs::read(self.0.join(format!("{request_id}.json"))).unwrap())
             .unwrap()
@@ -186,6 +192,7 @@ impl Drop for Fixture {
 
 pub fn capabilities() -> AdapterCapabilities {
     AdapterCapabilities {
+        post_permission: false,
         failure_actions: Default::default(),
         adapter: "qoder".into(),
         version: "fixture-version".into(),

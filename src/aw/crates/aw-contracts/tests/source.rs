@@ -251,6 +251,7 @@ fn capability_cell_projection_covers_all_16_semantic_hooks() {
         BTreeMap::from([(
             "tool.before".into(),
             HookPointCapability {
+                post_permission: false,
                 mode: HookAuthority::Control,
                 effects: vec![HookEffect::Observe, HookEffect::Block],
                 failure_actions: Vec::new(),

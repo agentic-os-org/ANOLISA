@@ -150,6 +150,16 @@ sockets, reading files or invoking `Core::prepare/execute`:
   and SDK deployment profiles while leaving the active runtime admission path
   unchanged.
 
+Admission, Source resolution and resolved plan validation share the
+`tool.before` input replacement rule. An event can have one enforcing
+`replace_input` step, and all enforcing steps must use `on_error: block`.
+A first logical rewrite may also observe. A replacement after an earlier
+enforcing step, or one that also declares `block`, requires terminal placement
+and a dispatch owner with post-permission adoption capability. Admission marks
+that step with `post_permission`; route compilation forwards it with the two
+tool selectors. Pi checks the original arguments before AW for matching tools.
+The Host adds the bound directory to the Provider request as `event.cwd`.
+
 ## Instrumentation profiles (contract only)
 
 `aw_contracts::instrumentation::InstrumentationProfile`

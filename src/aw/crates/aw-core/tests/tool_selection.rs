@@ -35,6 +35,7 @@ fn selected(
         .parse(&serde_json::to_vec(&value).unwrap())
         .unwrap();
     let caps = AdapterCapabilities {
+        post_permission: false,
         failure_actions: Default::default(),
         adapter: adapter.into(),
         version: "fixture".into(),

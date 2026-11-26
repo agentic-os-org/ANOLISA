@@ -170,6 +170,7 @@ fn host_prepare_rejects_check_skill_when_daemon_transport_omits_cli() {
         version: "fixture".into(),
         entrypoint: "fixture".into(),
         events: BTreeMap::from([("tool.before".into(), vec!["observe".into(), "block".into()])]),
+        post_permission: false,
         failure_actions: Default::default(),
     };
     let ctx = || ProcessContext {

@@ -2,6 +2,7 @@
 
 use super::{AdapterCapabilities, AdmissionError, AdmittedStep, ProviderEvidence, StepExecution};
 use aw_config::requirements::{configured_step, step_enabled, StepRequirement};
+use aw_contracts::hook_plan::{input_handoff, HANDOFF_UNSUPPORTED};
 use aw_provider::{EventGate, MutationSlot};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -72,6 +73,10 @@ pub fn preflight(
     require(
         !capabilities.version.trim().is_empty() && !capabilities.entrypoint.trim().is_empty(),
         "Adapter evidence requires a version and entrypoint",
+    )?;
+    require(
+        capabilities.valid_handoff(),
+        "Adapter evidence exceeds the supported event or effect surface",
     )?;
     for (event, effects) in &capabilities.events {
         require(
@@ -146,24 +151,39 @@ pub fn preflight(
                 "result replacement must be the last applicable enabled event step",
             )?;
         }
-        for (index, step) in enforcing.iter().enumerate() {
-            if step.effects.contains(&"replace_input")
-                && effects.iter().any(|effect| effect == "replace_input")
-            {
-                require(
-                    gate.mutation_slot() == Some(MutationSlot::PreToolInput)
-                        && index == 0
-                        && step.effects == ["replace_input"]
-                        && enforcing.iter().all(|step| step.on_error == "block"),
-                    "input replacement requires a first sole-effect step and fail-closed before steps",
-                )?;
-            }
-        }
+        let handoff = admitted_handoff(&requirement, capabilities)?;
         for step in enabled {
-            candidates.push(preflight_step(spec, gate, step, effects, capabilities)?);
+            let mut admitted = preflight_step(spec, gate, step, effects, capabilities)?;
+            admitted.post_permission = handoff == Some(step.step_id);
+            candidates.push(admitted);
         }
     }
     Ok(candidates)
+}
+
+pub(crate) fn admitted_handoff<'a>(
+    req: &aw_config::requirements::HookRequirement<'a>,
+    caps: &AdapterCapabilities,
+) -> Result<Option<&'a str>, AdmissionError> {
+    if !caps.events[req.event]
+        .iter()
+        .any(|effect| effect == "replace_input")
+    {
+        return Ok(None);
+    }
+    let enforcing = req
+        .steps
+        .iter()
+        .filter(|s| s.configuration()["mode"] != "shadow");
+    let handoff = input_handoff(
+        enforcing.map(|s| (s.step_id, s.effects.iter().copied(), s.on_error == "block")),
+    )
+    .map_err(AdmissionError::Rejected)?;
+    require(
+        handoff.is_none() || caps.post_permission,
+        HANDOFF_UNSUPPORTED,
+    )?;
+    Ok(handoff)
 }
 
 fn preflight_step(
@@ -244,6 +264,7 @@ fn preflight_step(
         "failure action is not supported by the implementation and Adapter",
     )?;
     Ok(AdmittedStep {
+        post_permission: false,
         event: event.to_owned(),
         step_id: string(&step["id"])?.to_owned(),
         provider: provider_name.to_owned(),

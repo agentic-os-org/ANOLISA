@@ -36,6 +36,7 @@ impl Fixture {
             .bind(
                 "qoder".into(),
                 crate::Capabilities {
+                    post_permission: false,
                     failure_actions: Default::default(),
                     adapter: "qoder".into(),
                     version: "fixture".into(),
@@ -248,6 +249,7 @@ fn release_timeout_keeps_instance_draining_until_cleanup_can_finish() {
         bytes,
         "qoder",
         AdapterCapabilities {
+            post_permission: false,
             failure_actions: Default::default(),
             adapter: "qoder".into(),
             version: "fixture".into(),

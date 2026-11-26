@@ -123,6 +123,13 @@ Profile 身份、能力声明和更严格的服务要求；CLI 从 Adapter 声�
   并独立编译 `AdmittedStep`，在全部已注册框架 Profile 与 SDK 部署 Profile 上核对
   Shadow Plan 与 `admission::preflight` 的准入判定及步骤编译结果完全一致，同时保持当前运行期准入主路径不变。
 
+准入预检、Source 求解和解析后计划校验共用 `tool.before` 输入改写规则。每个
+事件最多允许一个执行策略的步骤声明 `replace_input`，所有执行策略的步骤均须使用
+`on_error: block`。首位逻辑改写可附带 `observe`。改写前已有其他执行步骤，或改写同时声明
+`block` 时，准入要求该步骤位于末位，且执行入口支持在原生权限检查后采用参数。
+准入为该步骤标记 `post_permission`，路由编译将标记和两级工具选择器传给 Pi。
+对命中交接的工具，Pi 先执行原生检查，再运行 AW。Host 将绑定目录写入 Provider 请求的 `event.cwd`。
+
 ## 插桩 Profile（仅合同层）
 
 `aw_contracts::instrumentation::InstrumentationProfile`

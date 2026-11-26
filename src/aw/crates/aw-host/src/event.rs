@@ -206,25 +206,31 @@ impl<'a> Event<'a> {
     /// Claims and the event deadline are retained; the input can change only once.
     ///
     /// # Errors
-    /// Rejects later/concurrent steps, unsupported events, invalid bounds or replay.
+    /// Rejects out-of-order claims, unsupported events, invalid bounds or replay.
     pub fn input_view(&self, input: Value, native_input: Vec<u8>) -> Result<(), Error> {
-        let first = self
-            .callback_steps()
-            .into_iter()
-            .next()
-            .ok_or(Error::Invalid("missing first step"))?;
+        let callbacks = self.callback_steps();
         let claimed = self
             .claimed
             .lock()
             .map_err(|_| Error::Invalid("step claim poisoned"))?;
+        let replaces_input = |step: &&AdmittedStep| {
+            claimed.contains(&step.step_id) && step.execution.replaces_input()
+        };
+        let initial = claimed.len() == 1 && callbacks.first().is_some_and(replaces_input);
+        let terminal = callbacks.last().is_some_and(replaces_input)
+            && callbacks.iter().all(|step| claimed.contains(&step.step_id));
         if self.gate.mutation_slot() != Some(MutationSlot::PreToolInput)
             || self.native_input.is_none()
-            || claimed.len() != 1
-            || !claimed.contains(&first.step_id)
-            || !matches!(&first.execution, StepExecution::Provider { effects, .. } if effects == &["replace_input"])
+            || !(initial || terminal)
+            || self.value["tool"]["input"]
+                .as_object()
+                .zip(input.as_object())
+                .is_none_or(|(original, candidate)| {
+                    original.keys().any(|key| !candidate.contains_key(key))
+                })
         {
             return Err(Error::Invalid(
-                "input replacement requires the first native pre-tool step",
+                "invalid input replacement claim or arguments",
             ));
         }
         let mut callback = self
@@ -550,6 +556,10 @@ impl<'a> Event<'a> {
                             if matches!(step.execution, StepExecution::Hook { .. }) {
                                 self.host.protocol.bind_hook_invocation(value)
                             } else {
+                                let cwd = provider.command.cwd.to_str().ok_or(
+                                    aw_provider::Error::Invalid("bound cwd requires UTF-8"),
+                                )?;
+                                value["event"]["cwd"] = Value::from(cwd);
                                 self.host.protocol.bind_invocation(value)
                             }
                         };

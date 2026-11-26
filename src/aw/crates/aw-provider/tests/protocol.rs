@@ -600,17 +600,59 @@ fn operation_adapter_constraints_are_bounded_and_reference_declared_events() {
 }
 
 #[test]
+fn event_working_directory_is_optional_absolute_and_control_free() {
+    let protocol = Protocol::new().unwrap();
+    let mut request = invoke("tool.before", json!(["observe"]));
+    protocol.validate_event(&request["event"]).unwrap();
+    protocol.bind_invocation(request.clone()).unwrap();
+    for path in [
+        "/".into(),
+        "/work/目录".into(),
+        format!("/{}", "a".repeat(4095)),
+    ] {
+        request["event"]["cwd"] = json!(path);
+        protocol.validate_event(&request["event"]).unwrap();
+        protocol.bind_invocation(request.clone()).unwrap();
+    }
+    for path in [
+        "".into(),
+        "relative".into(),
+        "C:/work".into(),
+        "/work\n".into(),
+        "/bad\0path".into(),
+        "/bad\u{0085}path".into(),
+        format!("/{}", "a".repeat(4096)),
+    ] {
+        request["event"]["cwd"] = json!(path);
+        assert!(
+            protocol.validate_event(&request["event"]).is_err(),
+            "{path:?}"
+        );
+        assert!(
+            protocol.bind_invocation(request.clone()).is_err(),
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
 fn input_replacement_is_a_single_bound_object_effect_before_execution() {
     let protocol = Protocol::new().unwrap();
     let request = protocol
-        .bind_invocation(invoke("tool.before", json!(["replace_input"])))
+        .bind_invocation(invoke(
+            "tool.before",
+            json!(["observe", "block", "replace_input"]),
+        ))
         .unwrap();
     let mut reply = response();
     reply["input_digest"] = request.as_value()["input_digest"].clone();
     reply["effects"] =
         json!([{"type":"replace_input","input":{"价格":1.25,"command":"new","nested":[1,false]}}]);
     protocol.check_response(&request, &bytes(&reply)).unwrap();
+    reply["effects"] = json!([{"type":"block","reason_code":"denied"}]);
+    protocol.check_response(&request, &bytes(&reply)).unwrap();
     for effects in [
+        json!([{"type":"replace_input","input":{"价格":1.25}},{"type":"block"}]),
         json!([{"type":"replace_input"}]),
         json!([{"type":"replace_input","input":"command"}]),
         json!([{"type":"replace_input","input":{}},{"type":"replace_input","input":{}}]),

@@ -103,7 +103,7 @@ fn binding_pins_explicit_context_and_preserves_native_payload() {
     let fixture = Fixture::new();
     let service = Running::start(&fixture, &fixture.document());
     let binding = fixture.bind(&service.client);
-    let value = event(&binding, "tool.after", "observe");
+    let mut value = event(&binding, "tool.after", "observe");
     let handle = open(&service.client, &binding, value.clone());
     service
         .client
@@ -111,6 +111,7 @@ fn binding_pins_explicit_context_and_preserves_native_payload() {
         .unwrap();
     close(&service.client, &handle);
     let calls = fixture.calls("invoke");
+    value["cwd"] = json!(fixture.0);
     assert_eq!(calls[0]["request"]["event"], value);
     assert_eq!(calls[0]["cwd"], fixture.0.to_str().unwrap());
     assert_eq!(

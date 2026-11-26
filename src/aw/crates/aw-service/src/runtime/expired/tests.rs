@@ -22,6 +22,7 @@ fn queued_requests_survive_expiry_retirement() {
             .bind(
                 "qoder".into(),
                 Capabilities {
+                    post_permission: false,
                     adapter: "qoder".into(),
                     version: "fixture".into(),
                     entrypoint: "fixture".into(),
