@@ -1,4 +1,4 @@
-//! Persisted indexes must refresh resized files even when their mtime is retained.
+//! Persisted indexes must refresh changed files even when their mtime is retained.
 
 use std::fs::{self, FileTimes};
 use std::path::Path;
@@ -10,7 +10,7 @@ use agent_memory::index::IndexHandle;
 use agent_memory::ns::{MountPoint, Namespace};
 use async_trait::async_trait;
 
-const OLD: &str = "cobaltzebra original";
+const OLD: &str = "cobaltzebra";
 const NEW: &str = "heliotrope replacement with a different length";
 const NOTE: &str = "restart.md";
 
@@ -25,9 +25,9 @@ fn open(mount: &MountPoint, embedding: Option<Arc<dyn EmbeddingProvider>>) -> In
     IndexHandle::open(mount, embedding, 0.0, 0.0, false).unwrap()
 }
 
-fn replace_preserving_mtime(path: &Path) {
+fn replace_preserving_mtime(path: &Path, replacement: &str) {
     let before = path.metadata().unwrap();
-    fs::write(path, NEW).unwrap();
+    fs::write(path, replacement).unwrap();
     fs::File::options()
         .write(true)
         .open(path)
@@ -36,7 +36,7 @@ fn replace_preserving_mtime(path: &Path) {
         .unwrap();
     let after = path.metadata().unwrap();
     assert_eq!(before.modified().unwrap(), after.modified().unwrap());
-    assert_ne!(before.len(), after.len());
+    assert_eq!(after.len(), replacement.len() as u64);
 }
 
 #[test]
@@ -52,7 +52,8 @@ fn restart_refreshes_same_mtime_resized_text_and_drops_stale_vector_without_prov
         .unwrap();
     drop(index);
 
-    replace_preserving_mtime(&mount.root.join(NOTE));
+    assert_ne!(OLD.len(), NEW.len());
+    replace_preserving_mtime(&mount.root.join(NOTE), NEW);
     let index = open(&mount, None);
     assert!(index.search("cobaltzebra", 10).unwrap().is_empty());
     assert_eq!(index.search("heliotrope", 10).unwrap()[0].path, NOTE);
@@ -68,6 +69,35 @@ fn restart_refreshes_same_mtime_resized_text_and_drops_stale_vector_without_prov
             .iter()
             .all(|(path, _)| path != NOTE)
     );
+}
+
+#[test]
+fn restart_refreshes_same_size_restore_and_keeps_unchanged_vector() {
+    const RESTORED: &str = "heliotropes";
+    const CONTROL: &str = "unchanged.md";
+    assert_eq!(OLD.len(), RESTORED.len());
+
+    let (_tmp, mount) = setup();
+    fs::write(mount.root.join(CONTROL), "untouched").unwrap();
+    let index = open(&mount, None);
+    assert_eq!(index.search(OLD, 10).unwrap()[0].path, NOTE);
+    {
+        let store = index.store_arc();
+        let mut store = store.lock().unwrap();
+        for path in [NOTE, CONTROL] {
+            store.upsert_vec(path, &[1.0, 0.0]).unwrap();
+        }
+    }
+    drop(index);
+
+    replace_preserving_mtime(&mount.root.join(NOTE), RESTORED);
+    let index = open(&mount, None);
+    assert!(index.search(OLD, 10).unwrap().is_empty());
+    assert_eq!(index.search(RESTORED, 10).unwrap()[0].path, NOTE);
+    let store = index.store_arc();
+    let store = store.lock().unwrap();
+    assert!(!store.index_stat_for(NOTE).unwrap().has_vector);
+    assert!(store.index_stat_for(CONTROL).unwrap().has_vector);
 }
 
 #[derive(Default)]
@@ -113,7 +143,8 @@ async fn restart_replaces_same_mtime_resized_vector_with_current_content_embeddi
     assert!((note_score(&index, &[1.0, 0.0]) - 1.0).abs() < 1e-6);
     drop(index);
 
-    replace_preserving_mtime(&mount.root.join(NOTE));
+    assert_ne!(OLD.len(), NEW.len());
+    replace_preserving_mtime(&mount.root.join(NOTE), NEW);
     let index = open(&mount, Some(embedding.clone()));
     assert!((note_score(&index, &[0.0, 1.0]) - 1.0).abs() < 1e-6);
     assert!(note_score(&index, &[1.0, 0.0]).abs() < 1e-6);
