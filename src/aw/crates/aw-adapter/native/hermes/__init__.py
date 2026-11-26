@@ -19,6 +19,16 @@ LIFECYCLE_EVENTS = {
 EVENTS = {**LIFECYCLE_EVENTS, "tool.before": "pre_tool_call", "tool.after": "post_tool_call"}
 
 
+def callback_event(hook: dict[str, Any], final_result: bool) -> str:
+    """Select the native registry entry for one managed policy step."""
+    if hook.get("replace_result"):
+        if hook["event"] != "tool.after":
+            raise ValueError("AW replacements require a completed tool")
+        if not final_result:
+            return "transform_tool_result"
+    return EVENTS[hook["event"]]
+
+
 def _read_private_json(path: str) -> Any:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as handle:
@@ -103,27 +113,26 @@ def register(ctx: Any) -> None:
                 or not 1 <= timeout <= 300 or (event, step) in seen):
             raise ValueError("invalid AW Hermes callback registration")
         seen.add((event, step))
+        native_event = callback_event(hook, launch.get("final_result", False))
         if event == "tool.after" and launch.get("final_result"):
             # Receipt and discovery still attest the registered Hook. Evaluation occurs
             # after other plugins' transforms at the verified model-history boundary.
             from .aw_result import remember_post
-            callbacks.append((EVENTS[event], remember_post))
+            callbacks.append((native_event, remember_post))
             continue
         command_args = [
             launch["binary"], "hook", "--binding", launch["binding"],
             "--adapter", "hermes", "--event", event, "--step", step, "--on-error", action,
         ]
         if event in LIFECYCLE_EVENTS:
-            callbacks.append((EVENTS[event], _lifecycle_callback(event, command_args, timeout)))
+            callbacks.append((native_event, _lifecycle_callback(event, command_args, timeout)))
             continue
         command = shlex.join(command_args)
-        if hook.get("replace_result"):
-            if event != "tool.after":
-                raise ValueError("AW replacements require a completed tool")
-            callbacks.append(("transform_tool_result", _replacement_callback(launch, hook)))
+        if native_event == "transform_tool_result":
+            callbacks.append((native_event, _replacement_callback(launch, hook)))
             continue
         spec = ShellHookSpec(
-            event=EVENTS[event], command=command, timeout=timeout,
+            event=native_event, command=command, timeout=timeout,
             fail_closed=action == "block",
         )
         callback = _input_callback(spec, session) if event == "tool.before" else _make_callback(spec)
@@ -132,7 +141,7 @@ def register(ctx: Any) -> None:
                 spec, lambda response, result: _record_input(response, result, session)
             ) if launch.get("reloadable")
                         else session.skills.callback(callback, hook))
-        callbacks.append((EVENTS[event], callback))
+        callbacks.append((native_event, callback))
 
     # Hermes owns callback order, tool concurrency, timeout handling and the
     # interpretation of stdout/exit 2. AW does not introduce another scheduler.

@@ -1,8 +1,11 @@
 """Exercise strict history delivery and approval with the pinned Hermes executor."""
 
 import asyncio
+from collections import Counter
+import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -55,6 +58,53 @@ class ResultTests(NativeFixture):
                     "terminal", {}, session_id="session", api_request_id="request", tool_call_id="ask")
                 self.assertEqual((details.action, details.message, details.rule_key),
                                  ("approve", "native human approval", "fixture-rule"))
+
+    def test_managed_startup_verifies_lifecycle_and_result_hooks(self):
+        from hermes_cli import main as native
+        from hermes_cli.plugins_manifest import parse_manifest_file
+
+        installed = self.home / "plugins/aw-native-hooks"
+        shutil.copytree(self.plugin_path, installed)
+        manifest = parse_manifest_file(installed / "plugin.yaml", installed, "user", "")
+        spec = importlib.util.spec_from_file_location("aw_result_launcher", self.plugin_path / "launch.py")
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        lifecycle = {"session.start": "on_session_start", "turn.stop": "on_session_end",
+                     "session.end": "on_session_finalize"}
+
+        for strict, after in ((True, "post_tool_call"), (False, "transform_tool_result")):
+            with self.subTest(strict=strict):
+                launch = self.launch([(event, "observe") for event in lifecycle] +
+                                     [("tool.before", "observe"), ("tool.after", "compress")])
+                data = json.loads(launch.read_text())
+                data["final_result"] = strict
+                data["hooks"][-1].update(replace_result=True,
+                                         on_error="withhold_result" if strict else "report")
+                launch.write_text(json.dumps(data))
+                manager = self.manager()
+
+                def dispatch():
+                    native._prepare_agent_startup(SimpleNamespace())
+                    plugin = next(p for p in manager._plugins.values() if Path(p.manifest.path) == installed)
+                    self.assertEqual(Counter(plugin.hooks_registered),
+                                     Counter([*lifecycle.values(), "pre_tool_call", after]))
+                    for event in lifecycle.values():
+                        manager.invoke_hook(event, session_id="session", turn_id="turn",
+                                            turn_exit_reason="completed", reason="closed")
+
+                try:
+                    with (patch.object(sys, "argv", ["launch.py", "hermes", "chat", "--cli"]),
+                          patch.object(native, "main", dispatch),
+                          patch.object(native, "_prepare_agent_startup", lambda _: manager._load_plugin(manifest)),
+                          patch("hermes_cli.plugins.discover_plugins", lambda: None),
+                          patch("hermes_cli.plugins.get_plugin_manager", return_value=manager)):
+                        launcher.main()
+                finally:
+                    manager.unload()
+                rows = [json.loads(line)["payload"] for line in self.trace.read_text().splitlines()]
+                self.assertEqual([row["hook_event_name"] for row in rows], list(lifecycle.values()))
+                self.trace.unlink()
+                (self.root / "ready.json").unlink()
 
     def test_managed_strict_results(self):
         launch = self.launch([("tool.after", "strict")])
