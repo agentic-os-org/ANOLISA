@@ -28,8 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from swe_runner.agents.cosh.adapter import CoshAdapter
 from swe_runner.agents.lifecycle import PreparedAgentRun
 from swe_runner.agents.openclaw.adapter import OpenClawAdapter
-from swe_runner.common.models import AgentConfig, AgentResult, Settings, SWEInstance
+from swe_runner.common.models import AgentConfig, AgentResult, Prediction, Settings, SWEInstance
 from swe_runner.run.execution.orchestrator import Orchestrator
+from swe_runner.run.io.output_store import RunOutputStore
 
 SAMPLE_DIFF = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
 
@@ -485,7 +486,10 @@ def test_run_batch_concurrent_docker_cleanup(tmp_path: Path) -> None:
 
 
 def test_run_batch_skips_attempted(tmp_path: Path) -> None:
-    """Instances with existing result files are skipped when redo=False."""
+    """Completed successful and failed instances are skipped when redo=False."""
+    RunOutputStore(tmp_path).write_prediction(
+        Prediction(instance_id="instance-0", model_name_or_path="fake", model_patch=SAMPLE_DIFF)
+    )
     results_dir = tmp_path / "results"
     results_dir.mkdir()
     # Write result files for instance-0 (success) and instance-1 (failure)
@@ -530,10 +534,35 @@ def test_run_batch_skips_attempted(tmp_path: Path) -> None:
     assert results[0].instance.instance_id == "instance-2"
     assert mock_docker_manager.call_count == 1
 
-    # preds.json should contain instance-2 (the only newly run instance)
+    # Retain the completed prediction while adding the only newly run instance.
     preds_file = tmp_path / "preds.json"
     preds = json.loads(preds_file.read_text())
-    assert "instance-2" in preds
+    assert set(preds) == {"instance-0", "instance-2"}
+    assert preds["instance-0"]["model_patch"] == SAMPLE_DIFF
+
+
+def test_run_batch_retries_a_success_whose_prediction_was_not_published(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "interrupted.json").write_text(
+        json.dumps({"instance_id": "interrupted", "success": True, "patch_produced": True}),
+        encoding="utf-8",
+    )
+    orchestrator = Orchestrator(FakeAdapter(output=SAMPLE_DIFF))
+
+    with (
+        patch("swe_runner.agents.cosh.adapter.DockerManager") as mock_docker_manager,
+        patch("swe_runner.run.workspace.patches.extract_patch", return_value=SAMPLE_DIFF),
+    ):
+        make_mock_docker(mock_docker_manager)
+        results = orchestrator.run_batch([make_instance("interrupted")], tmp_path)
+
+    assert len(results) == 1
+    assert results[0].instance.instance_id == "interrupted"
+    assert results[0].success is True
+    assert mock_docker_manager.call_count == 1
+    predictions = json.loads((tmp_path / "preds.json").read_text(encoding="utf-8"))
+    assert predictions["interrupted"]["model_patch"] == SAMPLE_DIFF
 
 
 def test_run_batch_redo_flag(tmp_path: Path) -> None:
