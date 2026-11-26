@@ -4,6 +4,10 @@
 //! - `memory_sessions`: list historical session summaries from facts/summary/
 //! - `memory_timeline`: show tool call log from a specific session
 
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
 use serde::Serialize;
 
 use crate::audit::AuditEntry;
@@ -134,26 +138,30 @@ pub fn memory_timeline(svc: &MemoryService, session_id: &str, limit: usize) -> R
         )));
     }
 
-    let content = std::fs::read_to_string(&log_path)?;
-    let mut entries: Vec<TimelineEntry> = Vec::new();
+    let mut reader = BufReader::new(File::open(&log_path)?);
+    let mut line = String::new();
+    let mut entries = VecDeque::new();
+    let mut total = 0;
 
-    for line in content.lines() {
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            entries.push(TimelineEntry {
-                timestamp: entry["ts"].as_str().unwrap_or("").to_string(),
-                tool: entry["tool"].as_str().unwrap_or("").to_string(),
-                path: entry["path"].as_str().unwrap_or("").to_string(),
-                ok: entry["ok"].as_bool().unwrap_or(false),
-                bytes: entry["bytes"].as_u64(),
-                error: entry["error"].as_str().map(|s| s.to_string()),
-            });
+    // Count every valid line, but retain only the tail in file order.
+    while reader.read_line(&mut line)? != 0 {
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
+            total += 1;
+            if limit != 0 {
+                if entries.len() == limit {
+                    entries.pop_front();
+                }
+                entries.push_back(TimelineEntry {
+                    timestamp: entry["ts"].as_str().unwrap_or("").to_string(),
+                    tool: entry["tool"].as_str().unwrap_or("").to_string(),
+                    path: entry["path"].as_str().unwrap_or("").to_string(),
+                    ok: entry["ok"].as_bool().unwrap_or(false),
+                    bytes: entry["bytes"].as_u64(),
+                    error: entry["error"].as_str().map(|s| s.to_string()),
+                });
+            }
         }
-    }
-
-    // Take the most recent entries
-    let total = entries.len();
-    if entries.len() > limit {
-        entries = entries[entries.len() - limit..].to_vec();
+        line.clear();
     }
 
     svc.audit_log(
@@ -660,6 +668,62 @@ mod tests {
     use super::*;
     use crate::config::ConsolidationConfig;
     use crate::consolidation::{FactCategory, OwnedAuditEntry, run_consolidation_owned};
+
+    fn timeline_service(log: &[u8]) -> (tempfile::TempDir, MemoryService) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::AppConfig::default();
+        config.memory.paths.base_dir = tmp.path().to_string_lossy().into_owned();
+        config.memory.session.base_dir = tmp.path().join("sessions").to_string_lossy().into_owned();
+        config.memory.mount.strategy = crate::mount::MountStrategyKind::Userland;
+        config.memory.index.enabled = false;
+        config.memory.git.enabled = false;
+        config.memory.consolidation.enabled = false;
+        let svc = MemoryService::new(config).unwrap();
+        let logs = svc.mount.meta_dir.join("session-logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("timeline-test.jsonl"), log).unwrap();
+        (tmp, svc)
+    }
+
+    #[test]
+    fn timeline_retains_last_valid_entries_in_file_order() {
+        let (_tmp, svc) = timeline_service(
+            concat!(
+                r#"{"ts":"newest","tool":"mem_write","path":"first.md","ok":true}"#,
+                "\r\nnot JSON\n\n",
+                "null\n",
+                r#"{"ts":"older","tool":"mem_read","path":"\u793a\u4f8b.md","ok":true}"#,
+                "\n",
+                r#"{"ts":"oldest","tool":"mem_read","path":"last.md","error":"missing"}"#,
+            )
+            .as_bytes(),
+        );
+        let tail =
+            "[older] ✓ mem_read 示例.md\n[oldest] ✗ mem_read last.md\n       error: missing\n";
+        assert_eq!(
+            memory_timeline(&svc, "timeline-test", 2).unwrap(),
+            format!("Timeline for session timeline-test (4 total entries, showing 2):\n\n{tail}")
+        );
+        assert_eq!(
+            memory_timeline(&svc, "timeline-test", 0).unwrap(),
+            "Timeline for session timeline-test (4 total entries, showing 0):\n\n"
+        );
+        assert_eq!(
+            memory_timeline(&svc, "timeline-test", u32::MAX as usize).unwrap(),
+            format!(
+                "Timeline for session timeline-test (4 total entries, showing 4):\n\n[newest] ✓ mem_write first.md\n[] ✗  \n{tail}"
+            )
+        );
+    }
+
+    #[test]
+    fn timeline_rejects_invalid_utf8_even_after_a_valid_entry() {
+        let (_tmp, svc) = timeline_service(b"{\"tool\":\"mem_read\"}\n\xff\n");
+        let error = memory_timeline(&svc, "timeline-test", 0).unwrap_err();
+        assert!(
+            matches!(error, MemoryError::Io(err) if err.kind() == std::io::ErrorKind::InvalidData)
+        );
+    }
 
     fn generated_summary(last_timestamp: &str) -> String {
         let entries: Vec<_> = ["mem_write", "mem_read", "mem_edit"]
