@@ -107,6 +107,59 @@ fn path_resolution_and_symbolic_aliases_hold_the_actual_managed_executable() {
     Fixture::lock(&prefix).try_lock().unwrap();
 }
 
+fn agent_command(cwd: &Path) -> CommandSpec {
+    CommandSpec {
+        program: "agent".into(),
+        args: Vec::new(),
+        cwd: cwd.to_owned(),
+        environment: BTreeMap::from([("PATH".into(), "first:second".into())]),
+    }
+}
+
+fn write_agent(directory: &Path, mode: u32) {
+    let path = directory.join("agent");
+    fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn path_lookup_requires_execute_access_for_the_effective_user() {
+    // SAFETY: geteuid reads the effective UID without touching caller memory.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let fixture = Fixture::new();
+    let first = fixture.0.join("first");
+    let second = fixture.0.join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    write_agent(&first, 0o601);
+    let mut command = agent_command(&fixture.0);
+    assert!(matches!(
+        PackageLeases::acquire([&mut command]),
+        Err(LeaseError::Executable(path)) if path == Path::new("agent")
+    ));
+
+    write_agent(&second, 0o700);
+    PackageLeases::acquire([&mut command]).unwrap();
+    assert_eq!(command.program, second.join("agent"));
+}
+
+#[test]
+fn path_lookup_skips_searchable_directories() {
+    let fixture = Fixture::new();
+    let directory = fixture.0.join("first/agent");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+    let second = fixture.0.join("second");
+    fs::create_dir(&second).unwrap();
+    write_agent(&second, 0o700);
+
+    let mut command = agent_command(&fixture.0);
+    PackageLeases::acquire([&mut command]).unwrap();
+    assert_eq!(command.program, second.join("agent"));
+}
+
 #[test]
 fn absolute_argument_paths_protect_backends_even_when_the_executable_is_unmanaged() {
     let fixture = Fixture::new();

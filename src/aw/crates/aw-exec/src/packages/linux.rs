@@ -56,8 +56,17 @@ fn resolved(command: &CommandSpec) -> Result<(PathBuf, PathBuf)> {
                 }
             })
             .find(|path| {
-                fs::metadata(path)
-                    .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+                if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+                    return false;
+                }
+                let Ok(name) = CString::new(path.as_os_str().as_bytes()) else {
+                    return false;
+                };
+                // SAFETY: name is NUL-terminated and live during the effective-access check.
+                unsafe {
+                    libc::faccessat(libc::AT_FDCWD, name.as_ptr(), libc::X_OK, libc::AT_EACCESS)
+                        == 0
+                }
             })
             .ok_or_else(|| LeaseError::Executable(program.clone()))?
     };
