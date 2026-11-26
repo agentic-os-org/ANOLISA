@@ -134,6 +134,17 @@ impl Transcript {
         if start >= self.base {
             return visit(&self.bytes[start - self.base..end - self.base]);
         }
+        self.visit_spooled_chunks(start, end, visit)
+    }
+
+    // Keep the replay buffer's stack probes off the resident output path.
+    #[inline(never)]
+    fn visit_spooled_chunks(
+        &self,
+        start: usize,
+        end: usize,
+        mut visit: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
         let mut file = self
             .spool
             .as_ref()
@@ -165,25 +176,7 @@ impl Transcript {
         end: usize,
         output: &mut W,
     ) -> io::Result<()> {
-        self.validate_range(start, end)?;
-        if start >= self.base {
-            return output.write_all(&self.bytes[start - self.base..end - self.base]);
-        }
-        let mut file = self
-            .spool
-            .as_ref()
-            .ok_or_else(|| io::Error::other("transcript range is no longer resident"))?
-            .try_clone()?;
-        file.seek(SeekFrom::Start(start as u64))?;
-        let mut remaining = end - start;
-        let mut buffer = [0_u8; 64 * 1024];
-        while remaining > 0 {
-            let take = remaining.min(buffer.len());
-            file.read_exact(&mut buffer[..take])?;
-            output.write_all(&buffer[..take])?;
-            remaining -= take;
-        }
-        Ok(())
+        self.visit_range_chunks(start, end, |bytes| output.write_all(bytes))
     }
 
     pub(super) fn into_output_bytes(self) -> Vec<u8> {
@@ -260,6 +253,14 @@ mod tests {
             transcript.read_range(2, 22).expect("range"),
             &b"cdefghijklmnopqrstuv"[..]
         );
+        let mut output = Vec::new();
+        transcript
+            .copy_range_to(2, 17, &mut output)
+            .expect("spooled");
+        transcript
+            .copy_range_to(17, 22, &mut output)
+            .expect("resident");
+        assert_eq!(output, b"cdefghijklmnopqrstuv");
         assert_eq!(
             std::fs::metadata(&path)
                 .expect("metadata")

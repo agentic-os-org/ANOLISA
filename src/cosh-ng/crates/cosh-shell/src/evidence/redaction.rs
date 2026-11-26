@@ -96,33 +96,101 @@ fn redact_home_path(value: &str) -> String {
 }
 
 pub(crate) fn redact_sensitive_text(text: &str) -> (String, bool) {
-    let (mut redacted, mut changed) = redact_private_key_blocks(text);
-    let next = conservative_cookie_header_pattern()
-        .replace_all(&redacted, "$prefix<redacted>")
-        .into_owned();
-    changed |= next != redacted;
-    redacted = next;
+    let (mut redacted, mut changed) = if text.contains("-----") {
+        redact_private_key_blocks(text)
+    } else {
+        (text.to_string(), false)
+    };
+    if redacted.contains(':') && redacted.contains('=') {
+        let next = conservative_cookie_header_pattern()
+            .replace_all(&redacted, "$prefix<redacted>")
+            .into_owned();
+        changed |= next != redacted;
+        redacted = next;
+    }
     let (next, cookie_changed) = redact_shell_cookie_headers(&redacted);
     redacted = next;
     changed |= cookie_changed;
-    for (pattern, replacement) in [
-        (authorization_pattern(), "$prefix$scheme <redacted>"),
-        (bearer_pattern(), "$prefix<redacted>"),
-        (url_password_pattern(), "$prefix<redacted>@"),
-        (sensitive_flag_pattern(), "$prefix<redacted>"),
-        (sensitive_cookie_assignment_pattern(), "$prefix<redacted>"),
-        (sensitive_assignment_pattern(), "$prefix<redacted>"),
-        (github_token_pattern(), "<redacted>"),
-        (opaque_token_pattern(), "<redacted>"),
-        (jwt_pattern(), "<redacted>"),
-        (aws_access_key_pattern(), "$prefix<redacted>"),
-        (alibaba_access_key_pattern(), "<redacted>"),
-    ] {
-        let next = pattern.replace_all(&redacted, replacement).into_owned();
+
+    let assignment = redacted.contains(['=', ':']);
+    let authorization = may_contain_word(&redacted, "authorization");
+    let bearer = may_contain_word(&redacted, "bearer");
+    let cookie = may_contain_word(&redacted, "cookie");
+    let secret_name = bearer
+        || ["pass", "token", "key", "secret", "credential"]
+            .iter()
+            .any(|word| may_contain_word(&redacted, word));
+    // Use only necessary match conditions here. In particular, keep the
+    // Unicode patterns for non-ASCII input and the shell-aware cookie scan above.
+    let rules: [(bool, fn() -> &'static Regex, &str); 11] = [
+        (
+            assignment && authorization,
+            authorization_pattern,
+            "$prefix$scheme <redacted>",
+        ),
+        (bearer, bearer_pattern, "$prefix<redacted>"),
+        (
+            redacted.contains("://") && redacted.contains('@'),
+            url_password_pattern,
+            "$prefix<redacted>@",
+        ),
+        (
+            redacted.contains("--") && (secret_name || authorization || cookie),
+            sensitive_flag_pattern,
+            "$prefix<redacted>",
+        ),
+        (
+            assignment && cookie,
+            sensitive_cookie_assignment_pattern,
+            "$prefix<redacted>",
+        ),
+        (
+            assignment && secret_name,
+            sensitive_assignment_pattern,
+            "$prefix<redacted>",
+        ),
+        (redacted.contains("gh"), github_token_pattern, "<redacted>"),
+        (
+            ["sk-", "sk_", "glpat-", "npm_", "hf_", "AIza"]
+                .iter()
+                .any(|prefix| redacted.contains(*prefix))
+                || may_contain_word(&redacted, "xox"),
+            opaque_token_pattern,
+            "<redacted>",
+        ),
+        (
+            redacted.contains("eyJ") && redacted.contains('.'),
+            jwt_pattern,
+            "<redacted>",
+        ),
+        (
+            redacted.contains("AKIA") || redacted.contains("ASIA"),
+            aws_access_key_pattern,
+            "$prefix<redacted>",
+        ),
+        (
+            redacted.contains("LTAI"),
+            alibaba_access_key_pattern,
+            "<redacted>",
+        ),
+    ];
+    for (possible, pattern, replacement) in rules {
+        if !possible {
+            continue;
+        }
+        let next = pattern().replace_all(&redacted, replacement).into_owned();
         changed |= next != redacted;
         redacted = next;
     }
     (redacted, changed)
+}
+
+fn may_contain_word(text: &str, word: &str) -> bool {
+    !text.is_ascii()
+        || text
+            .as_bytes()
+            .windows(word.len())
+            .any(|bytes| bytes.eq_ignore_ascii_case(word.as_bytes()))
 }
 
 fn redact_private_key_blocks(text: &str) -> (String, bool) {
@@ -543,6 +611,18 @@ mod tests {
 
         assert!(changed);
         assert_eq!(redacted, "before\n<redacted private key block>\nafter\n");
+    }
+
+    #[test]
+    fn journal_identifiers_and_paths_survive_without_skipping_secret_shapes() {
+        let session = "raw-session-123-1795680000000000000";
+        assert_eq!(redact_sensitive_text(session), (session.to_owned(), false));
+        let path = "/tmp/cosh/session.log";
+        assert_eq!(redact_sensitive_text(path), (path.to_owned(), false));
+        assert!(redact_sensitive_text("echo BeArEr z").1);
+        assert!(redact_sensitive_text("echo LTAIEXAMPLE12345").1);
+        assert!(redact_sensitive_text("echo ſecret=example").1);
+        assert!(redact_sensitive_text(r#"curl -H "Coo"kie": SID=example""#).1);
     }
 
     #[test]

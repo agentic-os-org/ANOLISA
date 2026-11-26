@@ -222,6 +222,57 @@ mod tests {
     }
 
     #[test]
+    fn repeated_editing_is_compacted_only_in_the_incremental_journal() {
+        let directory = tempfile::tempdir().expect("journal directory");
+        let path = directory.path().join("events.jsonl");
+        let mut store = EventStore::new(TranscriptRetention::Bounded { window_bytes: 4 }, &path)
+            .expect("event store");
+        let input_state = |message: &str| {
+            let mut event = ShellEvent::user_input_intercepted("session", "");
+            event.component = Some("shell_input".into());
+            event.input = None;
+            event.message = Some(message.into());
+            event
+        };
+        let editing = input_state("input editing");
+        let mut repeat = editing.clone();
+        repeat.started_at_ms = Some(42);
+        let empty = input_state("input empty");
+        let mut with_input = editing.clone();
+        with_input.input = Some("capture-text".into());
+        let mut other_session = editing.clone();
+        other_session.session_id = "other session".into();
+        let live = [
+            editing.clone(),
+            repeat,
+            other_session.clone(),
+            empty.clone(),
+            empty.clone(),
+            editing.clone(),
+            with_input.clone(),
+            editing.clone(),
+        ];
+        for event in &live {
+            store.push(event.clone());
+            store.persist_pending().expect("persist batch");
+        }
+        assert_eq!(store.view().events(), &live);
+        assert_eq!(store.position(), live.len());
+        assert_eq!(
+            crate::journal::read_shell_events(&path).expect("read journal"),
+            [
+                live[0].clone(),
+                other_session,
+                empty.clone(),
+                empty,
+                editing.clone(),
+                with_input,
+                editing,
+            ],
+        );
+    }
+
+    #[test]
     fn bounded_store_keeps_absolute_positions_after_compaction() {
         let work_dir = std::env::temp_dir().join(format!(
             "cosh-event-window-{}-{:?}",
