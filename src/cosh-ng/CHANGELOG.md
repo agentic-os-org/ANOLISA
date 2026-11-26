@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.30.3] - 2026-11-26
+
+### Changed
+
+- `cosh guide` restores the originating page and focus when going back, adds F2 to return to the guide home (`h` also works outside text fields), and asks before discarding unsaved AI settings. Confirmation details can be scrolled in narrow terminals, and completed setup results remain available in the guide and are printed on exit; browsing alone prints no receipt (#10719)
+- Shell approval cards replace repeated warnings on routine requests with command-specific notices for environment values, sensitive files and full process arguments, or a neutral notice when output is unpredictable. Details show the full command and output boundaries with paging; `d` opens Details, Enter keeps the request pending, and Left or Right returns to actions. Whole-turn consent explains its scope, while approval, Auto and trust eligibility remain unchanged (#10718)
+
+### Fixed
+
+- English questions with an internal question mark, including a question wrapped in one balanced pair of double quotes, reach AI routing instead of failing with `command not found`. Actual shell commands and matching unquoted globs remain shell-owned, and commands that do execute keep their command records (#10517)
+- Concurrent AI authentication saves retain services saved by other sessions, and deleted user services no longer survive as stale credentials in the live process. Invalid configuration fails without changing the file or echoing secrets; existing configuration syntax and explicit session choices are preserved (#10624)
+- A saved failure record that is unsafe or no longer usable no longer blocks clean sibling records or prevents new failure invitations. `cosh --ask ... --context ID` can use a clean, fresh record; structurally damaged files and unsafe new records are still rejected (#10658)
+- Gateway task snapshot operations distinguish stale previews from snapshot-service failures and provide clearer retry guidance. A known failed switch requires a fresh preview and request key; an uncertain switch asks the caller to stop and inspect the recovery point. Replaying the same request does not dispatch a second switch (#10671)
+- Enhanced Bash sessions do less work at command boundaries under memory pressure and restore command observation on the next ordinary submission after pressure is released. Sudden or sustained pressure can still delay commands, and observation is reduced while the lightweight path is active; user prompt settings, traps and secret-history protection are preserved (#10696)
+
 ## [0.30.2] - 2026-11-24
 
 ### Added
