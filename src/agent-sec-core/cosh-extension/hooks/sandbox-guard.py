@@ -15,11 +15,11 @@ import base64
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sandbox_authorization import (
@@ -125,8 +125,62 @@ BLOCK_PATTERNS = [
     (r":\(\)\s*\{", "fork bomb"),
 ]
 
-_SHELL_SEPARATOR_CHARS = frozenset(";&|()\n`")
-_SHELL_REDIRECT_CHARS = frozenset("<>")
+
+@dataclass(frozen=True)
+class _ShellToken:
+    """单个 shell 词法单元，保留未引号重定向操作符与引号/转义来源信息。"""
+
+    text: str
+    is_redirect: bool = False
+    quoted: bool = False
+    has_malformed_expansion: bool = False
+
+
+@dataclass(frozen=True)
+class _ShellSegment:
+    """单个子命令片段的词法 token 列表及嵌套命令/进程替换片段。"""
+
+    tokens: list[_ShellToken]
+    substitutions: list[str]
+
+
+@dataclass(frozen=True)
+class _WrapperSpec:
+    """受支持命令包装器的选项带参规格。"""
+
+    short_flag_opts: frozenset[str] = frozenset()
+    short_arg_opts: frozenset[str] = frozenset()
+    short_opt_arg_opts: frozenset[str] = frozenset()
+    long_flag_opts: frozenset[str] = frozenset()
+    long_arg_opts: frozenset[str] = frozenset()
+    long_opt_arg_opts: frozenset[str] = frozenset()
+    positional_args: int = 0
+    allow_env_assign: bool = False
+    allow_numeric_short_opt: bool = False
+    allow_lone_dash_flag: bool = False
+
+
+_ANSI_C_SIMPLE_ESCAPES: dict[str, str] = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_OCT_DIGITS = frozenset("01234567")
+_REDIRECT_OPS_3 = frozenset({"<<<", "&>>", "<<-"})
+_REDIRECT_OPS_2 = frozenset({"&>", ">>", "<<", "<>", ">&", "<&", ">|"})
+_CONTROL_OPS_2 = frozenset({"&&", "||", "|&", ";;", ";&"})
+_CONTROL_OPS_1 = frozenset(";|&()")
 _SHELL_LEADING_KEYWORDS = frozenset(
     {
         "{",
@@ -139,84 +193,383 @@ _SHELL_LEADING_KEYWORDS = frozenset(
         "while",
         "until",
         "do",
-        "nohup",
-        "exec",
-        "builtin",
     }
 )
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_FALLBACK_SPLIT_RE = re.compile(r"(?:&&|\|\||\|&|[;&|()\n`])")
-_BACKTICK_RE = re.compile(r"`([^`]+)`")
-_SUDO_ARG_OPTS = frozenset(
+_NUMERIC_SHORT_OPT_RE = re.compile(r"^-[+-]?\d+$")
+
+_WRAPPER_SPECS: dict[str, _WrapperSpec] = {
+    "sudo": _WrapperSpec(
+        short_flag_opts=frozenset("AbBEeiKklnPSsvV"),
+        short_arg_opts=frozenset("uUgcCDhprRtT"),
+        long_flag_opts=frozenset(
+            {
+                "--askpass",
+                "--background",
+                "--bell",
+                "--edit",
+                "--help",
+                "--list",
+                "--login",
+                "--non-interactive",
+                "--preserve-groups",
+                "--remove-timestamp",
+                "--reset-timestamp",
+                "--set-home",
+                "--shell",
+                "--stdin",
+                "--validate",
+                "--version",
+            }
+        ),
+        long_arg_opts=frozenset(
+            {
+                "--chdir",
+                "--chroot",
+                "--close-from",
+                "--command-timeout",
+                "--group",
+                "--host",
+                "--login-class",
+                "--other-user",
+                "--prompt",
+                "--role",
+                "--type",
+                "--user",
+            }
+        ),
+        long_opt_arg_opts=frozenset({"--preserve-env"}),
+        allow_env_assign=True,
+    ),
+    "doas": _WrapperSpec(
+        short_flag_opts=frozenset("LnSs"),
+        short_arg_opts=frozenset("Cua"),
+    ),
+    "pkexec": _WrapperSpec(
+        long_flag_opts=frozenset(
+            {"--disable-internal-agent", "--keep-cwd", "--help", "--version"}
+        ),
+        long_arg_opts=frozenset({"--user"}),
+    ),
+    "nice": _WrapperSpec(
+        short_arg_opts=frozenset("n"),
+        long_flag_opts=frozenset({"--help", "--version"}),
+        long_arg_opts=frozenset({"--adjustment"}),
+        allow_numeric_short_opt=True,
+    ),
+    "nohup": _WrapperSpec(
+        long_flag_opts=frozenset({"--help", "--version"}),
+    ),
+    "time": _WrapperSpec(
+        short_flag_opts=frozenset("apqvV"),
+        short_arg_opts=frozenset("fo"),
+        long_flag_opts=frozenset(
+            {"--append", "--portability", "--quiet", "--verbose", "--version", "--help"}
+        ),
+        long_arg_opts=frozenset({"--format", "--output"}),
+    ),
+    "timeout": _WrapperSpec(
+        short_flag_opts=frozenset("fPv"),
+        short_arg_opts=frozenset("ks"),
+        long_flag_opts=frozenset(
+            {"--foreground", "--preserve-status", "--verbose", "--help", "--version"}
+        ),
+        long_arg_opts=frozenset({"--kill-after", "--signal"}),
+        positional_args=1,
+    ),
+    "stdbuf": _WrapperSpec(
+        short_arg_opts=frozenset("ioe"),
+        long_flag_opts=frozenset({"--help", "--version"}),
+        long_arg_opts=frozenset({"--input", "--output", "--error"}),
+    ),
+    "ionice": _WrapperSpec(
+        short_flag_opts=frozenset("thV"),
+        short_arg_opts=frozenset("cnpPu"),
+        long_flag_opts=frozenset({"--ignore", "--help", "--version"}),
+        long_arg_opts=frozenset({"--class", "--classdata", "--pid", "--pgid", "--uid"}),
+    ),
+    "taskset": _WrapperSpec(
+        short_flag_opts=frozenset("apchV"),
+        long_flag_opts=frozenset(
+            {"--all-tasks", "--pid", "--cpu-list", "--help", "--version"}
+        ),
+        positional_args=1,
+    ),
+    "chroot": _WrapperSpec(
+        long_flag_opts=frozenset({"--skip-chdir", "--help", "--version"}),
+        long_arg_opts=frozenset({"--userspec", "--groups"}),
+        positional_args=1,
+    ),
+    "strace": _WrapperSpec(
+        short_flag_opts=frozenset("cCdDfFikqrTtVvwxXyYzZh"),
+        short_arg_opts=frozenset("abeEoOpPsSuUI"),
+        long_flag_opts=frozenset(
+            {
+                "--summary-only",
+                "--summary",
+                "--debug",
+                "--follow-forks",
+                "--instruction-pointer",
+                "--stack-traces",
+                "--quiet",
+                "--relative-timestamps",
+                "--absolute-timestamps",
+                "--syscall-times",
+                "--no-abbrev",
+                "--version",
+                "--summary-wall-clock",
+                "--strings-in-hex",
+                "--decode-fds",
+                "--decode-pids",
+                "--successful-only",
+                "--failed-only",
+                "--help",
+                "--seccomp-bpf",
+            }
+        ),
+        long_arg_opts=frozenset(
+            {
+                "--columns",
+                "--detach-on",
+                "--trace",
+                "--signal",
+                "--status",
+                "--trace-fds",
+                "--abbrev",
+                "--verbose",
+                "--raw",
+                "--read",
+                "--write",
+                "--inject",
+                "--fault",
+                "--env",
+                "--output",
+                "--output-separately",
+                "--overhead",
+                "--attach",
+                "--trace-path",
+                "--string-limit",
+                "--summary-sort-by",
+                "--user",
+                "--output-format",
+                "--interruptible",
+            }
+        ),
+    ),
+    "ltrace": _WrapperSpec(
+        short_flag_opts=frozenset("bcCdfiLnrStTVh"),
+        short_arg_opts=frozenset("aADeFlopsuwx"),
+        long_flag_opts=frozenset(
+            {"--demangle", "--debug", "--no-signals", "--version", "--help"}
+        ),
+        long_arg_opts=frozenset(
+            {
+                "--align",
+                "--config",
+                "--filter",
+                "--indent",
+                "--library",
+                "--output",
+                "--attach",
+                "--strsize",
+                "--username",
+            }
+        ),
+    ),
+    "setsid": _WrapperSpec(
+        short_flag_opts=frozenset("cfwhV"),
+        long_flag_opts=frozenset({"--ctty", "--fork", "--wait", "--help", "--version"}),
+    ),
+    "command": _WrapperSpec(
+        short_flag_opts=frozenset("pvV"),
+    ),
+    "builtin": _WrapperSpec(),
+    "exec": _WrapperSpec(
+        short_flag_opts=frozenset("cl"),
+        short_arg_opts=frozenset("a"),
+    ),
+    "xargs": _WrapperSpec(
+        short_flag_opts=frozenset("0oprtx"),
+        short_arg_opts=frozenset("adEILnPs"),
+        short_opt_arg_opts=frozenset("eil"),
+        long_flag_opts=frozenset(
+            {
+                "--null",
+                "--open-tty",
+                "--interactive",
+                "--no-run-if-empty",
+                "--verbose",
+                "--exit",
+                "--show-limits",
+                "--help",
+                "--version",
+            }
+        ),
+        long_arg_opts=frozenset(
+            {
+                "--arg-file",
+                "--delimiter",
+                "--max-args",
+                "--max-procs",
+                "--max-chars",
+                "--process-slot-var",
+            }
+        ),
+        long_opt_arg_opts=frozenset({"--eof", "--replace", "--max-lines"}),
+    ),
+    "unshare": _WrapperSpec(
+        short_flag_opts=frozenset("mupinUCrTfkVh"),
+        short_arg_opts=frozenset("RwgS"),
+        long_flag_opts=frozenset(
+            {
+                "--mount",
+                "--uts",
+                "--ipc",
+                "--net",
+                "--pid",
+                "--user",
+                "--cgroup",
+                "--time",
+                "--fork",
+                "--map-root-user",
+                "--map-current-user",
+                "--keep-caps",
+                "--help",
+                "--version",
+            }
+        ),
+        long_arg_opts=frozenset(
+            {
+                "--root",
+                "--wd",
+                "--setgroups",
+                "--propagation",
+                "--map-user",
+                "--map-group",
+                "--kill-child",
+                "--mount-proc",
+            }
+        ),
+    ),
+    "chrt": _WrapperSpec(
+        short_flag_opts=frozenset("abdfiomprRvhV"),
+        long_flag_opts=frozenset(
+            {
+                "--all-tasks",
+                "--batch",
+                "--deadline",
+                "--fifo",
+                "--idle",
+                "--other",
+                "--pid",
+                "--rr",
+                "--reset-on-fork",
+                "--verbose",
+                "--help",
+                "--version",
+            }
+        ),
+        positional_args=1,
+    ),
+    "watch": _WrapperSpec(
+        short_flag_opts=frozenset("bcegpqtxhV"),
+        short_arg_opts=frozenset("dn"),
+        long_flag_opts=frozenset(
+            {
+                "--beep",
+                "--color",
+                "--errexit",
+                "--chgexit",
+                "--precise",
+                "--equexit",
+                "--no-title",
+                "--exec",
+                "--help",
+                "--version",
+            }
+        ),
+        long_arg_opts=frozenset({"--interval"}),
+        long_opt_arg_opts=frozenset({"--differences"}),
+    ),
+    "busybox": _WrapperSpec(),
+}
+
+_ENV_SHORT_FLAG_OPTS = frozenset("i0v")
+_ENV_SHORT_ARG_OPTS = frozenset("uCa")
+_ENV_LONG_FLAG_OPTS = frozenset(
     {
-        "-u",
-        "-U",
-        "-g",
-        "-c",
-        "-C",
-        "-T",
-        "-t",
-        "-h",
-        "-p",
-        "-r",
-        "--user",
-        "--group",
-        "--host",
-        "--prompt",
-        "--chroot",
-        "--chdir",
+        "--ignore-environment",
+        "--null",
+        "--debug",
+        "--help",
+        "--version",
+        "--list-signal-handling",
     }
 )
-_SU_ARG_OPTS = frozenset({"-s", "--shell", "-g", "--group", "-G", "--supp-group"})
-_ENV_ARG_OPTS = frozenset({"-u", "-C", "--unset", "--chdir"})
-_IONICE_ARG_OPTS = frozenset({"-c", "-n", "-p", "-P", "-u"})
-_TIMEOUT_ARG_OPTS = frozenset({"-s", "-k", "--signal", "--kill-after"})
-_XARGS_ARG_OPTS = frozenset(
-    {
-        "-a",
-        "-d",
-        "-E",
-        "-I",
-        "-L",
-        "-n",
-        "-P",
-        "-s",
-        "--arg-file",
-        "--delimiter",
-        "--max-lines",
-        "--max-args",
-        "--max-procs",
-        "--max-chars",
-    }
+_ENV_LONG_ARG_OPTS = frozenset({"--unset", "--chdir", "--argv0"})
+_ENV_LONG_OPT_ARG_OPTS = frozenset(
+    {"--default-signal", "--ignore-signal", "--block-signal"}
 )
+
+_SU_SHORT_FLAG_OPTS = frozenset("flmpPhV")
+_SU_SHORT_ARG_OPTS = frozenset("gGsw")
+_SU_LONG_FLAG_OPTS = frozenset(
+    {"--fast", "--login", "--preserve-environment", "--pty", "--help", "--version"}
+)
+_SU_LONG_ARG_OPTS = frozenset(
+    {"--group", "--supp-group", "--shell", "--whitelist-environment"}
+)
+_SU_CMD_LONG_OPTS = frozenset({"--command", "--session-command"})
+
 _FIND_EXEC_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
-_SHELL_INTERPRETERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_SHELL_INTERPRETERS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "ash", "mksh"})
+_SHELL_LONG_ARG_OPTS = frozenset({"--rcfile", "--init-file"})
+_SHELL_LONG_FLAG_OPTS = frozenset(
+    {
+        "--debugger",
+        "--dump-po-strings",
+        "--dump-strings",
+        "--help",
+        "--login",
+        "--noediting",
+        "--noprofile",
+        "--norc",
+        "--posix",
+        "--restricted",
+        "--verbose",
+        "--version",
+    }
+)
+_SPECIAL_WRAPPERS = frozenset({"env", "su", "runuser", "eval", "find"})
+_ALL_KNOWN_WRAPPERS = (
+    frozenset(_WRAPPER_SPECS) | _SPECIAL_WRAPPERS | _SHELL_INTERPRETERS
+)
 _MAX_RM_PARSE_DEPTH = 8
 
 
-def _is_redirect_token(token: str) -> bool:
-    """判断 token 是否为 shell 重定向操作符（如 >, >>, >&, &>, <）。"""
-    return (
-        bool(token)
-        and any(ch in _SHELL_REDIRECT_CHARS for ch in token)
-        and all(ch in "<>&|" for ch in token)
-    )
+def _rm_args_have_dangerous_flag(args: list[_ShellToken]) -> bool:
+    """判断 rm 参数列表中是否包含递归/强制删除选项（遵循 `--` 结束选项解析规则）。
 
-
-def _rm_args_have_dangerous_flag(args: list[str]) -> bool:
-    """判断 rm 参数列表中是否包含递归/强制删除选项（遵循 `--` 结束选项解析规则）。"""
+    仅跳过由未引号/未转义重定向操作符引出的重定向目标；引号/转义形式的 `">"` 或 `\\>`
+    是普通文件名操作数，不会吞噬后续参数。
+    """
     skip_redirect_target = False
-    for arg in args:
+    for token in args:
         if skip_redirect_target:
             skip_redirect_target = False
             continue
-        if _is_redirect_token(arg):
+        if token.is_redirect:
             skip_redirect_target = True
             continue
+        if token.has_malformed_expansion:
+            return True
+        arg = token.text
         if arg == "--":
             return False
-        if arg in ("--recursive", "--force"):
-            return True
+        if arg.startswith("--") and len(arg) >= 3:
+            if "--recursive".startswith(arg) or "--force".startswith(arg):
+                return True
+            continue
         if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
             flags = arg[1:]
             if flags.isalpha() and any(flag in "rRf" for flag in flags):
@@ -224,286 +577,917 @@ def _rm_args_have_dangerous_flag(args: list[str]) -> bool:
     return False
 
 
-def _extract_command_substitutions(text: str) -> list[str]:
-    """提取 token 内部的 $(...) 与 `...` 命令替换片段。"""
-    subs: list[str] = []
-    idx = 0
-    length = len(text)
-    while idx < length:
-        pos = text.find("$(", idx)
-        if pos == -1:
-            break
-        depth = 1
-        cur = pos + 2
-        while cur < length and depth > 0:
-            if text[cur] == "(":
-                depth += 1
-            elif text[cur] == ")":
-                depth -= 1
-            cur += 1
-        if depth == 0:
-            inner = text[pos + 2 : cur - 1].strip()
-            if inner:
-                subs.append(inner)
-            idx = cur
-        else:
-            # 未闭合的 $(... 按保守策略检查剩余片段
-            inner = text[pos + 2 :].strip()
-            if inner:
-                subs.append(inner)
-            break
-    for match in _BACKTICK_RE.finditer(text):
-        inner = match.group(1).strip()
-        if inner:
-            subs.append(inner)
-    return subs
+def _decode_ansi_c_quoted(command: str, start: int) -> tuple[str, int, bool]:
+    """按 Bash ANSI-C 引号 `$'...'` 语义解码字符串。
 
-
-def _split_unquoted_segments(command: str) -> list[str]:
-    """按未引用的 shell 控制分隔符拆分命令，保留引号内与反斜杠转义字符的字面含义。"""
-    segments: list[str] = []
-    buf: list[str] = []
-    in_single = False
-    in_double = False
-    escaped = False
-    idx = 0
+    Returns:
+        (decoded_text, next_index, is_malformed)
+    """
+    idx = start + 2
     length = len(command)
+    out: list[str] = []
+    malformed = False
 
     while idx < length:
         ch = command[idx]
-        if escaped:
-            if ch == "\n":
-                # POSIX 行续接（\<newline>）：非单引号状态下直接删除续行符
-                if buf and buf[-1] == "\\":
-                    buf.pop()
-            else:
-                buf.append(ch)
-            escaped = False
+        if ch == "'":
+            return "".join(out), idx + 1, malformed
+        if ch == "\x00":
+            malformed = True
             idx += 1
+            continue
+        if ch != "\\":
+            out.append(ch)
+            idx += 1
+            continue
+
+        idx += 1
+        if idx >= length:
+            out.append("\\")
+            return "".join(out), idx, True
+
+        esc = command[idx]
+        if esc in _ANSI_C_SIMPLE_ESCAPES:
+            out.append(_ANSI_C_SIMPLE_ESCAPES[esc])
+            idx += 1
+            continue
+        if esc == "x":
+            hex_start = idx + 1
+            hex_end = hex_start
+            while (
+                hex_end < length
+                and hex_end - hex_start < 2
+                and command[hex_end] in _HEX_DIGITS
+            ):
+                hex_end += 1
+            if hex_end > hex_start:
+                byte_val = int(command[hex_start:hex_end], 16)
+                if byte_val == 0:
+                    malformed = True
+                else:
+                    out.append(chr(byte_val))
+                idx = hex_end
+            else:
+                out.append("\\x")
+                malformed = True
+                idx += 1
+            continue
+        if esc in ("u", "U"):
+            max_digits = 4 if esc == "u" else 8
+            hex_start = idx + 1
+            hex_end = hex_start
+            while (
+                hex_end < length
+                and hex_end - hex_start < max_digits
+                and command[hex_end] in _HEX_DIGITS
+            ):
+                hex_end += 1
+            if hex_end > hex_start:
+                codepoint = int(command[hex_start:hex_end], 16)
+                if 0 < codepoint <= 0x10FFFF and not (0xD800 <= codepoint <= 0xDFFF):
+                    out.append(chr(codepoint))
+                else:
+                    malformed = True
+                idx = hex_end
+            else:
+                out.append("\\" + esc)
+                malformed = True
+                idx += 1
+            continue
+        if esc in _OCT_DIGITS:
+            oct_end = idx
+            while (
+                oct_end < length
+                and oct_end - idx < 3
+                and command[oct_end] in _OCT_DIGITS
+            ):
+                oct_end += 1
+            oct_val = int(command[idx:oct_end], 8) & 0xFF
+            if oct_val == 0:
+                malformed = True
+            else:
+                out.append(chr(oct_val))
+            idx = oct_end
+            continue
+        if esc == "c":
+            if idx + 1 >= length:
+                malformed = True
+                idx += 1
+                continue
+            ctrl = command[idx + 1]
+            if ord(ctrl) >= 0x80:
+                malformed = True
+                idx += 2
+                continue
+            if ctrl == "\\" and idx + 2 < length and command[idx + 2] == "\\":
+                out.append("\x1c")
+                idx += 3
+            elif ctrl == "?":
+                out.append("\x7f")
+                idx += 2
+            else:
+                ctrl_val = ord(ctrl.upper()) ^ 0x40
+                if ctrl_val == 0:
+                    malformed = True
+                else:
+                    out.append(chr(ctrl_val))
+                idx += 2
+            continue
+
+        out.append("\\" + esc)
+        idx += 1
+
+    return "".join(out), idx, True
+
+
+def _scan_paren_substitution(command: str, start: int) -> tuple[str, str, int]:
+    """扫描平衡的 `$(...)`、`<( ... )` 或 `>( ... )`，返回 `(raw, inner, next_idx)`。"""
+    length = len(command)
+    cur = start + 2
+    depth = 1
+    in_single = False
+    in_double = False
+    escaped = False
+
+    while cur < length and depth > 0:
+        ch = command[cur]
+        if escaped:
+            escaped = False
+            cur += 1
             continue
         if in_single:
-            buf.append(ch)
             if ch == "'":
                 in_single = False
-            idx += 1
+            cur += 1
             continue
         if in_double:
-            buf.append(ch)
             if ch == "\\":
                 escaped = True
             elif ch == '"':
                 in_double = False
-            idx += 1
+            cur += 1
             continue
-
         if ch == "\\":
-            buf.append(ch)
             escaped = True
-            idx += 1
+            cur += 1
+            continue
+        if ch == "$" and cur + 1 < length and command[cur + 1] == "'":
+            _, cur, _ = _decode_ansi_c_quoted(command, cur)
             continue
         if ch == "'":
-            buf.append(ch)
             in_single = True
-            idx += 1
+            cur += 1
             continue
         if ch == '"':
-            buf.append(ch)
             in_double = True
+            cur += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        cur += 1
+
+    if depth == 0:
+        return command[start:cur], command[start + 2 : cur - 1], cur
+    return command[start:], command[start + 2 :], length
+
+
+def _scan_backtick_substitution(
+    command: str, start: int, in_double: bool
+) -> tuple[str, str, int]:
+    """扫描反引号命令替换，返回 `(raw, inner, next_idx)`。"""
+    length = len(command)
+    cur = start + 1
+    inner_buf: list[str] = []
+
+    while cur < length:
+        ch = command[cur]
+        if ch == "\\":
+            if cur + 1 < length:
+                nxt = command[cur + 1]
+                if nxt in ("$", "`", "\\") or (in_double and nxt == '"'):
+                    inner_buf.append(nxt)
+                    cur += 2
+                    continue
+                if nxt == "\n":
+                    cur += 2
+                    continue
+            inner_buf.append("\\")
+            cur += 1
+            continue
+        if ch == "`":
+            return command[start : cur + 1], "".join(inner_buf), cur + 1
+        inner_buf.append(ch)
+        cur += 1
+
+    return command[start:], "".join(inner_buf), length
+
+
+def _read_double_quoted(
+    command: str,
+    start: int,
+    word_buf: list[str],
+    cur_subs: list[str],
+) -> int:
+    """读取从 `start`（指向开头 `"`）开始的双引号字符串并提取内部命令替换。"""
+    length = len(command)
+    idx = start + 1
+    while idx < length:
+        ch = command[idx]
+        if ch == '"':
+            return idx + 1
+        if ch == "\\" and idx + 1 < length:
+            nxt = command[idx + 1]
+            if nxt == "\n":
+                idx += 2
+                continue
+            if nxt in ('"', "\\", "$", "`"):
+                word_buf.append(nxt)
+                idx += 2
+                continue
+            word_buf.append("\\")
+            word_buf.append(nxt)
+            idx += 2
+            continue
+        if ch == "$" and idx + 1 < length and command[idx + 1] == "(":
+            raw_span, inner, idx = _scan_paren_substitution(command, idx)
+            word_buf.append(raw_span)
+            if inner.strip():
+                cur_subs.append(inner)
+            continue
+        if ch == "`":
+            raw_span, inner, idx = _scan_backtick_substitution(
+                command, idx, in_double=True
+            )
+            word_buf.append(raw_span)
+            if inner.strip():
+                cur_subs.append(inner)
+            continue
+        word_buf.append(ch)
+        idx += 1
+    return length
+
+
+def _tokenize_shell_segments(command: str) -> list[_ShellSegment]:
+    """按 Bash 词法拆分命令为独立子命令片段，保留引号/转义与重定向操作符来源。"""
+    segments: list[_ShellSegment] = []
+    cur_tokens: list[_ShellToken] = []
+    cur_subs: list[str] = []
+    word_buf: list[str] = []
+    word_active = False
+    word_quoted = False
+    word_malformed = False
+
+    def flush_word() -> None:
+        nonlocal word_buf, word_active, word_quoted, word_malformed
+        if word_active:
+            cur_tokens.append(
+                _ShellToken(
+                    text="".join(word_buf),
+                    is_redirect=False,
+                    quoted=word_quoted,
+                    has_malformed_expansion=word_malformed,
+                )
+            )
+            word_buf = []
+            word_active = False
+            word_quoted = False
+            word_malformed = False
+
+    def flush_segment() -> None:
+        nonlocal cur_tokens, cur_subs
+        flush_word()
+        if cur_tokens or cur_subs:
+            segments.append(_ShellSegment(tokens=cur_tokens, substitutions=cur_subs))
+            cur_tokens = []
+            cur_subs = []
+
+    idx = 0
+    length = len(command)
+    while idx < length:
+        ch = command[idx]
+
+        if ch in " \t\r":
+            flush_word()
+            idx += 1
+            continue
+        if ch == "\n":
+            flush_segment()
+            idx += 1
+            continue
+        if ch == "#" and not word_active:
+            while idx < length and command[idx] != "\n":
+                idx += 1
+            continue
+        if ch == "\\":
+            if idx + 1 < length and command[idx + 1] == "\n":
+                idx += 2
+                continue
+            word_active = True
+            word_quoted = True
+            if idx + 1 < length:
+                word_buf.append(command[idx + 1])
+                idx += 2
+            else:
+                word_buf.append("\\")
+                idx += 1
+            continue
+        if ch == "$" and idx + 1 < length and command[idx + 1] == "'":
+            decoded, idx, malformed = _decode_ansi_c_quoted(command, idx)
+            word_active = True
+            word_quoted = True
+            if malformed:
+                word_malformed = True
+            word_buf.append(decoded)
+            continue
+        if ch == "$" and idx + 1 < length and command[idx + 1] == '"':
+            word_active = True
+            word_quoted = True
+            idx = _read_double_quoted(command, idx + 1, word_buf, cur_subs)
+            continue
+        if ch == "$" and idx + 1 < length and command[idx + 1] == "(":
+            raw_span, inner, idx = _scan_paren_substitution(command, idx)
+            word_active = True
+            word_buf.append(raw_span)
+            if inner.strip():
+                cur_subs.append(inner)
+            continue
+        if ch in "<>" and idx + 1 < length and command[idx + 1] == "(":
+            raw_span, inner, idx = _scan_paren_substitution(command, idx)
+            word_active = True
+            word_buf.append(raw_span)
+            if inner.strip():
+                cur_subs.append(inner)
+            continue
+        if ch == "`":
+            raw_span, inner, idx = _scan_backtick_substitution(
+                command, idx, in_double=False
+            )
+            word_active = True
+            word_buf.append(raw_span)
+            if inner.strip():
+                cur_subs.append(inner)
+            continue
+        if ch == "'":
+            word_active = True
+            word_quoted = True
+            idx += 1
+            while idx < length and command[idx] != "'":
+                word_buf.append(command[idx])
+                idx += 1
+            if idx < length:
+                idx += 1
+            continue
+        if ch == '"':
+            word_active = True
+            word_quoted = True
+            idx = _read_double_quoted(command, idx, word_buf, cur_subs)
+            continue
+
+        # 先识别未引号重定向操作符，避免 `&>` 被单字符 `&` 误切分
+        redir_op = ""
+        if command[idx : idx + 3] in _REDIRECT_OPS_3:
+            redir_op = command[idx : idx + 3]
+        elif command[idx : idx + 2] in _REDIRECT_OPS_2:
+            redir_op = command[idx : idx + 2]
+        elif ch in "<>":
+            redir_op = ch
+        if redir_op:
+            if (
+                word_active
+                and not word_quoted
+                and not redir_op.startswith("&")
+                and "".join(word_buf).isdigit()
+            ):
+                fd_op = "".join(word_buf) + redir_op
+                word_buf = []
+                word_active = False
+                word_quoted = False
+                word_malformed = False
+                cur_tokens.append(_ShellToken(text=fd_op, is_redirect=True))
+            else:
+                flush_word()
+                cur_tokens.append(_ShellToken(text=redir_op, is_redirect=True))
+            idx += len(redir_op)
+            continue
+
+        if command[idx : idx + 3] == ";;&":
+            flush_segment()
+            idx += 3
+            continue
+        if command[idx : idx + 2] in _CONTROL_OPS_2:
+            flush_segment()
+            idx += 2
+            continue
+        if ch in _CONTROL_OPS_1:
+            flush_segment()
             idx += 1
             continue
 
-        # 保留重定向组合 >&, <&, &>, &>> 属于同一子命令，不作命令切分
-        if ch == "&" and idx + 1 < length and command[idx + 1] == ">":
-            buf.append("&>")
-            idx += 2
-            continue
-        if ch in "<>" and idx + 1 < length and command[idx + 1] == "&":
-            buf.append(ch + "&")
-            idx += 2
-            continue
+        word_active = True
+        word_buf.append(ch)
+        idx += 1
 
-        if ch in _SHELL_SEPARATOR_CHARS:
-            seg = "".join(buf).strip()
-            if seg:
-                segments.append(seg)
+    flush_segment()
+    return segments
+
+
+def _split_env_string(text: str) -> list[_ShellToken]:
+    """按 GNU `env -S` 语义拆分字符串参数，返回普通参数 token 列表。"""
+    tokens: list[_ShellToken] = []
+    buf: list[str] = []
+    active = False
+    quoted = False
+    malformed = False
+
+    def flush() -> None:
+        nonlocal buf, active, quoted, malformed
+        if active:
+            tokens.append(
+                _ShellToken(
+                    text="".join(buf),
+                    is_redirect=False,
+                    quoted=quoted,
+                    has_malformed_expansion=malformed,
+                )
+            )
             buf = []
+            active = False
+            quoted = False
+            malformed = False
+
+    idx = 0
+    length = len(text)
+    env_escapes = {
+        "c": "",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "_": " ",
+        "#": "#",
+        "$": "$",
+        "'": "'",
+        '"': '"',
+        "\\": "\\",
+    }
+    while idx < length:
+        ch = text[idx]
+        if ch in " \t\r\n":
+            flush()
             idx += 1
             continue
-
+        if ch == "#" and not active:
+            break
+        if ch == "\\" and idx + 1 < length:
+            nxt = text[idx + 1]
+            if nxt == "c":
+                break
+            if nxt == "_":
+                # GNU env -S 中未加引号的 \_ 作为参数分隔符（区别于双引号内字面空格）
+                flush()
+                idx += 2
+                continue
+            active = True
+            quoted = True
+            buf.append(env_escapes.get(nxt, nxt))
+            idx += 2
+            continue
+        if ch == "$" and idx + 1 < length and text[idx + 1] == "'":
+            decoded, idx, is_bad = _decode_ansi_c_quoted(text, idx)
+            active = True
+            quoted = True
+            if is_bad:
+                malformed = True
+            buf.append(decoded)
+            continue
+        if ch == "'":
+            active = True
+            quoted = True
+            idx += 1
+            while idx < length and text[idx] != "'":
+                if text[idx] == "\\" and idx + 1 < length and text[idx + 1] == "'":
+                    buf.append("'")
+                    idx += 2
+                    continue
+                buf.append(text[idx])
+                idx += 1
+            if idx < length:
+                idx += 1
+            continue
+        if ch == '"':
+            active = True
+            quoted = True
+            idx += 1
+            while idx < length and text[idx] != '"':
+                if text[idx] == "\\" and idx + 1 < length:
+                    nxt = text[idx + 1]
+                    buf.append(env_escapes.get(nxt, "\\" + nxt))
+                    idx += 2
+                    continue
+                buf.append(text[idx])
+                idx += 1
+            if idx < length:
+                idx += 1
+            continue
+        active = True
         buf.append(ch)
         idx += 1
 
-    seg = "".join(buf).strip()
-    if seg:
-        segments.append(seg)
-    return segments
+    flush()
+    return tokens
 
 
-def _tokenize_shell_segments(command: str) -> list[list[str]]:
-    """按 shell 操作符拆分命令为独立子命令 token 列表；引号异常时降级保守拆分。"""
-    segments: list[list[str]] = []
-    for raw_segment in _split_unquoted_segments(command):
-        try:
-            lexer = shlex.shlex(raw_segment, posix=True, punctuation_chars="<>")
-            lexer.whitespace = " \t\r\n"
-            lexer.whitespace_split = True
-            lexer.commenters = ""
-            parts = list(lexer)
-        except ValueError:
-            parts = [
-                part.strip("\"'")
-                for part in _FALLBACK_SPLIT_RE.sub(" ", raw_segment).split()
-                if part.strip("\"'")
-            ]
-        if parts:
-            segments.append(parts)
-    return segments
-
-
-def _skip_wrapper_options(
-    tokens: list[str],
+def _parse_wrapper_options(
+    tokens: list[_ShellToken],
     start: int,
-    arg_opts: frozenset[str],
-    skip_env_assign: bool = False,
-) -> int:
-    """跳过命令包装器自身的选项及带参选项值，返回被包装命令的起始下标。"""
+    spec: _WrapperSpec,
+) -> tuple[int, bool]:
+    """解析受支持包装器的短/长选项、短选项簇及前置位置参数。
+
+    Returns:
+        (next_index, unresolved): 下一个待解析命令的起始下标，以及是否遇到未知选项。
+    """
     idx = start
+    unresolved = False
     while idx < len(tokens):
-        tok = tokens[idx]
-        if tok == "--":
+        token = tokens[idx]
+        if token.is_redirect:
+            idx += 2
+            continue
+        text = token.text
+        if text == "--":
             idx += 1
             break
-        if skip_env_assign and _ENV_ASSIGN_RE.match(tok):
+        if spec.allow_env_assign and _ENV_ASSIGN_RE.match(text):
             idx += 1
             continue
-        if tok.startswith("-") and len(tok) > 1:
-            idx += 2 if tok in arg_opts else 1
+        if spec.allow_lone_dash_flag and text == "-":
+            idx += 1
+            continue
+        if text.startswith("--") and len(text) > 2:
+            if "=" in text:
+                opt_name = text.split("=", 1)[0]
+                if (
+                    opt_name not in spec.long_arg_opts
+                    and opt_name not in spec.long_opt_arg_opts
+                    and opt_name not in spec.long_flag_opts
+                ):
+                    unresolved = True
+                idx += 1
+                continue
+            if text in spec.long_arg_opts:
+                idx += 2
+                continue
+            if text in spec.long_flag_opts or text in spec.long_opt_arg_opts:
+                idx += 1
+                continue
+            unresolved = True
+            idx += 1
+            continue
+        if text.startswith("-") and len(text) > 1:
+            if spec.allow_numeric_short_opt and _NUMERIC_SHORT_OPT_RE.match(text):
+                idx += 1
+                continue
+            pos = 1
+            consumed = False
+            while pos < len(text):
+                opt_ch = text[pos]
+                if opt_ch in spec.short_arg_opts:
+                    idx += 1 if pos + 1 < len(text) else 2
+                    consumed = True
+                    break
+                if opt_ch in spec.short_opt_arg_opts:
+                    idx += 1
+                    consumed = True
+                    break
+                if opt_ch in spec.short_flag_opts:
+                    pos += 1
+                    continue
+                unresolved = True
+                idx += 1
+                consumed = True
+                break
+            if not consumed:
+                idx += 1
             continue
         break
-    return idx
+
+    skipped = 0
+    while idx < len(tokens) and skipped < spec.positional_args:
+        if tokens[idx].is_redirect:
+            idx += 2
+            continue
+        idx += 1
+        skipped += 1
+
+    return idx, unresolved
 
 
-def _segment_has_dangerous_rm(tokens: list[str], depth: int) -> bool:
-    """分析单个子命令 token 列表，识别直接或经常见包装器调用的危险 rm。"""
-    if not tokens or depth > _MAX_RM_PARSE_DEPTH:
+def _fallback_scan_remaining(
+    tokens: list[_ShellToken],
+    start: int,
+    depth: int,
+    include_wrappers: bool,
+) -> bool:
+    """对未知选项或未建模启动器的剩余参数做保守回退扫描，绝不将解析歧义当成安全证明。"""
+    if depth > _MAX_RM_PARSE_DEPTH:
+        return True
+    pos = start
+    while pos < len(tokens):
+        tok = tokens[pos]
+        if tok.is_redirect:
+            pos += 2
+            continue
+        if tok.has_malformed_expansion:
+            return True
+        candidate = tok.text.rsplit("/", 1)[-1]
+        if candidate == "rm":
+            if _rm_args_have_dangerous_flag(tokens[pos + 1 :]):
+                return True
+        elif candidate in _SHELL_INTERPRETERS or (
+            include_wrappers and candidate in _ALL_KNOWN_WRAPPERS
+        ):
+            if _segment_has_dangerous_rm(tokens[pos:], depth + 1):
+                return True
+        pos += 1
+    return False
+
+
+def _segment_has_dangerous_rm(
+    tokens: list[_ShellToken],
+    depth: int,
+    substitutions: list[str] | None = None,
+) -> bool:
+    """分析单个子命令 token 列表，识别直接、嵌套或经包装器调用的危险 rm。
+
+    达到递归深度上限 `_MAX_RM_PARSE_DEPTH` 时采取保守策略返回 `True`（fail-closed），
+    确保未完成检查的命令进入沙箱而不是被放行。
+    """
+    if depth > _MAX_RM_PARSE_DEPTH:
+        return True
+    if substitutions:
+        for sub_cmd in substitutions:
+            if _is_dangerous_rm_command(sub_cmd, _depth=depth + 1):
+                return True
+    if not tokens:
         return False
-
-    # 先递归检查 token 内部嵌套的 $(...) / `...` 命令替换
-    for tok in tokens:
-        if "$(" in tok or "`" in tok:
-            for sub_cmd in _extract_command_substitutions(tok):
-                if _is_dangerous_rm_command(sub_cmd, _depth=depth + 1):
-                    return True
 
     idx = 0
     while idx < len(tokens):
         # 跳过前置 shell 关键字、环境变量赋值及前导重定向（含 2>/dev/null、&>/dev/null）
         while idx < len(tokens):
             tok = tokens[idx]
-            if tok in _SHELL_LEADING_KEYWORDS or _ENV_ASSIGN_RE.match(tok):
-                idx += 1
-                continue
-            if (
-                (tok.isdigit() or tok == "&")
-                and idx + 1 < len(tokens)
-                and _is_redirect_token(tokens[idx + 1])
-            ):
-                idx += 3
-                continue
-            if _is_redirect_token(tok):
+            if tok.is_redirect:
                 idx += 2
+                continue
+            if tok.has_malformed_expansion:
+                return True
+            if (
+                not tok.quoted and tok.text in _SHELL_LEADING_KEYWORDS
+            ) or _ENV_ASSIGN_RE.match(tok.text):
+                idx += 1
                 continue
             break
 
         if idx >= len(tokens):
             return False
 
-        cmd = tokens[idx].rsplit("/", 1)[-1]
+        cmd_token = tokens[idx]
+        if cmd_token.has_malformed_expansion:
+            return True
+        cmd = cmd_token.text.rsplit("/", 1)[-1]
         if cmd == "rm":
             return _rm_args_have_dangerous_flag(tokens[idx + 1 :])
 
-        if cmd == "sudo":
-            idx = _skip_wrapper_options(tokens, idx + 1, _SUDO_ARG_OPTS)
-            continue
-        if cmd == "time":
-            idx = _skip_wrapper_options(tokens, idx + 1, frozenset())
-            continue
-        if cmd == "busybox":
-            idx += 1
-            continue
         if cmd == "eval":
             eval_start = idx + 1
-            if eval_start < len(tokens) and tokens[eval_start] == "--":
+            if (
+                eval_start < len(tokens)
+                and not tokens[eval_start].is_redirect
+                and tokens[eval_start].text == "--"
+            ):
                 eval_start += 1
-            eval_script = " ".join(tokens[eval_start:])
+            eval_parts: list[str] = []
+            scan = eval_start
+            while scan < len(tokens):
+                if tokens[scan].is_redirect:
+                    scan += 2
+                    continue
+                eval_parts.append(tokens[scan].text)
+                scan += 1
+            eval_script = " ".join(eval_parts)
+            if not eval_script.strip():
+                return False
             return _is_dangerous_rm_command(eval_script, _depth=depth + 1)
+
         if cmd == "env":
             scan = idx + 1
+            unresolved = False
             while scan < len(tokens):
                 tok = tokens[scan]
-                if tok == "--":
-                    scan += 1
-                    break
-                if tok in ("-S", "--split-string") and scan + 1 < len(tokens):
-                    if _is_dangerous_rm_command(tokens[scan + 1], _depth=depth + 1):
-                        return True
+                if tok.is_redirect:
                     scan += 2
                     continue
-                if tok.startswith("--split-string="):
-                    if _is_dangerous_rm_command(tok.split("=", 1)[1], _depth=depth + 1):
-                        return True
+                text = tok.text
+                if text == "--":
+                    scan += 1
+                    break
+                if text == "-" or _ENV_ASSIGN_RE.match(text):
                     scan += 1
                     continue
-                if _ENV_ASSIGN_RE.match(tok):
+                if text in ("-S", "--split-string"):
+                    if scan + 1 >= len(tokens):
+                        return False
+                    split_tokens = _split_env_string(tokens[scan + 1].text)
+                    combined = (
+                        [_ShellToken("env")] + split_tokens + tokens[scan + 2 :]
+                    )
+                    return _segment_has_dangerous_rm(combined, depth + 1)
+                if text.startswith("--split-string="):
+                    split_tokens = _split_env_string(text.split("=", 1)[1])
+                    combined = (
+                        [_ShellToken("env")] + split_tokens + tokens[scan + 1 :]
+                    )
+                    return _segment_has_dangerous_rm(combined, depth + 1)
+                if text.startswith("--") and len(text) > 2:
+                    if "=" in text:
+                        opt_name = text.split("=", 1)[0]
+                        if (
+                            opt_name not in _ENV_LONG_ARG_OPTS
+                            and opt_name not in _ENV_LONG_OPT_ARG_OPTS
+                            and opt_name not in _ENV_LONG_FLAG_OPTS
+                        ):
+                            unresolved = True
+                        scan += 1
+                        continue
+                    if text in _ENV_LONG_ARG_OPTS:
+                        scan += 2
+                        continue
+                    if text in _ENV_LONG_FLAG_OPTS or text in _ENV_LONG_OPT_ARG_OPTS:
+                        scan += 1
+                        continue
+                    unresolved = True
                     scan += 1
                     continue
-                if tok.startswith("-") and len(tok) > 1:
-                    scan += 2 if tok in _ENV_ARG_OPTS else 1
+                if text.startswith("-") and len(text) > 1:
+                    pos = 1
+                    consumed = False
+                    while pos < len(text):
+                        opt_ch = text[pos]
+                        if opt_ch == "S":
+                            if pos + 1 < len(text):
+                                split_tokens = _split_env_string(text[pos + 1 :])
+                                rest_start = scan + 1
+                            elif scan + 1 < len(tokens):
+                                split_tokens = _split_env_string(tokens[scan + 1].text)
+                                rest_start = scan + 2
+                            else:
+                                return False
+                            combined = [
+                                _ShellToken("env"),
+                                *split_tokens,
+                                *tokens[rest_start:],
+                            ]
+                            return _segment_has_dangerous_rm(combined, depth + 1)
+                        if opt_ch in _ENV_SHORT_ARG_OPTS:
+                            scan += 1 if pos + 1 < len(text) else 2
+                            consumed = True
+                            break
+                        if opt_ch in _ENV_SHORT_FLAG_OPTS:
+                            pos += 1
+                            continue
+                        unresolved = True
+                        scan += 1
+                        consumed = True
+                        break
+                    if not consumed:
+                        scan += 1
                     continue
                 break
+            if unresolved:
+                return _fallback_scan_remaining(
+                    tokens, idx + 1, depth + 1, include_wrappers=True
+                )
             idx = scan
             continue
-        if cmd == "su":
+
+        if cmd in ("su", "runuser"):
             scan = idx + 1
+            unresolved = False
             while scan < len(tokens):
                 tok = tokens[scan]
-                if tok == "--":
-                    break
-                if tok in ("-c", "--command") and scan + 1 < len(tokens):
-                    return _is_dangerous_rm_command(tokens[scan + 1], _depth=depth + 1)
-                if tok.startswith("--command="):
-                    return _is_dangerous_rm_command(
-                        tok.split("=", 1)[1], _depth=depth + 1
-                    )
-                if tok in _SU_ARG_OPTS:
+                if tok.is_redirect:
                     scan += 2
                     continue
+                text = tok.text
+                if text == "--":
+                    rest = tokens[scan + 1 :]
+                    if _segment_has_dangerous_rm(rest, depth + 1):
+                        return True
+                    if _segment_has_dangerous_rm(
+                        [_ShellToken("bash"), *rest], depth + 1
+                    ):
+                        return True
+                    break
+                if text == "-":
+                    scan += 1
+                    continue
+                if text in _SU_CMD_LONG_OPTS:
+                    if scan + 1 < len(tokens):
+                        if _is_dangerous_rm_command(
+                            tokens[scan + 1].text, _depth=depth + 1
+                        ):
+                            return True
+                        scan += 2
+                        continue
+                    return False
+                if any(text.startswith(opt + "=") for opt in _SU_CMD_LONG_OPTS):
+                    if _is_dangerous_rm_command(
+                        text.split("=", 1)[1], _depth=depth + 1
+                    ):
+                        return True
+                    scan += 1
+                    continue
+                if text.startswith("--") and len(text) > 2:
+                    if "=" in text:
+                        opt_name = text.split("=", 1)[0]
+                        if (
+                            opt_name not in _SU_LONG_ARG_OPTS
+                            and opt_name not in _SU_LONG_FLAG_OPTS
+                        ):
+                            unresolved = True
+                        scan += 1
+                        continue
+                    if text in _SU_LONG_ARG_OPTS:
+                        scan += 2
+                        continue
+                    if text in _SU_LONG_FLAG_OPTS:
+                        scan += 1
+                        continue
+                    unresolved = True
+                    scan += 1
+                    continue
+                if text.startswith("-") and len(text) > 1:
+                    pos = 1
+                    consumed = False
+                    while pos < len(text):
+                        opt_ch = text[pos]
+                        if opt_ch == "c":
+                            if pos + 1 < len(text):
+                                if _is_dangerous_rm_command(
+                                    text[pos + 1 :], _depth=depth + 1
+                                ):
+                                    return True
+                                scan += 1
+                                consumed = True
+                                break
+                            if scan + 1 < len(tokens):
+                                if _is_dangerous_rm_command(
+                                    tokens[scan + 1].text, _depth=depth + 1
+                                ):
+                                    return True
+                                scan += 2
+                                consumed = True
+                                break
+                            return False
+                        if opt_ch in _SU_SHORT_ARG_OPTS:
+                            scan += 1 if pos + 1 < len(text) else 2
+                            consumed = True
+                            break
+                        if opt_ch in _SU_SHORT_FLAG_OPTS:
+                            pos += 1
+                            continue
+                        unresolved = True
+                        scan += 1
+                        consumed = True
+                        break
+                    if not consumed:
+                        scan += 1
+                    continue
                 scan += 1
+            if unresolved:
+                return _fallback_scan_remaining(
+                    tokens, idx + 1, depth + 1, include_wrappers=True
+                )
             return False
-        if cmd == "command":
-            idx = _skip_wrapper_options(tokens, idx + 1, frozenset())
-            continue
-        if cmd == "nice":
-            idx = _skip_wrapper_options(tokens, idx + 1, frozenset({"-n"}))
-            continue
-        if cmd == "ionice":
-            idx = _skip_wrapper_options(tokens, idx + 1, _IONICE_ARG_OPTS)
-            continue
-        if cmd == "timeout":
-            idx = _skip_wrapper_options(tokens, idx + 1, _TIMEOUT_ARG_OPTS)
-            # 跳过 timeout 的 duration 位置参数
-            idx += 1
-            continue
-        if cmd == "xargs":
-            idx = _skip_wrapper_options(tokens, idx + 1, _XARGS_ARG_OPTS)
-            continue
+
         if cmd == "find":
             scan = idx + 1
             while scan < len(tokens):
-                if tokens[scan] in _FIND_EXEC_FLAGS:
+                tok = tokens[scan]
+                if tok.is_redirect:
+                    scan += 2
+                    continue
+                if tok.text in _FIND_EXEC_FLAGS:
                     sub_start = scan + 1
                     sub_end = sub_start
-                    while sub_end < len(tokens) and tokens[sub_end] not in (";", "+"):
+                    while sub_end < len(tokens) and (
+                        tokens[sub_end].is_redirect
+                        or tokens[sub_end].text not in (";", "+")
+                    ):
                         sub_end += 1
                     if _segment_has_dangerous_rm(tokens[sub_start:sub_end], depth + 1):
                         return True
@@ -511,30 +1495,161 @@ def _segment_has_dangerous_rm(tokens: list[str], depth: int) -> bool:
                 else:
                     scan += 1
             return False
+
         if cmd in _SHELL_INTERPRETERS:
             scan = idx + 1
             has_c = False
+            unresolved = False
             while scan < len(tokens):
                 tok = tokens[scan]
-                if tok == "--":
-                    scan += 1
-                    break
-                if tok in ("-o", "+o", "-O", "+O"):
+                if tok.is_redirect:
                     scan += 2
                     continue
-                if tok.startswith("--"):
+                text = tok.text
+                if text == "--":
+                    scan += 1
+                    break
+                if text in _SHELL_LONG_ARG_OPTS:
+                    scan += 2
+                    continue
+                if text.startswith("--") and len(text) > 2:
+                    opt_name = text.split("=", 1)[0]
+                    if (
+                        opt_name not in _SHELL_LONG_FLAG_OPTS
+                        and opt_name not in _SHELL_LONG_ARG_OPTS
+                    ):
+                        unresolved = True
                     scan += 1
                     continue
-                if tok.startswith(("-", "+")) and len(tok) > 1:
-                    if tok.startswith("-") and "c" in tok[1:]:
+                if text.startswith(("-", "+")) and len(text) > 1:
+                    is_minus = text.startswith("-")
+                    if is_minus and "c" in text[1:]:
                         has_c = True
+                    opt_arg_count = sum(
+                        1 for opt_ch in text[1:] if opt_ch in ("o", "O")
+                    )
                     scan += 1
+                    skipped_opt_args = 0
+                    while scan < len(tokens) and skipped_opt_args < opt_arg_count:
+                        if tokens[scan].is_redirect:
+                            scan += 2
+                            continue
+                        scan += 1
+                        skipped_opt_args += 1
                     continue
                 break
-            if has_c and scan < len(tokens):
-                return _is_dangerous_rm_command(tokens[scan], _depth=depth + 1)
+            if has_c:
+                if unresolved:
+                    for rem in tokens[idx + 1 :]:
+                        if not rem.is_redirect and _is_dangerous_rm_command(
+                            rem.text, _depth=depth + 1
+                        ):
+                            return True
+                    return False
+                while scan < len(tokens) and tokens[scan].is_redirect:
+                    scan += 2
+                if scan < len(tokens):
+                    return _is_dangerous_rm_command(
+                        tokens[scan].text, _depth=depth + 1
+                    )
+                return False
+            if unresolved:
+                for pos in range(idx + 1, len(tokens)):
+                    rem = tokens[pos]
+                    if rem.is_redirect:
+                        continue
+                    if (
+                        rem.text.startswith("-")
+                        and not rem.text.startswith("--")
+                        and "c" in rem.text[1:]
+                    ):
+                        for cand in tokens[pos + 1 :]:
+                            if not cand.is_redirect and _is_dangerous_rm_command(
+                                cand.text, _depth=depth + 1
+                            ):
+                                return True
+                        break
+                return _fallback_scan_remaining(
+                    tokens, idx + 1, depth + 1, include_wrappers=True
+                )
             return False
-        return False
+
+        if cmd == "watch":
+            next_idx, unresolved = _parse_wrapper_options(
+                tokens, idx + 1, _WRAPPER_SPECS["watch"]
+            )
+            if unresolved:
+                if _fallback_scan_remaining(
+                    tokens, idx + 1, depth + 1, include_wrappers=True
+                ):
+                    return True
+                rem_idx = idx + 1
+                while rem_idx < len(tokens):
+                    if tokens[rem_idx].is_redirect:
+                        rem_idx += 2
+                        continue
+                    if _is_dangerous_rm_command(
+                        tokens[rem_idx].text, _depth=depth + 1
+                    ):
+                        return True
+                    rem_idx += 1
+                return False
+            use_exec = False
+            opt_idx = idx + 1
+            while opt_idx < next_idx:
+                opt_tok = tokens[opt_idx]
+                if opt_tok.is_redirect:
+                    opt_idx += 2
+                    continue
+                if opt_tok.text == "--":
+                    break
+                if opt_tok.text == "--exec":
+                    use_exec = True
+                elif (
+                    opt_tok.text.startswith("-")
+                    and not opt_tok.text.startswith("--")
+                    and len(opt_tok.text) > 1
+                ):
+                    for opt_ch in opt_tok.text[1:]:
+                        if opt_ch in ("d", "n"):
+                            break
+                        if opt_ch == "x":
+                            use_exec = True
+                opt_idx += 1
+            rest = tokens[next_idx:]
+            if _segment_has_dangerous_rm(rest, depth + 1):
+                return True
+            if not use_exec:
+                watch_parts: list[str] = []
+                w_idx = 0
+                while w_idx < len(rest):
+                    if rest[w_idx].is_redirect:
+                        w_idx += 2
+                        continue
+                    watch_parts.append(rest[w_idx].text)
+                    w_idx += 1
+                watch_script = " ".join(watch_parts)
+                if watch_script.strip() and _is_dangerous_rm_command(
+                    watch_script, _depth=depth + 1
+                ):
+                    return True
+            return False
+
+        if cmd in _WRAPPER_SPECS:
+            next_idx, unresolved = _parse_wrapper_options(
+                tokens, idx + 1, _WRAPPER_SPECS[cmd]
+            )
+            if unresolved:
+                return _fallback_scan_remaining(
+                    tokens, idx + 1, depth + 1, include_wrappers=True
+                )
+            idx = next_idx
+            continue
+
+        # 未建模的启动器：保守扫描剩余非重定向参数中的危险 rm / 子 shell，避免漏报
+        return _fallback_scan_remaining(
+            tokens, idx + 1, depth + 1, include_wrappers=False
+        )
 
     return False
 
@@ -542,13 +1657,16 @@ def _segment_has_dangerous_rm(tokens: list[str], depth: int) -> bool:
 def _is_dangerous_rm_command(command: str, _depth: int = 0) -> bool:
     """检测命令中是否包含带递归/强制标志的 rm 调用。
 
-    按 shell token 拆分并解析独立选项，避免将带连字符的普通文件名
+    按 Bash 词法拆分并解析独立选项与受支持包装器，避免将带连字符的普通文件名
     （如 `rm foo-bar.txt`、`rm my-file-rf.log`）或 `--` 之后的参数误判为危险选项。
+    超出递归深度上限 `_MAX_RM_PARSE_DEPTH` 时保守返回 `True`（fail-closed 进沙箱）。
     """
-    if _depth > _MAX_RM_PARSE_DEPTH or not command.strip():
+    if _depth > _MAX_RM_PARSE_DEPTH:
+        return True
+    if not command.strip():
         return False
     for segment in _tokenize_shell_segments(command):
-        if _segment_has_dangerous_rm(segment, _depth):
+        if _segment_has_dangerous_rm(segment.tokens, _depth, segment.substitutions):
             return True
     return False
 
@@ -666,19 +1784,27 @@ SANDBOX_FS_POLICY = json.dumps(
 #   sudo -E -n cmd
 #   sudo -- cmd
 # 不尝试覆盖 -i/-s（交互式 shell），这类保留原始命令不处理。
+_SUDO_LONG_ARG_NAMES = r"(?:user|group|host|prompt|chroot|chdir)"
+_SUDO_OPT_VAL = r"(?:'[^']*'|\"(?:\\.|[^\"\\])*\"|[^\s'\"]+)"
 _SUDO_PREFIX_RE = re.compile(
     r"^sudo\s+"
     r"(?:"
     r"(?:-[nEbkKHPvA]+|--(?:non-interactive|preserve-env|reset-timestamp))\s+"
-    r"|(?:--(?:user|group|host|prompt|chroot|chdir)=\S+)\s+"
-    r"|(?:(?:-[uUgcCTthpr]|--(?:user|group|host|prompt|chroot|chdir))\s+\S+\s+)"
+    rf"|(?:--{_SUDO_LONG_ARG_NAMES}={_SUDO_OPT_VAL})\s+"
+    rf"|(?:(?:-[uUgcCTthpr]|--{_SUDO_LONG_ARG_NAMES})\s+{_SUDO_OPT_VAL}\s+)"
     r")*"
-    r"(?:--\s+)?"
+    r"(?:(--)\s+)?"
 )
 
 
-def strip_sudo(command: str) -> tuple:
+_SUDO_PREFIX_SUBSTITUTION_MARKERS = ("$(", "`", "<(", ">(")
+
+
+def strip_sudo(command: str) -> tuple[str, bool]:
     """剥离命令开头的 sudo 前缀及其非交互选项。
+
+    若前缀选项中包含外层 shell 可执行的命令/进程替换（如 `$(...)`、反引号、
+    `<(...)`、`>(...)`），或存在未完整解析的 sudo 选项，则拒绝剥离以保留原始语义。
 
     Returns:
         (stripped_command, had_sudo): 剥离后命令 及 是否包含 sudo 前缀
@@ -686,9 +1812,16 @@ def strip_sudo(command: str) -> tuple:
     cmd = command.strip()
     m = _SUDO_PREFIX_RE.match(cmd)
     if m:
+        prefix = cmd[: m.end()]
+        if any(marker in prefix for marker in _SUDO_PREFIX_SUBSTITUTION_MARKERS):
+            return command, False
         rest = cmd[m.end() :].strip()
-        # 确保剥离后仍有命令体（不是空串），且不是交互式 shell 调用
-        if rest and not re.match(r"^-[is]\b", rest):
+        # 确保剥离后仍有命令体，且未残留交互式/未解析的 sudo 选项
+        if (
+            rest
+            and not re.match(r"^-[is]\b", rest)
+            and (m.group(1) or not rest.startswith("-"))
+        ):
             return rest, True
     return command, False
 
@@ -741,6 +1874,20 @@ def detect_patterns(command: str, patterns: list[tuple[Any, str]]) -> list[str]:
         )
         if matched:
             reasons.append(reason)
+    return reasons
+
+
+def _detect_command_patterns(
+    original_command: str,
+    eval_command: str,
+    patterns: list[tuple[Any, str]],
+) -> list[str]:
+    """同时检查原始命令与剥离执行前缀后的命令，避免前缀剥离隐藏风险。"""
+    reasons = detect_patterns(original_command, patterns)
+    if eval_command != original_command:
+        for reason in detect_patterns(eval_command, patterns):
+            if reason not in reasons:
+                reasons.append(reason)
     return reasons
 
 
@@ -798,15 +1945,15 @@ def main() -> None:
         print(json.dumps({"decision": "allow"}))
         return
 
-    # Inspect the underlying command for explicit blocks; only legacy execution strips sudo.
+    # Inspect the original command for explicit blocks independently of sudo stripping.
     stripped_command, has_sudo = strip_sudo(command)
     is_root = os.getuid() == 0
 
-    # 用剥离 sudo 后的命令做危险检测（以底层命令的语义为准）
+    # 用剥离 sudo 后的命令作为底层执行命令；安全检查始终覆盖原始命令
     eval_command = stripped_command if has_sudo else command
 
-    # 第一优先级：直接 block 的命令
-    block_reasons = detect_patterns(eval_command, BLOCK_PATTERNS)
+    # 第一优先级：直接 block 的命令（始终检查原始命令，避免前缀剥离抹除命令替换）
+    block_reasons = _detect_command_patterns(command, eval_command, BLOCK_PATTERNS)
     if block_reasons:
         reasons_str = ", ".join(block_reasons)
         result = {
@@ -838,8 +1985,12 @@ def main() -> None:
         return
 
     # 第二优先级：替换为沙箱执行（文件系统/权限类风险）
-    sandbox_reasons = detect_patterns(eval_command, DANGEROUS_PATTERNS)
-    network_reasons = detect_patterns(eval_command, NETWORK_PATTERNS)
+    sandbox_reasons = _detect_command_patterns(
+        command, eval_command, DANGEROUS_PATTERNS
+    )
+    network_reasons = _detect_command_patterns(
+        command, eval_command, NETWORK_PATTERNS
+    )
 
     if not sandbox_reasons and not network_reasons:
         # 底层命令安全，根据 sudo + 身份决策：
