@@ -68,6 +68,8 @@ export function confirmSourceRoutes(capabilities, routes) {
     const allowedEffects = Array.isArray(events[hook.event])
       ? events[hook.event]
       : [];
+    if (hook.on_error === "block" && !allowedEffects.includes("block"))
+      return false;
     if (hook.replace_input && !allowedEffects.includes("replace_input"))
       return false;
     if (hook.replace_result && !allowedEffects.includes("replace_result"))

@@ -138,7 +138,8 @@ export class SourceSession {
     signal?.throwIfAborted();
   }
 
-  async _lifecycle(event, fields, signal) {
+  async _lifecycle(event, fields, { sessionId = this.sessionId, signal }) {
+    validateIdentity(sessionId);
     if (!this.events.includes(event))
       throw new AwError("semantic_event_unavailable");
     const combined = this._combineSignal(signal);
@@ -146,7 +147,7 @@ export class SourceSession {
     return this._runAdmittedCall(async () => {
       const decision = await this.task.emit(
         event,
-        { session_id: this.sessionId, ...fields },
+        { session_id: sessionId, ...fields },
         combined,
       );
       if (decision.decision === "block") return decision;
@@ -156,21 +157,22 @@ export class SourceSession {
     });
   }
 
-  async sessionStart({ signal } = {}) {
-    return this._lifecycle("session.start", {}, signal);
+  async sessionStart(options = {}) {
+    return this._lifecycle("session.start", {}, options);
   }
 
-  async turnStop(turnId, reason, { attemptId, signal } = {}) {
+  async turnStop(turnId, reason, { attemptId, sessionId, signal } = {}) {
     const fields = { turn_id: validateIdentity(turnId), reason: validateIdentity(reason) };
     if (attemptId !== undefined) fields.attempt_id = validateIdentity(attemptId);
-    return this._lifecycle("turn.stop", fields, signal);
+    return this._lifecycle("turn.stop", fields, { sessionId, signal });
   }
 
-  async sessionEnd(reason, { signal } = {}) {
-    return this._lifecycle("session.end", { reason: validateIdentity(reason) }, signal);
+  async sessionEnd(reason, options = {}) {
+    return this._lifecycle("session.end", { reason: validateIdentity(reason) }, options);
   }
 
-  async submit(text, { turnId, signal } = {}) {
+  async submit(text, { turnId, sessionId = this.sessionId, signal } = {}) {
+    validateIdentity(sessionId);
     this._requireOpen();
     signal?.throwIfAborted();
     if (!this.events.includes("input.submit"))
@@ -183,12 +185,12 @@ export class SourceSession {
     return this._runAdmittedCall(async () => {
       const decision = await this.task.emit(
         "input.submit",
-        { session_id: this.sessionId, turn_id: resolvedTurn, text },
+        { session_id: sessionId, turn_id: resolvedTurn, text },
         combined,
       );
       if (decision.decision === "block")
         throw new SourceDenied("input.submit", {
-          sessionId: this.sessionId,
+          sessionId,
           turnId: resolvedTurn,
         });
       this._requireOpen();
@@ -197,7 +199,8 @@ export class SourceSession {
     });
   }
 
-  async beforeTool(name, input, { callId, signal } = {}) {
+  async beforeTool(name, input, { callId, sessionId = this.sessionId, signal } = {}) {
+    validateIdentity(sessionId);
     this._requireOpen();
     signal?.throwIfAborted();
     const toolName = validateIdentity(name);
@@ -210,7 +213,7 @@ export class SourceSession {
         const decision = await this.task.emit(
           "tool.before",
           {
-            session_id: this.sessionId,
+            session_id: sessionId,
             call_id: resolvedCall,
             name: toolName,
             input: snapshot,
@@ -219,7 +222,7 @@ export class SourceSession {
         );
         if (decision.decision === "block")
           throw new SourceDenied("tool.before", {
-            sessionId: this.sessionId,
+            sessionId,
             callId: resolvedCall,
             toolName,
           });
@@ -243,14 +246,15 @@ export class SourceSession {
     };
   }
 
-  async afterTool(name, input, result, { callId, signal } = {}) {
+  async afterTool(name, input, result, { callId, sessionId = this.sessionId, signal } = {}) {
     try {
       this._requireOpen();
+      validateIdentity(sessionId);
       if (!this.events.includes("tool.after"))
         return { decision: "continue", coverage: "not_configured" };
       await this.prepare(signal);
       return await this._runAdmittedCall(() =>
-        this._afterAdmittedTool(name, input, result, { callId, signal }),
+        this._afterAdmittedTool(name, input, result, { callId, sessionId, signal }),
       );
     } catch (error) {
       throw toolExecuted(error);
@@ -261,7 +265,7 @@ export class SourceSession {
     name,
     input,
     result,
-    { callId, signal, normalized = false },
+    { callId, sessionId = this.sessionId, signal, normalized = false },
   ) {
     try {
       if (this._taskClosed) throw new AwError("source_session_closed");
@@ -276,7 +280,7 @@ export class SourceSession {
       const decision = await this.task.emit(
         "tool.after",
         {
-          session_id: this.sessionId,
+          session_id: sessionId,
           call_id: resolvedCall,
           name: toolName,
           input: snapshot,
@@ -286,13 +290,13 @@ export class SourceSession {
       );
       if (decision.decision === "withhold")
         throw new SourceResultWithheld("tool.after", {
-          sessionId: this.sessionId,
+          sessionId,
           callId: resolvedCall,
           toolName,
         });
       if (decision.decision === "block")
         throw new SourceDenied("tool.after", {
-          sessionId: this.sessionId,
+          sessionId,
           callId: resolvedCall,
           toolName,
         });

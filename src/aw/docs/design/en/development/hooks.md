@@ -63,8 +63,9 @@ the side-effect-free solver `aw_core::resolver` are defined and contract-tested
 The declarative instrumentation contract
 `aw_contracts::instrumentation::InstrumentationProfile`
 (`instrumentation-profile-v1alpha1`) is likewise contract-tested and compiles to
-`SourceCapability` offline. Python applications can activate the profile through
-their SDK Source. [Instrumentation profiles](../core-admission.md#instrumentation-profiles)
+`SourceCapability` offline. Python and JS applications can activate an optional
+ProfileSource through the existing SDK Scope at runtime
+(see [Instrumentation profiles](../core-admission.md#instrumentation-profiles)).
 Current Adapters expose prepared capabilities and native wiring; preserve those
 executable contracts while introducing the shared abstraction. Do not describe
 an unwired runtime SPI, wire field or CLI as active in runtime dispatch.

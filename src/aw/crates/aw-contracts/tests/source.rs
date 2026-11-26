@@ -13,31 +13,15 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 fn document() -> Value {
-    json!({
-        "version": VERSION,
-        "source_id": "qwenpaw-native",
-        "kind": "native",
-        "adapter": "qwenpaw",
-        "contract": "installed-native-hooks/v1",
-        "entrypoint": "app",
-        "hooks": {
-            "input.submit": {
-                "mode": "control",
-                "effects": ["observe", "block"],
-                "failure_actions": []
-            },
-            "tool.before": {
-                "mode": "control",
-                "effects": ["observe", "block", "replace_input"],
-                "failure_actions": []
-            },
-            "tool.after": {
-                "mode": "control",
-                "effects": ["observe", "replace_result"],
-                "failure_actions": ["withhold_result"]
-            }
-        }
-    })
+    let fixtures: Value =
+        canonical::parse(include_bytes!("fixtures/source-plan-vectors.json")).unwrap();
+    fixtures["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "native-qwenpaw")
+        .unwrap()["document"]
+        .clone()
 }
 
 fn parse(value: &Value) -> Result<SourceCapability, aw_contracts::Error> {

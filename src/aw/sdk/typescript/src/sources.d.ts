@@ -350,23 +350,23 @@ export class SourceSession {
   /** Aborts on session close. Pass to cancellable native stream reads. */
   readonly signal: AbortSignal;
   prepare(signal?: AbortSignal): Promise<void>;
-  sessionStart(options?: { signal?: AbortSignal }): Promise<SemanticDecision>;
+  sessionStart(options?: { sessionId?: string; signal?: AbortSignal }): Promise<SemanticDecision>;
   /** Return the stop decision for adoption at the app's native boundary. */
   turnStop(
     turnId: string,
     reason: string,
-    options?: { attemptId?: string; signal?: AbortSignal },
+    options?: { attemptId?: string; sessionId?: string; signal?: AbortSignal },
   ): Promise<SemanticDecision>;
   /** Report actual native termination before releasing the Scope. */
-  sessionEnd(reason: string, options?: { signal?: AbortSignal }): Promise<SemanticDecision>;
+  sessionEnd(reason: string, options?: { sessionId?: string; signal?: AbortSignal }): Promise<SemanticDecision>;
   submit(
     text: string,
-    options?: { turnId?: string; signal?: AbortSignal },
+    options?: { turnId?: string; sessionId?: string; signal?: AbortSignal },
   ): Promise<SemanticDecision>;
   beforeTool(
     name: string,
     input: Record<string, unknown>,
-    options?: { callId?: string; signal?: AbortSignal },
+    options?: { callId?: string; sessionId?: string; signal?: AbortSignal },
   ): Promise<{
     callId: string;
     input: Record<string, unknown>;
@@ -376,7 +376,7 @@ export class SourceSession {
     name: string,
     input: Record<string, unknown>,
     result: unknown,
-    options: { callId: string; signal?: AbortSignal },
+    options: { callId: string; sessionId?: string; signal?: AbortSignal },
   ): Promise<SemanticDecision>;
   wrapInputStream<Args extends unknown[], Yield>(
     fn: (...args: Args) => AsyncIterable<Yield> | Promise<AsyncIterable<Yield>>,

@@ -5,7 +5,11 @@ const output = new URL("dist/", root);
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 
+await mkdir(new URL("vendor/es-module-lexer/", output), { recursive: true });
+
 for (const file of [
+  "vendor/es-module-lexer/lexer.mjs",
+  "vendor/es-module-lexer/LICENSE",
   "client.mjs",
   "admission.mjs",
   "configuration.mjs",
@@ -18,6 +22,17 @@ for (const file of [
   "source-profile.mjs",
   "source-mutation.mjs",
   "sources.mjs",
+  "profile-eval.mjs",
+  "profile-loader.mjs",
+  "profile-patch.mjs",
+  "profile-callable.mjs",
+  "profile-connection.mjs",
+  "profile-worker.mjs",
+  "profile-call.mjs",
+  "profile-source.mjs",
+  "profile-source.d.ts",
+  "profile-preload.mjs",
+  "profile-preload.d.ts",
   "index.d.ts",
   "sources.d.ts",
   "configuration.d.ts",
