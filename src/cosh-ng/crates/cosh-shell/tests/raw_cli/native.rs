@@ -495,7 +495,7 @@ fn raw_cli_audit_commands_use_the_login_profile_path_once() {
         r#"#!/bin/sh
 printf '%s\n' "$PATH" >> "$HOME/audit-paths"
 printf '%s\n' "$*" >> "$HOME/audit-calls"
-printf '%s' '{"ok":true,"data":{"audit_path_fixture":"profile-only"}}'
+printf '{"ok":true,"data":{"audit_path_fixture":"profile-only-%s"}}' "$2"
 "#,
     );
     let output = fixture.run_with_env(
@@ -505,11 +505,14 @@ printf '%s' '{"ok":true,"data":{"audit_path_fixture":"profile-only"}}'
         ],
         &[
             ("startup-path$ ", b"/audit status\n"),
+            ("profile-only-status", b""),
             ("startup-path$ ", b"/audit trace current\n"),
+            ("profile-only-trace", b""),
             (
                 "startup-path$ ",
                 b"/audit export current /tmp/audit profile path\n",
             ),
+            ("profile-only-export", b""),
             ("startup-path$ ", b"exit\n"),
         ],
     );
