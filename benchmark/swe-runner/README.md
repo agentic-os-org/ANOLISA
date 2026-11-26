@@ -443,7 +443,9 @@ swe-runner evaluate --namespace none
 
 `analyze-traces` reads trace JSON files and exports per-trace details,
 per-case summaries, and detailed metric CSVs. It can also use `run_metadata.json`
-and OpenClaw profiles to collect traces from session JSONL files.
+and OpenClaw profiles to collect traces from session JSONL files. Collection
+checks each selected profile. A profile with only a SQLite transcript raises an
+error pointing to the SQLite reader, even when other profiles contain JSONL.
 
 Concurrent recorders targeting the same instance reserve distinct `traceN.json` files;
 an existing trace is never overwritten when another writer chooses the same number.

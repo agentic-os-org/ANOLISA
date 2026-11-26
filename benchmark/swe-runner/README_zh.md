@@ -429,7 +429,9 @@ swe-runner evaluate --namespace none
 
 `analyze-traces` 会读取 trace JSON，导出 per-trace 明细、per-case 汇总和
 详细指标 CSV。它也可以根据 `run_metadata.json` 和 OpenClaw profiles 自动
-从 session JSONL 补录 trace。
+从 session JSONL 补录 trace。补录前会逐个检查选中的 profile。任何 profile
+只有 SQLite transcript 而没有 session JSONL 时，补录会报错并提示使用 SQLite
+reader，避免其他 profile 的 JSONL 让不完整的导出看起来正常。
 
 多个 recorder 并发记录同一实例时会独占创建不同的 `traceN.json` 文件；
 即使其他写入者选择了相同编号，也不会覆盖已有 trace。

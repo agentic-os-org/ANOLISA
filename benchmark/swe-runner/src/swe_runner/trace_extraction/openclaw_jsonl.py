@@ -632,11 +632,12 @@ def _iter_session_files(
     if not profiles_root.exists():
         logger.warning("OpenClaw profiles dir not found, skipping JSONL trace record: %s", profiles_root)
         return []
-    found = sorted(profiles_root.glob("*/agents/*/sessions/*.jsonl"))
-    if not found:
-        for profile_dir in sorted(path for path in profiles_root.iterdir() if path.is_dir()):
+    for profile_dir in sorted(path for path in profiles_root.iterdir() if path.is_dir()):
+        found = _session_files_in_profile(profile_dir)
+        if not found:
             _reject_sqlite_only_profile(profile_dir)
-    return found
+        session_files.extend(found)
+    return sorted(session_files)
 
 
 def _trace_started_in_window(trace_data: dict[str, Any], start_ns: int, end_ns: int) -> bool:
