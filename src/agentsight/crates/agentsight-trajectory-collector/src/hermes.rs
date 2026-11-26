@@ -235,14 +235,14 @@ fn load_sessions(connection: &Connection, columns: &HashSet<String>) -> Result<V
         field("cwd", "NULL"),
         field("started_at", "0"),
         field("ended_at", "NULL"),
-        field("input_tokens", "0"),
-        field("output_tokens", "0"),
-        field("cache_read_tokens", "0"),
-        field("cache_write_tokens", "0"),
-        field("reasoning_tokens", "0"),
+        field("input_tokens", "NULL"),
+        field("output_tokens", "NULL"),
+        field("cache_read_tokens", "NULL"),
+        field("cache_write_tokens", "NULL"),
+        field("reasoning_tokens", "NULL"),
         field("estimated_cost_usd", "NULL"),
         field("actual_cost_usd", "NULL"),
-        field("api_call_count", "0"),
+        field("api_call_count", "NULL"),
     );
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map([], |row| {
@@ -407,6 +407,6 @@ fn ingest_session(
     Ok(true)
 }
 
-fn nonnegative(value: i64) -> Option<i64> {
-    (value >= 0).then_some(value)
+fn nonnegative(value: Option<i64>) -> Option<i64> {
+    value.filter(|n| *n >= 0)
 }

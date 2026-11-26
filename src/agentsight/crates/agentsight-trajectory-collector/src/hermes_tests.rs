@@ -261,6 +261,67 @@ fn scan_once_converts_live_hermes_wal_to_atif() {
 }
 
 #[test]
+fn scan_once_preserves_nullable_usage_and_refreshes_recorded_zero() {
+    let base = tmp_dir("nullable-usage");
+    let writer = create_hermes_db(&base);
+    let store = TrajectoryStore::new_with_path(&base.join("trajectories.db")).unwrap();
+    let config = CollectorConfig {
+        scan_interval_secs: 1,
+        scan_dirs: Some(vec![base.join("state.db")]),
+        maintenance: TrajectoryMaintenancePolicy {
+            retention_days: 0,
+            ..TrajectoryMaintenancePolicy::default()
+        },
+    };
+    let id = stored_id(&base, SESSION_ID);
+    writer
+        .execute_batch(
+            "UPDATE sessions SET cache_read_tokens = NULL, cache_write_tokens = NULL,
+         reasoning_tokens = NULL, api_call_count = NULL, estimated_cost_usd = NULL",
+        )
+        .unwrap();
+
+    let mut previous = None;
+    for (input, output) in [
+        (None, Some(30_i64)),
+        (Some(0), Some(30)),
+        (None, None),
+        (Some(10), None),
+        (Some(-1), Some(-2)),
+    ] {
+        writer
+            .execute(
+                "UPDATE sessions SET input_tokens = ?1, output_tokens = ?2",
+                params![input, output],
+            )
+            .unwrap();
+        scan_once(&store, &config);
+        let record = store.get(&id).unwrap().unwrap();
+        assert_ne!(previous, Some(record.file_size));
+        previous = Some(record.file_size);
+        let prompt = input.filter(|n| *n >= 0);
+        let completion = output.filter(|n| *n >= 0);
+        assert_eq!(record.total_prompt_tokens, prompt);
+        assert_eq!(record.total_completion_tokens, completion);
+        let doc: serde_json::Value = serde_json::from_str(&record.atif_json).unwrap();
+        assert_eq!(doc["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(doc["steps"][0]["message"], "Diagnose the GPU hang");
+        let metrics = &doc["final_metrics"];
+        assert_eq!(
+            metrics.get("total_prompt_tokens").cloned(),
+            prompt.map(Into::into)
+        );
+        assert_eq!(
+            metrics.get("total_completion_tokens").cloned(),
+            completion.map(Into::into)
+        );
+        for key in ["total_cached_tokens", "total_cost_usd", "extra"] {
+            assert!(metrics.get(key).is_none(), "unexpected {key}");
+        }
+    }
+}
+
+#[test]
 fn scan_once_accepts_database_path_without_jsonl_root() {
     let base = tmp_dir("database-path");
     let hermes_home = base.join("hermes-home");
