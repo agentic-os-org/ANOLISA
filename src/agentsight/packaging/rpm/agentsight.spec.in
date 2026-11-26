@@ -117,6 +117,16 @@ fi
 %{_datadir}/agentsight/adapters/dsh/
 
 %changelog
+* Thu Nov 26 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.17.1-1
+- Add optional public AW execution audit import and query commands
+- Harden encrypted configuration salt creation and repository-bound fact checks
+- Pin shared SSL attach targets and keep startup probes across process exits
+- Preserve streamed usage, content block identity, request bodies and HTTP/2 tails
+- Fix FFI shutdown ordering and drained LLM delivery without SQLite
+- Keep evaluations, reuse decisions and settings consistent across asynchronous updates
+- Correct benchmark loss attribution, campaign inputs and resource report limits
+- See CHANGELOG.md for the remaining fixes
+
 * Sat Nov 21 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.17.0-1
 - Add prompt cache diagnosis through CLI, API and Dashboard
 - Protect directory-tree reads and report descendant enforcement coverage gaps
