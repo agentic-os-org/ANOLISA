@@ -1,0 +1,12 @@
+rule_id: shell-tls-bypass
+cwe_id: CWE-295
+desc_en: >-
+  Command disables TLS/SSL certificate verification via curl, wget,
+  or NODE_TLS_REJECT_UNAUTHORIZED, enabling man-in-the-middle attacks.
+desc_zh: >-
+  命令通过 curl、wget 或 NODE_TLS_REJECT_UNAUTHORIZED 禁用 TLS/SSL 证书验证，存在中间人攻击风险。
+regex: |-
+  \bcurl\b(?:[^;|&\n"']|"(?:\\.|[^"\\\n])*"|'[^'\n]*')*[ \t]+(?:-[a-zA-Z]*k[a-zA-Z]*|--insecure)(?:\s|$|[;&|<>"')])
+  |\bwget\b(?:[^;|&\n"']|"(?:\\.|[^"\\\n])*"|'[^'\n]*')*[ \t]+--no-check-certificate(?:\s|$|[;&|<>"')])
+  |\bNODE_TLS_REJECT_UNAUTHORIZED[ \t]*=[ \t]*(?:0|'0'|"0")(?:\s|$|[;&|<>"')])
+severity: warn

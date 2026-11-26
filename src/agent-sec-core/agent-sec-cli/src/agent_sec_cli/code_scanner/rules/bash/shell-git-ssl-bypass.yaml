@@ -6,6 +6,7 @@ desc_en: >-
 desc_zh: >-
   Git 命令禁用 SSL 证书验证，使仓库操作面临中间人攻击风险。
 regex: |-
-  \bGIT_SSL_NO_VERIFY\s*=\s*(true|1)\b
-  |\bgit\b[^;|&\n]*-c[^;|&\n]*http\.sslVerify\s*=\s*false
+  \bGIT_SSL_NO_VERIFY\s*=\s*['"]?(?:true|1)['"]?(?:\s|$|[;&|<>"')])
+  |\bgit\b[^;|&\n]*-c[^;|&\n]*http(?:\.[^;|&\s='"]+)?\.[sS][sS][lL][vV]erify\s*=\s*['"]?(?:false|0)['"]?(?:\s|$|[;&|<>"')])
+  |\bgit\b[^;|&\n]*\bconfig\b[^;|&\n]*\bhttp(?:\.[^;|&\s='"]+)?\.[sS][sS][lL][vV]erify['"]?[ \t]+['"]?(?:false|0)['"]?(?:\s|$|[;&|<>"')])
 severity: warn
