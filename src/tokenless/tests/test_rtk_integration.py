@@ -241,7 +241,8 @@ class RtkIntegrationTest(unittest.TestCase):
 
         with patch.object(plugin, "_resolve_binary", return_value=str(TOKENLESS)), \
              patch.object(plugin, "run_compress", side_effect=run_core), \
-             patch.object(plugin, "tokenless_retrieve_command_available", return_value=True):
+             patch.object(plugin, "tokenless_retrieve_command_available", return_value=True), \
+             patch.dict(os.environ, {"TOKENLESS_HERMES_PRETOOL_RTK": "1"}):
             for filename, source, expected, suffix in [
                 ("page.html", html, html, ""),
                 ("filtered.js", "// stripped by RTK\n" + data, data, " -l minimal"),
@@ -411,6 +412,38 @@ class RtkIntegrationTest(unittest.TestCase):
                 self.assertEqual(counterfactual.returncode, 3, counterfactual.stderr)
                 self.assertIn("rtk find", counterfactual.stdout)
                 self.assertEqual(pre_tool(command, f"native-{index}"), {})
+
+        # Counterfactual across post_tool_replacement capabilities: H3 hosts that cannot
+        # replace PostTool output report `post_tool_replacement: "none"`, restoring RTK
+        # rewriting on `find`, while capable hosts (`qwenwork`) keep `find` native.
+        codex_rewrite = ROOT / "adapters/tokenless/codex/scripts/rewrite-hook"
+        find_cmd = f"find {quoted} -type f"
+        for agent_id in ("codex", "qwencode"):
+            with self.subTest(non_replacing_agent=agent_id):
+                h3_env = {**self.env, "TOKENLESS_AGENT_ID": agent_id}
+                h3_proc = subprocess.run(
+                    [sys.executable, str(hooks / "rewrite_hook.py")],
+                    input=json.dumps({
+                        "session_id": "h3-session", "tool_use_id": f"h3-{agent_id}",
+                        "tool_name": "Bash", "tool_input": {"command": find_cmd},
+                    }),
+                    env=h3_env, cwd=self.root, capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(h3_proc.returncode, 0, h3_proc.stderr)
+                rewritten = json.loads(h3_proc.stdout)
+                self.assertIn("rtk find", rewritten["hookSpecificOutput"]["updatedInput"]["command"])
+
+        codex_standalone = subprocess.run(
+            [sys.executable, str(codex_rewrite)],
+            input=json.dumps({
+                "session_id": "h3-standalone", "tool_use_id": "h3-codex-script",
+                "tool_name": "Bash", "tool_input": {"command": find_cmd},
+            }),
+            env={**self.env, "TOKENLESS_AGENT_ID": "codex"},
+            cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(codex_standalone.returncode, 0, codex_standalone.stderr)
+        self.assertIn("rtk find", json.loads(codex_standalone.stdout)["hookSpecificOutput"]["updatedInput"]["command"])
 
         for index, prefix in enumerate(("timeout 30", "nice -n 10", "nohup", "command \\\n")):
             command = f"{prefix} find {quoted} -type f"

@@ -252,7 +252,8 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
             if name == "tool_error":
                 assert result["disposition"] == "tool_error"
             if name == "tool_error_diagnosis":
-                assert "ENV_DEPENDENCY_MISSING" in result["additional_context"]
+                assert result["disposition"] == "tool_error"
+                assert result.get("additional_context") is None
             if name == "no_savings":
                 assert result["disposition"] == "no_savings"
         REPORT["checks"].append(

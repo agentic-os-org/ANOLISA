@@ -248,6 +248,10 @@ try {
   for (const [index, testCase] of failureCases.entries()) {
     const record = records.find((entry) => entry.payload.tool_call_id === `failure-${index}`);
     assert.equal(record.payload.is_error === true, testCase.isError);
+    assert.equal(
+      record.payload.exit_code,
+      testCase.tool === "bash" && Number.isInteger(testCase.exit) ? testCase.exit : undefined,
+    );
     assert.equal(record.payload.tool_response, "command not found: important failure details");
   }
   assert.equal(records.filter((record) => record.hook === "compress_schema_hook.py").length, 1);

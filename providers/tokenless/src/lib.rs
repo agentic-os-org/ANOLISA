@@ -137,7 +137,7 @@ fn dispatch(
         operation["command"] = command.clone();
     }
     if before {
-        operation = json!({"tool_name":event["tool"]["name"],"arguments":event["tool"]["input"],"command_field":"command","capabilities":{"replace_arguments":rewrite,"block_and_suggest":!rewrite}});
+        operation = json!({"tool_name":event["tool"]["name"],"arguments":event["tool"]["input"],"command_field":"command","capabilities":{"replace_arguments":rewrite,"block_and_suggest":!rewrite,"post_tool_replacement":"lossless_only"}});
     }
     let operation_name = if before { "pre_tool" } else { "post_tool" };
     let input = serde_json::to_vec(&json!({"protocol_version":2,"operation":operation_name,"attribution":attribution,"input":operation})).map_err(|_| "invalid_compression_input")?;

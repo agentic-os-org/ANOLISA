@@ -22,6 +22,10 @@ recovery_available = tokenless_retrieve_command_available
 is_retrieve_result = is_tokenless_retrieve_command
 
 
+def post_tool_replacement_capability() -> str:
+    return "full_retrievable"
+
+
 def prepare_input(data: dict) -> dict:
     return data
 
@@ -84,12 +88,22 @@ def response(data: dict) -> ToolResult:
         if origin == "command_output" and isinstance(arguments, dict)
         else None
     )
-    status = result_status(
-        data.get("status", ""),
-        data.get("is_error") is True
-        or (isinstance(raw, dict) and raw.get("isError") is True),
-        process_result(value) if tool in SHELL_TOOLS else None,
-    )
+    raw_exit = data.get("exit_code")
+    has_host_exit = isinstance(raw_exit, int) and not isinstance(raw_exit, bool)
+    is_text_slot = tool in SHELL_TOOLS and isinstance(raw, str) and has_host_exit
+    if is_text_slot:
+        status = result_status(
+            data.get("status", ""),
+            data.get("is_error") is True or raw_exit != 0,
+            None,
+        )
+    else:
+        status = result_status(
+            data.get("status", ""),
+            data.get("is_error") is True
+            or (isinstance(raw, dict) and raw.get("isError") is True),
+            process_result(value) if tool in SHELL_TOOLS else None,
+        )
     return ToolResult(
         value,
         envelope,
@@ -99,6 +113,8 @@ def response(data: dict) -> ToolResult:
         status,
         can_replace,
         field is not None or not isinstance(raw, (dict, list)),
+        exit_code=raw_exit if has_host_exit else None,
+        text_slot=is_text_slot,
     )
 
 

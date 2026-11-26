@@ -222,13 +222,12 @@ export const TokenlessPlugin = async () => {
 
       const payload = toolPayload(input, input.args, output.output);
       // OpenCode keeps Bash's exit code outside the model-visible text.
-      // Forward failure evidence so Core preserves it and can add diagnostics.
-      if (
-        input.tool === "bash" &&
-        Number.isInteger(output.metadata?.exit) &&
-        output.metadata.exit !== 0
-      ) {
-        payload.is_error = true;
+      // Forward exit status so Core routes error compression and diagnostics.
+      if (input.tool === "bash" && Number.isInteger(output.metadata?.exit)) {
+        payload.exit_code = output.metadata.exit;
+        if (output.metadata.exit !== 0) {
+          payload.is_error = true;
+        }
       }
       const result = await runHook(runner, "compress_response_hook.py", payload);
       const hookOutput = hookSpecificOutput(result);

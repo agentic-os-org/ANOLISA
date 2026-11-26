@@ -25,8 +25,10 @@ from hook_utils import (
 from result_utils import (
     ToolResult,
     content_origin,
+    extract_exit_code,
     process_result,
     result_status,
+    select_text_field,
 )
 
 AGENT_ID = "qwenwork"
@@ -224,6 +226,10 @@ def recovery_available() -> bool:
     return _QWENWORK_SHELL_RECOVERY or _QWENWORK_RECOVERY is not None
 
 
+def post_tool_replacement_capability() -> str:
+    return "full_retrievable"
+
+
 def prepare_input(data: dict) -> dict:
     return prepare_hook_input(data)
 
@@ -284,15 +290,17 @@ def diagnostic_output(message: str) -> dict:
     }
 
 
-def _valid_zero_exit(value: object) -> bool:
-    return value is None or (
-        isinstance(value, int) and not isinstance(value, bool) and value == 0
+def _valid_exit_code(value: object) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool)
+        else None
     )
 
 
-def _replaceable_shell_stdout(envelope: dict, status: str) -> str | None:
-    """Return the shell stdout text slot when text replacement loses no execution facts."""
-    if status != "success" or not envelope.keys() <= _SHELL_ENVELOPE_KEYS:
+def _replaceable_shell_slot(envelope: dict, status: str) -> tuple[str, str] | None:
+    """Return the replaceable shell text slot when replacement keeps execution facts."""
+    if status not in ("success", "error") or not envelope.keys() <= _SHELL_ENVELOPE_KEYS:
         return None
     if envelope.get("kind") not in (None, "completed", "shell"):
         return None
@@ -302,14 +310,14 @@ def _replaceable_shell_stdout(envelope: dict, status: str) -> str | None:
         return None
     if envelope.get("error") is not None or envelope.get("isError", False) is not False:
         return None
-    if not _valid_zero_exit(envelope.get("exitCode")) or not _valid_zero_exit(
-        envelope.get("exit_code")
-    ):
-        return None
-    if envelope.get("stderr") not in (None, ""):
-        return None
+    for key in ("exitCode", "exit_code"):
+        raw_code = envelope.get(key)
+        if raw_code is not None and _valid_exit_code(raw_code) is None:
+            return None
     stdout = envelope.get("stdout")
-    return stdout if isinstance(stdout, str) else None
+    if isinstance(stdout, str) and stdout.startswith("diff --git "):
+        return ("stdout", stdout)
+    return select_text_field(envelope, ("stdout", "stderr"), 200)
 
 
 def _is_multimodal_block(item: object) -> bool:
@@ -402,15 +410,18 @@ def response(data: dict) -> ToolResult:
     )
     field = None
     can_replace = True
+    exit_code = None
     if tool in SHELL_TOOLS:
         if isinstance(envelope, dict):
             # QwenWork's updatedToolOutput replaces the native text slot directly
-            # and JSON-stringifies returned objects; only single-stream stdout can
-            # be replaced faithfully as text.
-            stdout = _replaceable_shell_stdout(envelope, status)
-            field = ("stdout", stdout) if stdout is not None else None
+            # and JSON-stringifies returned objects; select the dominant shell
+            # stream and compose any sibling stream / non-zero exit code below.
+            field = _replaceable_shell_slot(envelope, status)
             can_replace = field is not None
-        elif not isinstance(envelope, str):
+            exit_code = extract_exit_code(envelope, data)
+        elif isinstance(envelope, str):
+            exit_code = extract_exit_code(None, data)
+        else:
             can_replace = False
     elif _contains_multimodal_blocks(value):
         can_replace = False
@@ -430,7 +441,30 @@ def response(data: dict) -> ToolResult:
         status,
         can_replace,
         field is not None or not isinstance(raw, (dict, list)),
+        exit_code=exit_code,
     )
+
+
+def _compose_shell_text(result: ToolResult, body: str) -> str:
+    if result.field is None or not isinstance(result.envelope, dict):
+        return body
+    primary_key = result.field[0]
+    sibling_key = "stderr" if primary_key == "stdout" else "stdout"
+    sibling_raw = result.envelope.get(sibling_key)
+    sibling = sibling_raw if isinstance(sibling_raw, str) and sibling_raw else ""
+    exit_code = result.exit_code
+    non_zero = exit_code is not None and exit_code != 0
+    if not sibling and not non_zero:
+        return body
+    if primary_key == "stdout" and sibling:
+        parts = [body, f"[stderr]\n{sibling}"]
+    elif primary_key == "stderr" and sibling:
+        parts = [f"[stdout]\n{sibling}", body]
+    else:
+        parts = [body]
+    if non_zero:
+        parts.append(f"[exit code: {exit_code}]")
+    return "\n".join(parts)
 
 
 def response_output(data: dict, result: ToolResult, output: str, message: str) -> dict:
@@ -440,13 +474,15 @@ def response_output(data: dict, result: ToolResult, output: str, message: str) -
         )
         return diagnostic_output(message)
     if result.field is not None:
-        updated: object = output
+        original_text = _compose_shell_text(result, result.field[1])
+        updated: object = _compose_shell_text(result, output)
     else:
+        original_text = result.content()
         updated = result.replacement(output)
         if updated is None:
             warn("tokenless compress returned non-JSON for a structured slot.")
             return diagnostic_output(message)
-    if not _has_net_benefit(result.content(), _delivered_text(updated), message):
+    if not _has_net_benefit(original_text, _delivered_text(updated), message):
         return diagnostic_output(message)
     specific = {"hookEventName": "PostToolUse", "updatedToolOutput": updated}
     if message:

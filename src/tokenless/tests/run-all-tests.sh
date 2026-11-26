@@ -521,52 +521,58 @@ EOF
     rm -rf "$bypass_dir"
 
     # ==========================================
-    # 6.23 Core attribution: ENV_DEPENDENCY_MISSING
+    # 6.23 Core env attribution retired: ENV_DEPENDENCY_MISSING
     # ==========================================
-    log_info "Test 6.23: Attribution — ENV_DEPENDENCY_MISSING"
+    log_info "Test 6.23: Env attribution retired — command not found stays silent"
     local attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
     local attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     local attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
-    assert_contains "$attr_out" "ENV_DEPENDENCY_MISSING" "Attribution detects command not found"
+    assert_not_contains "$attr_out" "ENV_" "Retired attribution does not emit ENV_DEPENDENCY_MISSING"
+    assert_not_contains "$attr_out" "additionalContext" "Retired attribution does not emit additionalContext"
 
     # ==========================================
-    # 6.24 Core attribution: ENV_PERMISSION
+    # 6.24 Core env attribution retired: ENV_PERMISSION
     # ==========================================
-    log_info "Test 6.24: Attribution — ENV_PERMISSION"
+    log_info "Test 6.24: Env attribution retired — Permission denied stays silent"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
     attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
-    assert_contains "$attr_out" "ENV_PERMISSION" "Attribution detects Permission denied"
+    assert_not_contains "$attr_out" "ENV_" "Retired attribution does not emit ENV_PERMISSION"
+    assert_not_contains "$attr_out" "additionalContext" "Retired attribution does not emit additionalContext"
 
     # ==========================================
-    # 6.25 Core attribution: ENV_FILE_MISSING
+    # 6.25 Core env attribution retired: ENV_FILE_MISSING
     # ==========================================
-    log_info "Test 6.25: Attribution — ENV_FILE_MISSING"
+    log_info "Test 6.25: Env attribution retired — No such file stays silent"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
     attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
-    assert_contains "$attr_out" "ENV_FILE_MISSING" "Attribution detects No such file"
+    assert_not_contains "$attr_out" "ENV_" "Retired attribution does not emit ENV_FILE_MISSING"
+    assert_not_contains "$attr_out" "additionalContext" "Retired attribution does not emit additionalContext"
 
     # ==========================================
-    # 6.26 Env attribution: Bash + env error (small response, attribution injected)
+    # 6.26 Retired env attribution: Bash + env error stays silent
     # ==========================================
-    log_info "Test 6.26a: Bash + ENV_DEPENDENCY_MISSING — attribution injected"
+    log_info "Test 6.26a: Bash + command not found — no attribution injected"
     local skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
     local skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     local skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
-    assert_contains "$skip_attr_out" "ENV_DEPENDENCY_MISSING" "Bash attribution detects command not found"
+    assert_not_contains "$skip_attr_out" "ENV_" "Retired Bash attribution: no ENV_ tag"
+    assert_not_contains "$skip_attr_out" "additionalContext" "Retired Bash attribution: no additionalContext"
 
-    log_info "Test 6.26b: Bash + ENV_PERMISSION — attribution injected"
+    log_info "Test 6.26b: Bash + Permission denied — no attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
     skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
-    assert_contains "$skip_attr_out" "ENV_PERMISSION" "Bash attribution detects Permission denied"
+    assert_not_contains "$skip_attr_out" "ENV_" "Retired Bash attribution: no ENV_ tag"
+    assert_not_contains "$skip_attr_out" "additionalContext" "Retired Bash attribution: no additionalContext"
 
-    log_info "Test 6.26c: Bash + ENV_FILE_MISSING — attribution injected"
+    log_info "Test 6.26c: Bash + No such file — no attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
     skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
-    assert_contains "$skip_attr_out" "ENV_FILE_MISSING" "Bash attribution detects No such file"
+    assert_not_contains "$skip_attr_out" "ENV_" "Retired Bash attribution: no ENV_ tag"
+    assert_not_contains "$skip_attr_out" "additionalContext" "Retired Bash attribution: no additionalContext"
 
     log_info "Test 6.26d: Bash + no env error (small response) — skip entirely"
     skip_attr_resp='{"exit_code":0,"stdout":"hello world from shell","stderr":""}'
@@ -576,15 +582,14 @@ EOF
     assert_not_contains "$skip_attr_out" "compress" "Bash no-error small: no compression emitted"
 
     # ==========================================
-    # 6.26e Non-SKIP_TOOLS tool small response + env attribution (new path)
-    # Verify that non-content-retrieval tools with small responses still
-    # inject env attribution when an environment error is detected.
+    # 6.26e Non-SKIP_TOOLS tool small response + retired env attribution
     # ==========================================
-    log_info "Test 6.26e: Write (non-skip) + ENV_PERMISSION small — attribution injected"
+    log_info "Test 6.26e: Write (non-skip) + Permission denied small — no attribution injected"
     local small_err_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret"}'
     local small_err_input=$(jq -n --argjson r "$small_err_resp" '{"tool_name":"Write","tool_response":$r,"is_error":true}')
     local small_err_out=$(echo "$small_err_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
-    assert_contains "$small_err_out" "ENV_PERMISSION" "Write small error: attribution injected"
+    assert_not_contains "$small_err_out" "ENV_" "Write small error: no retired attribution"
+    assert_not_contains "$small_err_out" "additionalContext" "Write small error: no additionalContext"
 
     log_info "Test 6.26f: Write (non-skip) + no env error small — skip entirely"
     local small_ok_resp='{"exit_code":0,"stdout":"ok"}'
@@ -651,6 +656,28 @@ print('CLASSIFY_OK')
     local bash_trimmed
     bash_trimmed=$(echo "$bash_out" | tr -d '[:space:]')
     [ -n "$bash_trimmed" ] && [ "$bash_trimmed" != "{}" ] && log_pass "Bash (layer 2) enters compression pipeline" || log_fail "Bash should attempt compression, got: $bash_out"
+
+    log_info "Test 6.26i: Compressible failing build log compresses without additionalContext"
+    local err_build_log
+    err_build_log=$(python3 -c 'print("$ cargo build\n" + "".join(f"   Compiling dep-{i:03} v0.1.{i}\n" for i in range(30)) + "error[E0308]: mismatched types\n")')
+    local err_build_input
+    err_build_input=$(jq -n --arg log "$err_build_log" '{"tool_name":"Bash","tool_input":{"command":"cargo build"},"tool_response":{"stdout":$log,"stderr":"","exit_code":1},"is_error":true}')
+    local err_build_out
+    err_build_out=$(echo "$err_build_input" | python3 "$COMPRESS_SCRIPT" --agent-id qoder-cli 2>&1)
+    assert_contains "$err_build_out" "updatedToolOutput" "Failing build log returns replaced output"
+    assert_contains "$err_build_out" "mismatched types" "Failing build log preserves compiler error"
+    assert_not_contains "$err_build_out" "additionalContext" "Failing build log does not emit additionalContext"
+    local compressed_stdout_len
+    compressed_stdout_len=$(printf '%s' "$err_build_out" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = None
+out = (((data or {}).get("hookSpecificOutput") or {}).get("updatedToolOutput") or {}).get("stdout") if isinstance(data, dict) else None
+print(len(out) if isinstance(out, str) else 999999)
+')
+    [ "$compressed_stdout_len" -lt "${#err_build_log}" ] && log_pass "Failing build log stdout shrinks ($compressed_stdout_len < ${#err_build_log})" || log_fail "Failing build log stdout did not shrink ($compressed_stdout_len >= ${#err_build_log})"
 
     # ==========================================
     # 6.27 No docker_socket or https_outbound in spec

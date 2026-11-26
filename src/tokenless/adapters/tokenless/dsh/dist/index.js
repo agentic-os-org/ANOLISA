@@ -72,6 +72,17 @@ function valueOr(config, key, fallback) {
     : fallback
 }
 
+/** Return whether PreTool RTK retry suggestions are enabled by config. */
+function parseRtkEnabled(config) {
+  const raw = valueOr(config, 'rtkEnabled', false)
+  if (typeof raw === 'boolean') return raw
+  if (typeof raw === 'number') return raw === 1
+  if (typeof raw === 'string') {
+    return ['1', 'true', 'yes'].includes(raw.trim().toLowerCase())
+  }
+  return false
+}
+
 /** Resolve the executable without installing or mutating a DSH profile. */
 function tokenlessBinary(config) {
   const configured = valueOr(config, 'tokenlessBin', undefined)
@@ -351,6 +362,7 @@ function postToolRequest(
   replaceOutput,
   resultKind,
   retrievalAvailable,
+  extra = {},
 ) {
   const attribution = {
     agent_id: String(valueOr(config, 'agentId', DEFAULT_AGENT_ID)),
@@ -379,6 +391,9 @@ function postToolRequest(
   if (origin === 'command_output' && typeof exec.arguments?.command === 'string') {
     input.command = exec.arguments.command
   }
+  if (Number.isInteger(extra?.exitCode)) {
+    input.exit_code = extra.exitCode
+  }
   return {
     protocol_version: 2,
     operation: 'post_tool',
@@ -390,7 +405,7 @@ function postToolRequest(
 /** Register DSH's tool lifecycle seams with Tokenless Core. */
 export function apply(ctx, config = {}) {
   const compressionEnabled = valueOr(config, 'responseCompressionEnabled', true) !== false
-  const rtkEnabled = valueOr(config, 'rtkEnabled', true) !== false
+  const rtkEnabled = parseRtkEnabled(config)
   // Suggestions are scoped to the host's Agent object. The next call has a
   // new callId, but its exact suggested command still belongs to RTK.
   const suggestedCommands = new WeakMap()
@@ -514,6 +529,59 @@ export function apply(ctx, config = {}) {
         ...decision,
         content: [{ type: 'text', text: response.output }],
       }
+    }
+
+    const effectiveContent = decision.content ?? result.content
+    const singleErrorText = singleText(effectiveContent)
+    const rawExit = effectiveValue && typeof effectiveValue === 'object' && !Array.isArray(effectiveValue)
+      ? (effectiveValue.exit_code ?? effectiveValue.exitCode)
+      : undefined
+    const parsedExit = Number.isInteger(rawExit)
+      ? rawExit
+      : (typeof rawExit === 'string' && /^-?\d+$/.test(rawExit.trim()) ? Number(rawExit) : undefined)
+    const retrieveCommand = isTokenlessRetrieveCommand(exec.name, exec.arguments)
+    const signaledOrTimedOut = (typeof effectiveValue?.signal === 'string' && effectiveValue.signal.length > 0)
+      || effectiveValue?.timedOut === true
+      || effectiveValue?.timed_out === true
+    if (
+      status === 'error'
+      && isCommand
+      && structuredFailure
+      && result?.isError !== true
+      && compressionEnabled
+      && exec.parent === undefined
+      && !retrieveCommand
+      && !signaledOrTimedOut
+      && parsedExit !== undefined
+      && singleErrorText !== undefined
+      && singleErrorText.length > 0
+    ) {
+      const request = postToolRequest(
+        exec,
+        config,
+        singleErrorText,
+        'error',
+        contentOrigin(exec.name),
+        true,
+        'tool',
+        !rtkOutput && tokenlessRetrieveCommandAvailable(config),
+        { exitCode: parsedExit },
+      )
+      if (rtkOutput) {
+        request.input.output_optimization = 'rtk'
+        request.input.capabilities.recovery = { kind: 'none' }
+      }
+      const response = await runOperation(request, exec, config)
+      if (response?.disposition === 'applied' && typeof response.output === 'string') {
+        return {
+          ...decision,
+          content: [{ type: 'text', text: response.output }],
+        }
+      }
+      const diagnostic = response?.disposition === 'tool_error'
+        ? response.additional_context
+        : undefined
+      return withDiagnostic(decision, diagnostic)
     }
 
     const effectiveResult = decision.content === undefined

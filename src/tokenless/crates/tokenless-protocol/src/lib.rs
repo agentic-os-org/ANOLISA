@@ -631,7 +631,8 @@ pub struct PostToolResponse {
     pub stash_keys: Vec<String>,
     /// Token estimator identity for both counts.
     pub tokenizer_id: String,
-    /// Additive context for a tool error.
+    /// Optional additive context; reserved for wire compatibility (always None while
+    /// environment-error attribution is retired).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Protocol v2 and cross-operation tests for the Common PreTool hook."""
 
+from __future__ import annotations
+
 import json
 import os
 import shlex
@@ -285,6 +287,86 @@ class HookLifecycleStateTest(unittest.TestCase):
         response = manifest["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         self.assertIn("rewrite_hook.py --agent-id qwencode", rewrite)
         self.assertIn("compress_response_hook.py --agent-id qwencode", response)
+
+    def test_post_tool_replacement_capability_by_host(self) -> None:
+        adapters_dir = Path(__file__).resolve().parents[1] / "adapters" / "tokenless"
+        hooks_dir = adapters_dir / "common" / "hooks"
+        sys.path.insert(0, str(hooks_dir))
+        sys.path.insert(0, str(adapters_dir))
+        try:
+            import hook_dispatch
+
+            for agent_id, expected in (
+                ("codex", "none"),
+                ("qwencode", "none"),
+                ("copilot-shell", "none"),
+                ("unknown", "none"),
+                ("qoder-cli", "full_retrievable"),
+                ("qwenwork", "full_retrievable"),
+                ("opencode", "full_retrievable"),
+            ):
+                adapter = hook_dispatch.load_adapter(agent_id)
+                self.assertTrue(hasattr(adapter, "post_tool_replacement_capability"), agent_id)
+                self.assertEqual(adapter.post_tool_replacement_capability(), expected, agent_id)
+            for version_adapter in ("claude-code", "cosh-ng"):
+                adapter = hook_dispatch.load_adapter(version_adapter)
+                self.assertTrue(
+                    hasattr(adapter, "post_tool_replacement_capability"), version_adapter
+                )
+        finally:
+            sys.path.remove(str(adapters_dir))
+            sys.path.remove(str(hooks_dir))
+
+        for agent_id, expected_cap in (
+            ("codex", "none"),
+            ("qwencode", "none"),
+            ("copilot-shell", "none"),
+            ("unknown", "none"),
+            ("qoder-cli", None),
+            ("qwenwork", None),
+            ("opencode", None),
+        ):
+            with self.subTest(agent_id=agent_id):
+                self.request_log.unlink(missing_ok=True)
+                self.run_hook(
+                    corpus.PRE_TOOL_HOOK, pre_tool_payload(), "--agent-id", agent_id
+                )
+                caps = self.requests()[-1]["input"]["capabilities"]
+                self.assertEqual(caps.get("post_tool_replacement"), expected_cap)
+
+        for version, expected_cap in (("2.1.120", "none"), ("2.1.121", None)):
+            with self.subTest(claude_version=version):
+                self.request_log.unlink(missing_ok=True)
+                mock_claude = self.bin_dir / "claude"
+                mock_claude.write_text(f"#!/bin/sh\necho '{version}'\n")
+                mock_claude.chmod(0o755)
+                cache_file = self.home / ".tokenless" / ".claude-version"
+                cache_file.unlink(missing_ok=True)
+                self.run_hook(
+                    corpus.PRE_TOOL_HOOK, pre_tool_payload(), "--agent-id", "claude-code"
+                )
+                caps = self.requests()[-1]["input"]["capabilities"]
+                self.assertEqual(caps.get("post_tool_replacement"), expected_cap)
+
+        for cosh_version, expected_cap in (("", "none"), ("0.21.0", None)):
+            with self.subTest(cosh_version=cosh_version):
+                self.request_log.unlink(missing_ok=True)
+                env = {
+                    k: v
+                    for k, v in self.env.items()
+                    if k not in ("COSH_NG_VERSION", "COSH_RUNTIME")
+                }
+                if cosh_version:
+                    env["COSH_NG_VERSION"] = cosh_version
+                self.run_hook(
+                    corpus.PRE_TOOL_HOOK,
+                    pre_tool_payload(),
+                    "--agent-id",
+                    "cosh-ng",
+                    env=env,
+                )
+                caps = self.requests()[-1]["input"]["capabilities"]
+                self.assertEqual(caps.get("post_tool_replacement"), expected_cap)
 
 
 @unittest.skipUnless(os.name == "posix", "POSIX process groups required")

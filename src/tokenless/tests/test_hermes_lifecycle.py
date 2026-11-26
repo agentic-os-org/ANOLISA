@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PLUGIN_SRC = os.path.join(_REPO_ROOT, "adapters", "tokenless", "hermes", "__init__.py")
@@ -56,6 +57,45 @@ class HermesLifecycleTest(unittest.TestCase):
         self.plugin.run_compress = self.original_run
         self.plugin.tokenless_retrieve_command_available = self.original_retrieve_available
 
+    def test_pre_tool_is_disabled_by_default_and_registers_only_on_opt_in(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TOKENLESS_HERMES_PRETOOL_RTK", None)
+            self.assertIsNone(
+                self.plugin.on_pre_tool_call(
+                    tool_name="terminal",
+                    args={"command": "git status"},
+                    session_id="session-1",
+                    tool_call_id="call-1",
+                )
+            )
+            self.assertEqual(self.requests, [])
+
+            registered = []
+
+            class _Ctx:
+                def register_hook(self, name, fn):
+                    del fn
+                    registered.append(name)
+
+            self.plugin.register(_Ctx())
+            self.assertEqual(
+                registered, ["on_session_start", "transform_tool_result"]
+            )
+
+        with patch.dict(os.environ, {"TOKENLESS_HERMES_PRETOOL_RTK": "1"}):
+            registered_opt_in = []
+
+            class _CtxOptIn:
+                def register_hook(self, name, fn):
+                    del fn
+                    registered_opt_in.append(name)
+
+            self.plugin.register(_CtxOptIn())
+            self.assertEqual(
+                registered_opt_in,
+                ["on_session_start", "pre_tool_call", "transform_tool_result"],
+            )
+
     def test_pre_tool_blocks_with_core_rewrite(self):
         rewritten = (
             "env TOKENLESS_AGENT_ID=hermes-agent TOKENLESS_SESSION_ID=session-1 "
@@ -68,12 +108,13 @@ class HermesLifecycleTest(unittest.TestCase):
             "output_optimization": "rtk",
         }
 
-        result = self.plugin.on_pre_tool_call(
-            tool_name="terminal",
-            args={"command": "git status"},
-            session_id="session-1",
-            tool_call_id="call-1",
-        )
+        with patch.dict(os.environ, {"TOKENLESS_HERMES_PRETOOL_RTK": "1"}):
+            result = self.plugin.on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "git status"},
+                session_id="session-1",
+                tool_call_id="call-1",
+            )
 
         self.assertEqual(
             result,
@@ -131,16 +172,20 @@ class HermesLifecycleTest(unittest.TestCase):
         for response in cases:
             with self.subTest(response=response):
                 self.response = response
-                self.assertIsNone(
-                    self.plugin.on_pre_tool_call(
-                        tool_name="terminal", args={"command": "git status"}
+                with patch.dict(os.environ, {"TOKENLESS_HERMES_PRETOOL_RTK": "1"}):
+                    self.assertIsNone(
+                        self.plugin.on_pre_tool_call(
+                            tool_name="terminal", args={"command": "git status"}
+                        )
                     )
-                )
 
         self.requests.clear()
-        self.assertIsNone(
-            self.plugin.on_pre_tool_call(tool_name="web_search", args={"query": "tokenless"})
-        )
+        with patch.dict(os.environ, {"TOKENLESS_HERMES_PRETOOL_RTK": "1"}):
+            self.assertIsNone(
+                self.plugin.on_pre_tool_call(
+                    tool_name="web_search", args={"query": "tokenless"}
+                )
+            )
         self.assertEqual(self.requests, [])
 
     def test_post_tool_applies_core_output(self):
@@ -496,6 +541,72 @@ class HermesLifecycleTest(unittest.TestCase):
             )
         )
         self.assertEqual(self.requests, [])
+
+    def test_post_tool_compresses_failing_terminal_output_when_error_field_absent(self):
+        self.response = {
+            "output": "compressed failing log",
+            "disposition": "applied",
+            "recoverability": "retrievable",
+        }
+        original = json.dumps(
+            {
+                "output": "Compiling pkg v0.1.0\n" * 40 + "error[E0308]: mismatched types\n",
+                "exit_code": 101,
+                "stderr": "command not found",
+                "error": None,
+            }
+        )
+        self.assertEqual(self.plugin._protocol_status("", original), "error")
+        result = self.plugin.on_transform_tool_result(
+            tool_name="terminal",
+            args={"command": "cargo test", "workdir": "/repo"},
+            result=original,
+            status="error",
+            session_id="session-1",
+            tool_call_id="call-2",
+        )
+        decoded = json.loads(result)
+        self.assertEqual(decoded["output"], "compressed failing log")
+        req = self.requests[-1][1]["input"]
+        self.assertEqual(req["status"], "error")
+        self.assertEqual(req["exit_code"], 101)
+        self.assertNotIn("stderr", req)
+        self.assertNotIn("cwd", req)
+        self.assertNotIn("original_command", req)
+        self.assertEqual(req["capabilities"]["replace_output"], True)
+        self.assertEqual(req["capabilities"]["recovery"], {"kind": "shell"})
+
+    def test_post_tool_falls_back_to_camel_case_exit_code_when_snake_case_is_none(self):
+        self.response = {
+            "output": "compressed failing log",
+            "disposition": "applied",
+            "recoverability": "retrievable",
+        }
+        original = json.dumps(
+            {
+                "output": "Compiling pkg v0.1.0\n" * 40 + "error[E0308]: mismatched types\n",
+                "exit_code": None,
+                "exitCode": 2,
+                "error": None,
+            }
+        )
+        result = self.plugin.on_transform_tool_result(
+            tool_name="terminal",
+            args={"command": "cargo test"},
+            result=original,
+            status="error",
+            session_id="session-1",
+            tool_call_id="call-3",
+        )
+        decoded = json.loads(result)
+        self.assertEqual(decoded["output"], "compressed failing log")
+        req = self.requests[-1][1]["input"]
+        self.assertEqual(req["status"], "error")
+        self.assertEqual(req["exit_code"], 2)
+        self.assertNotIn("stderr", req)
+        self.assertNotIn("cwd", req)
+        self.assertEqual(req["capabilities"]["replace_output"], True)
+        self.assertEqual(req["capabilities"]["recovery"], {"kind": "shell"})
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-**LLM token optimization toolkit** — content-aware compression + command rewriting + diagnostics.
+**LLM token optimization toolkit** — content-aware compression + command rewriting + fact-guarded error-log compression.
 
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
@@ -21,14 +21,14 @@ Agent adapters are available for:
 
 - **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core, with conversation-scoped static-tool recovery.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
-- **Hermes Agent plugin** — delegates block-and-suggest command rewriting and model-bound result optimization to Core, with Marker-directed recovery through its shell tool.
+- **Hermes Agent plugin** — model-bound terminal and error-output optimization delegated to Core, with opt-in block-and-suggest command rewriting (`TOKENLESS_HERMES_PRETOOL_RTK=1`) and Marker-directed recovery through its shell tool.
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, response compression, and Marker-directed recovery via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, Marker-directed recovery, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
-- **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
+- **Codex plugin** — RTK command rewriting, retired PostTool environment diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
 - **OpenCode plugin** — response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's V1 local plugin API; Schema passes through without static recovery authorization.
 - **Qwen Code extension** — command rewriting and registered but hard-disabled Tool Ready; current host releases cannot replace post-tool output and skip the declared schema event.
 - **QwenPaw plugin** — schema compression, RTK command rewriting, response/TOON compression, and static-tool recovery through an AgentScope middleware registered by QwenPaw's plugin system; the plugin embeds the `anolisa_tokenless` wheel in-process.
-- **DeepSeek Harness plugin** — RTK retry suggestions, native response compression, Marker-directed recovery, and environment-error attribution through DSH's tool lifecycle.
+- **DeepSeek Harness plugin** — native response and command-error compression, opt-in RTK retry suggestions (`rtkEnabled: true`), and Marker-directed recovery through DSH's tool lifecycle.
 
 For framework developers, the Python SDK has a framework-neutral layer and an **AgentScope-specific
 layer**. Together they cover schema compression, RTK rewriting, response compression, TOON,
@@ -86,14 +86,14 @@ for scope boundaries, output reconstruction, and validation limits.
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | RTK ✅, live PostTool ✅, static Retrieve ✅ with a conversation UUID; Schema unavailable |
 | copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅; Cosh-NG supports response compression and Marker-command recovery, while legacy copilot-shell passes PostTool through; Common BeforeModel passes schemas through without authorized Retrieve |
-| Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Core-owned command rewriting/response/TOON ✅, Marker-command recovery ✅, Schema unavailable |
+| Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Opt-in PreTool command rewriting (`TOKENLESS_HERMES_PRETOOL_RTK=1`), response/error-output/TOON ✅, Marker-command recovery ✅, Schema unavailable |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, Marker-command recovery ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Marker-command recovery ✅ on Claude Code 2.1.121 or newer |
-| Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Environment diagnostics ✅, Response compression — protocol-blocked |
+| Codex plugin | — | Tool Ready ⛔ hard-disabled, PostTool diagnostics ⛔ retired, Command rewriting ✅, Response compression — protocol-blocked |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema passthrough, Response compression ✅, TOON ✅, Marker-command recovery ✅ |
 | Qwen Code extension | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response/Schema replacement unavailable in current host |
 | QwenPaw plugin | — | Schema compression ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Retrieve Tool recovery ✅ |
-| DeepSeek Harness plugin | — | RTK retry suggestions ✅, Response compression ✅, Marker-command recovery ✅, Environment-error attribution ✅ |
+| DeepSeek Harness plugin | — | Opt-in RTK retry suggestions (`rtkEnabled: true`), Response & error compression ✅, Marker-command recovery ✅ |
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
@@ -370,7 +370,7 @@ Agent adapters may apply separate pre-check thresholds; see the
 
 ### compress
 
-Shared Agent hooks send lifecycle requests to `tokenless compress`; successful (or `exit_code`-opted failing) non-bypassed PostTool JSON, eligible build/test logs, and diffs enter the Runtime-owned Pipeline, while successful non-error inputs can also use CSV/TSV tables, HTML, browser snapshots, and mixed regions. Tool errors omitting `exit_code` and Level E1 hard/short errors bypass compression and keep their original output while Core attaches `[tokenless:env]` diagnostics (`stderr` fallback); longer failing results carrying `exit_code` enter fact-guarded Level E2 compression, and opt-in hosts must consume `additional_context` on both `tool_error` and `applied`.
+Shared Agent hooks send lifecycle requests to `tokenless compress`; successful (or `exit_code`-opted failing) non-bypassed PostTool JSON, eligible build/test logs, and diffs enter the Runtime-owned Pipeline, while successful non-error inputs can also use CSV/TSV tables, HTML, browser snapshots, and mixed regions. Tool errors omitting `exit_code` and Level E1 hard/short errors bypass compression and keep their original output (`additional_context` environment-error attribution is retired and remains `None`), while longer failing results carrying `exit_code` enter fact-guarded Level E2 compression.
 
 Under the default `post_tool_replacement: "full_retrievable"` capability, PreTool leaves recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands as well as native preview/search invocations (`find`, `head`, `tail`, `grep`, `rg`) unchanged across direct and built-in-wrapper spellings (`env -C`/`-S`, `timeout`, `time`, `nice`, `nohup`, `uv run`, etc.) so their output has a single PostTool owner. Hosts declaring `lossless_only` restrict native preservation to preview/search calls, and `none` disables PreTool exemptions so RTK rewriting applies. Other supported commands may be rewritten by RTK. Successful results enter PostTool only when complete execution receipts confirm unchanged output and PostTool supplies the exact registered execution command, preserving the original command's file-origin guards.
 
@@ -629,9 +629,11 @@ The plugin translates OpenClaw tool hooks and live result middleware into Protoc
 | Retrieve | `registerTool` / `llm_input` / `after_compaction` | Recovers visible markers through static `tokenless_retrieve`, isolated by conversation UUID; compaction revokes previous grants | ✅ Active |
 | Schema | — | Prompt hooks cannot replace model tool schemas | — |
 
-Core owns RTK execution, JSON detection, compaction, TOON selection, thresholds, diagnostics, and final
-arbitration. The plugin carries Core's per-call `output_optimization` from PreTool into the matching
-PostTool request. Core resumes processing only when complete execution receipts confirm unchanged
+Core owns RTK execution, JSON detection, compaction, TOON selection, thresholds, and final
+arbitration. PreTool explicitly reports `post_tool_replacement` (`full_retrievable`, `lossless_only`,
+or `none`) so Core can coordinate native command handling and RTK exemption. The plugin carries Core's
+per-call `output_optimization` from PreTool into the matching PostTool request and forwards integer
+`exit_code` for `command_output` error-log compression. Core resumes processing only when complete execution receipts confirm unchanged
 output and PostTool supplies the exact registered execution command, restoring the original command
 for file-origin checks; changed or unconfirmed output bypasses
 compression. RTK fallback accepts only lossless candidates. Other results can use the static
@@ -681,17 +683,21 @@ The plugin registers hooks at three Hermes events while Core owns the lifecycle 
 | Strategy | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `pre_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `pre_tool_call` | Sends the command to Core, then blocks and suggests the returned RTK form | ✅ Active |
-| PostTool optimization | `transform_tool_result` | Sends the final model-bound result to Core and applies accepted output | ✅ Active |
+| Command rewriting | `pre_tool_call` | Opt-in (`TOKENLESS_HERMES_PRETOOL_RTK=1`); sends the command to Core, then blocks and suggests the returned RTK form | Opt-in (default off) |
+| PostTool optimization | `transform_tool_result` | Sends final model-bound terminal/error results (with `exit_code`) to Core and applies accepted output | ✅ Active |
 | Session tracking | `on_session_start` | Propagates agent/session IDs for stats recording | ✅ Active |
 | Schema compression | — | Hermes exposes no schema-transform seam | — |
 | Marker recovery | `transform_tool_result` | Labels a successful standalone `tokenless retrieve` shell result for the Core bypass | ✅ Active |
 
-**How command rewriting works in Hermes**: to remain compatible with Hermes releases that only
-support blocking, the plugin asks Core for a rewrite, blocks the original shell command, and tells
-the agent to retry with the returned command. The retry adds one tool-call round-trip. The final
-hook recognizes Core's attributed RTK wrapper from the command Hermes actually executed, so RTK
-output bypasses a second compression pass without correlating two different tool-call IDs.
+**How command rewriting works in Hermes**: PreTool RTK rewriting is disabled by default so shell
+calls do not incur an extra retry round trip. When `TOKENLESS_HERMES_PRETOOL_RTK=1` (or `true` /
+`yes`) is set, to remain compatible with Hermes releases that only support blocking, the plugin asks
+Core for a rewrite, blocks the original shell command, and tells the agent to retry with the
+returned command. The retry adds one tool-call round-trip. The final hook recognizes Core's
+attributed RTK wrapper from the command Hermes actually executed, so RTK output bypasses a second
+compression pass without correlating two different tool-call IDs. On failing terminal results
+without a host `error` envelope field, the plugin also forwards `exit_code`
+so Core can compress large diagnostic output while preserving facts cleanly.
 
 When compression omits recoverable data, the Marker tells Hermes to run
 `tokenless retrieve` through its existing shell tool. The adapter checks the
@@ -908,9 +914,12 @@ for the full reference.
 
 ## DeepSeek Harness Plugin
 
-The native DSH bundle sends replaceable single-text tool results through
-Tokenless PostTool Core on `tools/post-execute`. Core owns content detection,
-JSON compaction, TOON selection, acceptance, and environment-error diagnostics.
+The native DSH bundle defaults PreTool RTK (`tools/pre-execute`) to off (`rtkEnabled: false`); set
+`rtkEnabled: true` to opt into block-and-suggest RTK retry hints. On `tools/post-execute`, it sends
+replaceable single-text tool results — and replaceable non-`isError`, non-signaled, non-timed-out
+structured command failures — to Tokenless PostTool Core with `exit_code`.
+Core owns content detection, JSON compaction, error-log compression, TOON selection, and acceptance
+(environment-error attribution is retired).
 When a reduced response contains a Retrieve Marker, DSH can run the embedded
 `tokenless retrieve` command through its existing shell tool. The adapter
 classifies the successful standalone command from `exec.arguments.command` and
@@ -1056,8 +1065,7 @@ Retain the default one-hour stash TTL unless the application has a deliberate
 lifecycle policy, and do not expect retrieval across nodes.
 
 Both AgentScope adapters enable schema compression, RTK command rewriting,
-response compression, TOON, retrieval, environment-error guidance, and
-per-call attribution. The native wheel links TOON directly and runs rewritten
+response compression, TOON, retrieval, and per-call attribution. The native wheel links TOON directly and runs rewritten
 commands through its bundled `tokenless` executable; it does not search for
 system executables. Host objects and streaming chunks
 remain unchanged; only copied call arguments and final model-visible text are

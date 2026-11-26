@@ -90,6 +90,10 @@ is_retrieve_result = is_tokenless_retrieve_command
 schema_input = None  # This host has no BeforeModel schema replacement contract.
 
 
+def post_tool_replacement_capability() -> str:
+    return "full_retrievable" if _claude_supports_replacement() else "none"
+
+
 def prepare_input(data: dict) -> dict:
     return data
 

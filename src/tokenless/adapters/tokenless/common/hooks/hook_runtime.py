@@ -17,7 +17,7 @@ from hook_utils import (
     skip,
     warn,
 )
-from result_utils import error_content
+from result_utils import post_tool_payload_fields
 
 _PRE_TOOL_TIMEOUT = 8
 
@@ -74,6 +74,11 @@ def pre_tool(
         print(json.dumps(adapter.pre_tool_output(recovery_input)))
         return
 
+    replacement_cap = (
+        adapter.post_tool_replacement_capability()
+        if hasattr(adapter, "post_tool_replacement_capability")
+        else None
+    )
     request = build_pre_tool_request(
         tool_input,
         agent_id,
@@ -81,6 +86,7 @@ def pre_tool(
         "command",
         session_id=session_id,
         tool_use_id=tool_use_id,
+        post_tool_replacement=replacement_cap,
     )
     response = run_compress(tokenless_bin, request, _PRE_TOOL_TIMEOUT, "pre_tool")
     if response is None or response.get("action") != "replace_arguments":
@@ -132,18 +138,21 @@ def post_tool(adapter: ModuleType, agent_id: str) -> None:
         skip()
     result = adapter.response(data)
     tool_name = data.get("tool_name", "unknown")
-    retrieve = result.status == "success" and adapter.is_retrieve_result(
-        tool_name, data.get("tool_input")
-    )
+    is_retrieve_cmd = adapter.is_retrieve_result(tool_name, data.get("tool_input"))
+    retrieve = result.status == "success" and is_retrieve_cmd
+    content, exit_code, replace_output = post_tool_payload_fields(result, data)
     recovery = (
-        result.replace_output
-        and result.status == "success"
+        replace_output
+        and (
+            result.status == "success"
+            or (result.status == "error" and exit_code is not None)
+        )
         and optimization == "none"
-        and not retrieve
+        and not is_retrieve_cmd
         and adapter.recovery_available()
     )
     request = build_post_tool_request(
-        error_content(result),
+        content,
         agent_id,
         tool_name,
         result.status,
@@ -153,12 +162,13 @@ def post_tool(adapter: ModuleType, agent_id: str) -> None:
         recovery={"kind": "shell" if recovery else "none"},
         session_id=session_id,
         tool_use_id=call_id,
-        replace_output=result.replace_output,
-        replace_with_text=result.replace_with_text,
+        replace_output=replace_output,
+        replace_with_text=bool(replace_output and result.replace_with_text),
         command=result.command if isinstance(result.command, str) else None,
+        exit_code=exit_code,
     )
     response = run_compress(binary, request, 8, "post_tool")
-    message = response.get("additional_context", "") if response is not None else ""
+    message = (response.get("additional_context") or "") if response is not None else ""
     output = response.get("output") if response is not None else None
     if response is None or response.get("disposition") != "applied":
         payload = adapter.diagnostic_output(message)

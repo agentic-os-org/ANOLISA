@@ -188,7 +188,7 @@ class HookParity(unittest.TestCase):
                         extra_env={"TOKENLESS_COMPRESSION_ENABLED": "1", "TOKENLESS_STASH_ENABLED": "0"})
                     self.assertEqual(actual.returncode, 0, actual.stderr)
                     envelope = json.loads(actual.stdout)
-                    if failed or agent in {"codex", "qwencode"}:
+                    if agent in {"codex", "qwencode"}:
                         self.assertEqual(envelope, {})
                         continue
                     fields = envelope["hookSpecificOutput"]
@@ -251,6 +251,113 @@ class HookParity(unittest.TestCase):
             "cc-compile-make",
             "C/C++ compile templates",
         )
+
+    def test_opencode_failing_bash_json_object_compresses_as_toon(self) -> None:
+        records = [
+            {"id": i, "status": "failed", "message": "assertion failed"}
+            for i in range(25)
+        ]
+        samples = [
+            {"records": records},
+            # Verify command text keys named like envelope fields do not fool OpenCode's text slot.
+            {"stdout": "command data", "exit_code": 0, "records": records},
+        ]
+        for index, doc in enumerate(samples):
+            raw_json = json.dumps(doc, indent=2)
+            with self.subTest(case=index):
+                payload = {
+                    "tool_name": "bash",
+                    "tool_input": {"command": "pytest --json-report"},
+                    "tool_response": raw_json,
+                    "exit_code": 1,
+                    "is_error": True,
+                    "session_id": f"opencode-err-json-{index}",
+                    "tool_use_id": f"opencode-err-json-{index}",
+                }
+                actual = corpus.run_hook(
+                    corpus.RESPONSE_HOOK,
+                    json.dumps(payload),
+                    corpus.RESPONSE_AGENTS["opencode"],
+                    extra_env={
+                        "TOKENLESS_COMPRESSION_ENABLED": "1",
+                        "TOKENLESS_STASH_ENABLED": "0",
+                    },
+                )
+                self.assertEqual(actual.returncode, 0, actual.stderr)
+                envelope = json.loads(actual.stdout)
+                fields = envelope["hookSpecificOutput"]
+                replaced = fields["updatedToolOutput"]
+                self.assertIsInstance(replaced, str)
+                self.assertLess(len(replaced), len(raw_json))
+                self.assertIn("assertion failed", replaced)
+                self.assertNotIn("additionalContext", fields)
+
+    def test_failing_compressible_build_log_compresses_without_additional_context(self) -> None:
+        cargo_error = (
+            "$ cargo build\n"
+            + "".join(
+                f"   Compiling package-{idx:03} v0.1.{idx} (/workspace/crates/pkg-{idx:03})\n"
+                for idx in range(30)
+            )
+            + "error[E0308]: mismatched types\n"
+            + "error: could not compile `pkg-029` (lib) due to 1 previous error\n"
+        )
+        for agent, agent_env in corpus.RESPONSE_AGENTS.items():
+            with self.subTest(agent=agent):
+                shell = {
+                    "stdout": cargo_error,
+                    "stderr": "warning: build finished with errors\n",
+                    "exit_code": 1,
+                }
+                if agent == "cosh-ng":
+                    payload = {
+                        "tool_name": "run_shell_command",
+                        "tool_input": {"command": "cargo build"},
+                        "tool_response": {"llmContent": json.dumps(shell), "returnDisplay": "cargo build failed"},
+                    }
+                elif agent == "opencode":
+                    payload = {
+                        "tool_name": "bash",
+                        "tool_input": {"command": "cargo build"},
+                        "tool_response": cargo_error,
+                        "exit_code": 1,
+                        "is_error": True,
+                    }
+                else:
+                    payload = {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "cargo build"},
+                        "tool_response": shell,
+                        "is_error": True,
+                    }
+                payload["session_id"] = f"failing-build-log-{agent}"
+                payload["tool_use_id"] = f"failing-build-log-{agent}"
+                actual = corpus.run_hook(
+                    corpus.RESPONSE_HOOK,
+                    json.dumps(payload),
+                    agent_env,
+                    extra_env={
+                        "TOKENLESS_COMPRESSION_ENABLED": "1",
+                        "TOKENLESS_STASH_ENABLED": "0",
+                    },
+                )
+                self.assertEqual(actual.returncode, 0, actual.stderr)
+                envelope = json.loads(actual.stdout)
+                if agent in {"codex", "qwencode"}:
+                    self.assertEqual(envelope, {})
+                    continue
+                fields = envelope["hookSpecificOutput"]
+                self.assertNotIn("additionalContext", fields)
+                if agent == "cosh-ng":
+                    replaced = json.loads(fields["updatedToolResponse"])
+                    compact = replaced["stdout"]
+                elif agent in ("opencode", "qwenwork"):
+                    compact = fields["updatedToolOutput"]
+                else:
+                    compact = fields["updatedToolOutput"]["stdout"]
+                self.assertLess(len(compact), len(cargo_error))
+                self.assertIn("error[E0308]: mismatched types", compact)
+                self.assertIn("could not compile", compact)
 
 
 @unittest.skipUnless(os.path.exists(corpus.DEBUG_TOKENLESS_BIN), "tokenless debug binary not built")

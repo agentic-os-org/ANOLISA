@@ -1,16 +1,16 @@
 # Tokenless Plugin for Codex
 
-Command-output reduction and environment error detection plugin for
+Command-output reduction plugin for
 [Codex](https://github.com/openai/codex). It rewrites supported shell commands
-through RTK before execution and classifies environment errors with actionable
-fix hints.
+through RTK before execution (declaring `post_tool_replacement: "none"` to Core).
+Legacy Tool Ready pre-checks and PostTool `[tokenless:env]` diagnostics remain
+registered as silent pass-throughs.
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
 | **Command Rewriting** | Rewrites supported shell commands through RTK so verbose output is reduced at its source |
-| **Environment Error Detection** | Classifies tool failures as dependency/permission/file/network/package issues; injects fix hints to prevent retry loops |
 | **Statistics Tracking** | Attributes RTK rewrites to the Codex session for auditing and optimization |
 
 ## How It Works
@@ -26,15 +26,14 @@ The plugin registers four hooks with Codex:
 3. **`PreToolUse` (rewrite)** — runs before shell command execution:
    - Rewrites commands through Tokenless PreTool (`tokenless compress`)
    - Only applies to Bash/Shell/terminal/programmatic tools
-4. **`PostToolUse`** — runs after every tool execution:
-   - Skips content-reading and task-management tools
-   - Classifies environment errors and injects fix hints
+4. **`PostToolUse` (response-diagnostics, retired)** — remains registered as a
+   silent pass-through (`exit 0` with empty stdout); `[tokenless:env]`
+   environment-error attribution has been retired.
 
 > **Codex protocol constraint**: `PostToolUse` rejects output suppression and
 > replacement. Injecting compressed content through `additionalContext` would
-> leave the original in place and increase the prompt. The plugin therefore
-> reserves `additionalContext` for actionable environment diagnostics. Actual
-> first-pass savings come from RTK rewriting supported commands before they run.
+> leave the original in place and increase the prompt. Actual first-pass
+> savings come from RTK rewriting supported commands before they run.
 
 ## Installation
 
@@ -73,13 +72,9 @@ Or install from the marketplace (once published).
 
 ## Hook Output Format
 
-For a classified environment failure, the plugin injects `additionalContext`
-in the following format:
-
-```
-[tokenless:env:ENV_DEPENDENCY_MISSING] Missing dependency detected. ...
-Do NOT retry the same command — fix the environment first.
-```
+Both `PreToolUse` (`tool-ready`) and `PostToolUse` (`response-diagnostics`) exit
+with empty stdout (`exit 0`); only `PreToolUse` (`rewrite-hook`) emits updated
+command arguments.
 
 ## Configuration
 
@@ -118,7 +113,7 @@ Shell command
     ├─ Tool execution
     │   └─ Codex receives the already-reduced output
     │
-    └─ PostToolUse: environment diagnostics only
+    └─ PostToolUse: silent pass-through (diagnostics retired)
 ```
 
 ## Architecture
@@ -129,7 +124,7 @@ codex-plugin-tokenless/
 ├── hooks/
 │   └── hooks.json           # Hook definitions (SessionStart, PreToolUse, PostToolUse)
 ├── scripts/
-│   ├── response-diagnostics # PostToolUse: environment error detection
+│   ├── response-diagnostics # PostToolUse: retired silent pass-through
 │   ├── rewrite-hook         # PreToolUse: RTK command rewriting
 │   ├── tool-ready           # PreToolUse: registered hard-disabled pass-through
 │   ├── check-tokenless      # SessionStart: version/availability check

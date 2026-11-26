@@ -223,119 +223,6 @@ def get_thresholds(tool_name: str) -> tuple[int, int, int]:
     return (_TRUNCATE_STRINGS_AT, _TRUNCATE_ARRAYS_AT, _MAX_DEPTH)
 
 
-# -- Shared environment error patterns ----------------------------------------
-#
-# Superset of patterns from both the Codex diagnostics and shared hook adapters. Uses regex
-# matching (case-insensitive) so patterns like "/bin/sh:.*: not found" work
-# correctly. Both codex/scripts/response-diagnostics and compress_response_hook
-# import this list and the classify_env_error() function below.
-
-ENV_PATTERNS: list[tuple[list[str], str, str]] = [
-    (
-        [
-            "command not found",
-            "not installed",
-            "which: no",
-            r"No command\s",
-            "cannot execute",
-            "is not recognized",
-            "Could not find",
-            "unable to locate",
-            "Package not found",
-            r"/bin/sh:.*: not found",
-            "command not found:",
-        ],
-        "ENV_DEPENDENCY_MISSING",
-        "Missing dependency detected. Install it or ask the user for guidance.",
-    ),
-    (
-        [
-            "Permission denied",
-            "permission denied",
-            "Operation not permitted",
-            "EACCES",
-            "Access denied",
-            r"cannot open .* for writing",
-        ],
-        "ENV_PERMISSION",
-        "Permission denied. Check file/directory permissions or run with appropriate access.",
-    ),
-    (
-        [
-            "No such file or directory",
-            "ENOENT",
-            "cannot find",
-            "File not found",
-            "does not exist",
-        ],
-        "ENV_FILE_MISSING",
-        "Required file or directory not found. Verify the path or create it.",
-    ),
-    (
-        [
-            "Connection refused",
-            "Could not resolve host",
-            "Network is unreachable",
-            r"curl: \(7\)",
-            r"curl: \(6\)",
-            "Failed to connect",
-            "Name or service not known",
-            "Couldn't resolve host",
-            "Temporary failure in name resolution",
-            "ECONNREFUSED",
-            "ETIMEDOUT",
-            "Connection timed out",
-        ],
-        "ENV_NETWORK",
-        "Network connectivity issue. Check DNS, proxy, and firewall settings.",
-    ),
-    (
-        [
-            "ModuleNotFoundError",
-            "ImportError",
-            "No module named",
-            "cannot import name",
-            "npm ERR! 404",
-        ],
-        "ENV_PACKAGE_MISSING",
-        "Required package or module is missing. Install the needed dependency.",
-    ),
-]
-
-
-def classify_env_error(tool_response) -> tuple[str | None, str | None]:
-    """Detect environment errors in tool output.
-
-    Accepts either a parsed dict (with stderr/error/exit_code fields) or a
-    plain string. Returns (category_tag, fix_hint) or (None, None).
-
-    Shared by codex/scripts/response-diagnostics and compress_response_hook.
-    """
-    if isinstance(tool_response, dict):
-        text = str(tool_response.get("stderr", "")) + str(tool_response.get("error", ""))
-        # Use `is None` — `or` would treat exit_code=0 (success) as falsy and
-        # incorrectly fall through to exitCode.
-        exit_code = tool_response.get("exit_code")
-        if exit_code is None:
-            exit_code = tool_response.get("exitCode")
-        if exit_code is not None and exit_code == 0 and not text:
-            return None, None
-    elif isinstance(tool_response, str):
-        text = tool_response
-    else:
-        return None, None
-
-    if not text:
-        return None, None
-
-    for patterns, category, hint in ENV_PATTERNS:
-        for pat in patterns:
-            if re.search(pat, text, re.IGNORECASE):
-                return category, hint
-
-    return None, None
-
-
 # -- Hook state directory --
 
 _OPTIMIZATION_STATE_DIR = os.path.join(os.path.expanduser("~"), ".tokenless", "hook-state")
@@ -708,8 +595,15 @@ def build_pre_tool_request(
     tool_use_id: str = "",
     replace_arguments: bool = True,
     block_and_suggest: bool = False,
+    post_tool_replacement: str | None = None,
 ) -> dict:
     """Build a Protocol v2 PreTool transport request."""
+    capabilities: dict[str, object] = {
+        "replace_arguments": replace_arguments,
+        "block_and_suggest": block_and_suggest,
+    }
+    if post_tool_replacement is not None and post_tool_replacement != "full_retrievable":
+        capabilities["post_tool_replacement"] = post_tool_replacement
     return {
         "protocol_version": 2,
         "operation": "pre_tool",
@@ -718,10 +612,7 @@ def build_pre_tool_request(
             "tool_name": tool_name,
             "arguments": arguments,
             "command_field": command_field,
-            "capabilities": {
-                "replace_arguments": replace_arguments,
-                "block_and_suggest": block_and_suggest,
-            },
+            "capabilities": capabilities,
         },
     }
 
@@ -741,6 +632,7 @@ def build_post_tool_request(
     replace_output: bool = False,
     replace_with_text: bool = False,
     command: str | None = None,
+    exit_code: int | None = None,
 ) -> dict:
     """Build a Protocol v2 PostTool transport request.
 
@@ -767,6 +659,8 @@ def build_post_tool_request(
     }
     if command is not None:
         request["input"]["command"] = command
+    if exit_code is not None and not isinstance(exit_code, bool):
+        request["input"]["exit_code"] = int(exit_code)
     return request
 
 

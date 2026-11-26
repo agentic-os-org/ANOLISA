@@ -446,7 +446,7 @@ Adapter 不会压缩每一次工具结果。以响应压缩为例，只有以下
 2. Read/Glob/LSP/NotebookRead 等文件内容工具及别名保留原文。Claude Code 原生 `Grep` 的无上下文 content 模式结果可以使用无损搜索路径共享。非文件来源的命令和 API 结果也可按内容共享纯路径列表，不扩大文件读取的适用范围（见[控制搜索路径共享](#控制搜索路径共享)）。
 3. 响应长度达到最小阈值。Core 在共享响应 Hook、OpenClaw 和 Hermes 路径上跳过短于 200 字符的响应。长度按字符数而非字节数计算。
 4. 内容命中受支持的压缩域。按阈值截断的响应压缩只处理 JSON 对象和数组；纯文本只有命中匹配的文本压缩器才会被压缩，且各路径可触发的压缩器不同：
-   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理与进度缩减、CSV/TSV 表格压紧、API 记录、已识别 Shell 搜索及非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及恢复通道可用时默认开启的 Git Diff 上下文裁剪和浏览器快照重编码），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 200 字符，Cosh-NG 结构化对象信封仍为 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中。Qoder 原生 Bash 始终选择字符串 `stdout`，包括较短或为空的值；`stderr` 及其他字段保持不变。独立的 `stderr` 字段不压缩，也不生成检索标记。真实 Qoder 1.1.78 Bash 探针中，进程 stderr 合并进入 `stdout`；失败命令保留错误文本且未调用 PostToolUse。空 Hook 响应表示不替换，不表示工具结果为空。
+   - **4a. 共享响应 Hook 路径**：到达时不是 JSON 的纯文本会交给内容感知的文本压缩（构建/测试日志的终端输出清理、诊断错误日志压缩与进度缩减、CSV/TSV 表格压紧、API 记录、已识别 Shell 搜索及非文件来源命令/API 路径列表的搜索路径共享、HTML 页面转写，以及恢复通道可用时默认开启的 Git Diff 上下文裁剪和浏览器快照重编码），见[Adapter 处理规则](framework-integration.md#adapter-处理规则)；表格的具体规则见 [CSV/TSV 压紧保留完整表格](#csvtsv-压紧保留完整表格)，搜索的规则见[控制搜索路径共享](#控制搜索路径共享)。对 Shell 工具，Hook 会转发 `exit_code`，先拆出信封中的主文本字段（`stdout` 或 `stderr`，至少 200 字符，Cosh-NG 结构化对象信封仍为 2,000 字符；以 `diff --git` 开头的 Bash `stdout` 不受该下限限制）送入文本槽位，压缩后再回填到同形状的信封中；带 `exit_code` 的可替换纯字符串失败结果也会送入 Core 做错误日志压缩。Qoder 原生 Bash 始终选择字符串 `stdout`，包括较短或为空的值；`stderr` 及其他字段保持不变。千问办公会转发 `exit_code`，并在具有净收益时把本地同级 `[stderr]`/`[stdout]` 与 `[exit code: N]` 组合为单文本替换。真实 Qoder 1.1.78 Bash 探针中，进程 stderr 合并进入 `stdout`；失败命令保留错误文本且未调用 PostToolUse。空 Hook 响应表示不替换，不表示工具结果为空。
    - **4b. OpenClaw**：纯字符串、或内容恰好是单个合法文本块的 `toolResult` 消息走可替换的文本路径。其余 `toolResult`（多个文本块、图片块、空或无效 content）原样跳过——Plugin 直接返回、不调用 Core，这类结果既不压缩也不产生统计。非 `toolResult` 的对象和数组——包括 `{"stdout": ...}` 这类 Shell 信封——整体作为结构化 JSON 传给 Core 且禁用文本替换，信封保持顶层结构，只适用 JSON 域压缩。
    - **4c. Hermes**：对 Shell 工具，Hermes 会拆出信封中的 `output` 字段，把该文本送入 Core 并允许替换，压缩后再回填到同一信封；其他工具的结果直接传递。
 
@@ -677,23 +677,23 @@ JSON 响应压缩保留诊断类名称的字段、`null` 和空值。Stash 并�
 `compress` 的正常未应用结果使用退出码 `0`；Transport 格式错误退出 `2`；缺少 RTK 启动程序、
 未授权 Retrieve、Stash 或 Pipeline 失败退出 `1`，且不输出 Response JSON。`pre_tool` 改写超过
 5 秒时同样不输出 Response JSON，见 [CLI 参考](cli-reference.md)。Tool Ready 会在
-旧版检查、修复和阻断逻辑之前硬退出；工具执行后的失败归因是独立能力，保持不变。
+旧版检查、修复和阻断逻辑之前硬退出；工具执行后的 `[tokenless:env]` 环境失败归因也已下线。
 
-命令重写也会改变宿主提交的 Shell 命令。大多数 Adapter 会直接替换命令输入；Hermes 会先阻止第一次调用，再提示 Agent 使用改写命令重试。因此，除了压缩结果，还应验证重要命令工作流。
+命令重写也会改变宿主提交的 Shell 命令。大多数 Adapter 会直接替换命令输入；Hermes（`TOKENLESS_HERMES_PRETOOL_RTK=1`）和 DSH（`rtkEnabled: true`）默认关闭 PreTool RTK，仅在显式开启时先阻止第一次调用，再提示 Agent 使用改写命令重试。因此，除了压缩结果，还应验证重要命令工作流。
 
 ## 支持的 Agent Adapter
 
 | Agent 产品 | 集成方式 | 当前代码路径 |
 |------|----------|--------------|
 | cosh | Extension | Tool Ready（已硬关闭）、命令重写、Schema；Cosh-NG 替换符合条件的 Pipeline 输出并支持 Marker 命令恢复，旧版 Copilot Shell 透传工具后输出 |
-| OpenClaw | Plugin | Tool Ready（已硬关闭）、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
-| Hermes | Plugin | Tool Ready（已硬关闭）、Core-owned 阻止后重试改写、用 Core 选择的 TOON 替换结果、Marker 命令恢复；无 Schema |
+| OpenClaw | Plugin | Tool Ready（已硬关闭）、带 `post_tool_replacement` 上报的 `exec` 命令重写、实时结果替换（含带 `exit_code` 的错误日志）、可选 TOON 与静态 `tokenless_retrieve`；无 Schema |
+| Hermes | Plugin | Tool Ready（已硬关闭）、按需开启的 PreTool 阻止后重试改写（`TOKENLESS_HERMES_PRETOOL_RTK=1`）、用 Core 选择的 TOON 替换正常/失败终端结果、Marker 命令恢复；无 Schema |
 | Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `updatedToolOutput` 交付响应 Pipeline 和 Marker 命令恢复；无 Schema |
 | Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应并支持 Marker 命令恢复；条件式 TOON；无 Schema |
-| Codex | Plugin | Tool Ready（已硬关闭）、RTK 命令重写、环境失败诊断；不替换响应/TOON，无 Schema |
-| OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、Marker 命令恢复、Schema |
+| Codex | Plugin | Tool Ready（已硬关闭）与已下线的 PostTool 环境诊断、RTK 命令重写；不替换响应/TOON，无 Schema |
+| OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、转发 `exit_code`、Marker 命令恢复、Schema |
 | Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写；当前宿主缺少工具后替换能力，并跳过声明的 BeforeModel 事件 |
-| DeepSeek Harness | 原生 Plugin | 单文本结果替换、Marker 命令恢复和环境错误归因；无 Schema 或命令重写 |
+| DeepSeek Harness | 原生 Plugin | 按需开启的 PreTool RTK（`rtkEnabled: true`）、单文本与可替换命令错误结果替换、Marker 命令恢复；无 Schema |
 
 ## 支持的 Agent 开发框架
 
