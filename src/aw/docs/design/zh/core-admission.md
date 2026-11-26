@@ -130,7 +130,9 @@ Profile 身份、能力声明和更严格的服务要求；CLI 从 Adapter 声�
 准入为该步骤标记 `post_permission`，路由编译将标记和两级工具选择器传给 Pi。
 对命中交接的工具，Pi 先执行原生检查，再运行 AW。Host 将绑定目录写入 Provider 请求的 `event.cwd`。
 
-## 插桩 Profile（仅合同层）
+<a id="插桩-profile仅合同层"></a>
+
+## 插桩 Profile
 
 `aw_contracts::instrumentation::InstrumentationProfile`
 （`instrumentation-profile-v1alpha1`，版本
@@ -140,9 +142,9 @@ Python 或 JS SDK 函数／方法、所服务的语义 Hook 以及 Hook 字段�
 `InstrumentationProfile::source_capability(adapter, entrypoint)` 可将已校验的
 Profile 纯函数编译为 `python` 或 `js` 类型的 `SourceCapability`，供离线求解器推演候选语言插桩 Source：
 
-- **仅合同层（未接入运行期派发）**：配置 schema、`aw-service`、`aw-adapter`、
-  `aw-cli` 以及 Python/JS SDK 运行时均尚未消费 `instrumentation-profile-v1alpha1`。
-  声明或校验 Profile 不授予任何可执行支持、不启用任何运行期包装，也不改变能力网格。
+- Python 应用可通过 `aw_sdk.profile_source.ProfileSource` 显式启用插桩 Profile。
+  Python SDK 校验并包装声明的调用点，复用现有 SDK 准入和 Hook 路由。
+  Service、CLI 和离线求解器沿用各自的职责。
 - **多目标保守合并**：同一 Profile 中多个目标声明同一语义 Hook 事件时，
   `source_capability` 对 `effects` 与 `failure_actions` 取交集，仅当该事件的全部目标均为
   `control` 时才保留 `HookAuthority::Control`；否则降级为 `HookAuthority::Observe`

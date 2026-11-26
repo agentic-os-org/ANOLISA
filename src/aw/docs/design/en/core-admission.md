@@ -160,7 +160,9 @@ that step with `post_permission`; route compilation forwards it with the two
 tool selectors. Pi checks the original arguments before AW for matching tools.
 The Host adds the bound directory to the Provider request as `event.cwd`.
 
-## Instrumentation profiles (contract only)
+<a id="instrumentation-profiles-contract-only"></a>
+
+## Instrumentation profiles
 
 `aw_contracts::instrumentation::InstrumentationProfile`
 (`instrumentation-profile-v1alpha1`, version
@@ -172,11 +174,10 @@ receivers, constants, or return values. Calling
 validated profile purely into a `python` or `js` `SourceCapability` so the
 offline resolver can reason about candidate language-instrumentation Sources:
 
-- **Contract only (not wired into runtime dispatch)**: configuration schemas,
-  `aw-service`, `aw-adapter`, `aw-cli`, and Python/JS SDK runtimes do not
-  consume `instrumentation-profile-v1alpha1` yet. Declaring or validating a
-  profile grants no executable support, activates no runtime wrapper, and
-  changes no capability grid.
+- Python applications can opt into an executable profile through
+  `aw_sdk.profile_source.ProfileSource`. It verifies and wraps Python call sites
+  and uses the existing SDK admission and Hook routes. Service, CLI and the
+  offline resolver retain their existing responsibilities.
 - **Conservative multi-target merge**: when multiple targets in one profile
   declare the same semantic Hook event, `source_capability` intersects their
   `effects` and `failure_actions` and retains `HookAuthority::Control` only if

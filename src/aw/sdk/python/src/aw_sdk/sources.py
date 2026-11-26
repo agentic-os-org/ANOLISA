@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterable, Mapping
 from uuid import uuid4
 
@@ -53,6 +57,12 @@ __all__ = [
 ]
 
 
+@dataclass
+class _NativeStep:
+    # Clearing the owner also revokes contexts copied during native execution.
+    owner: object | None
+
+
 class SourceSession:
     """Per-request semantic session backed by one immutable Admission and Task."""
 
@@ -84,6 +94,9 @@ class SourceSession:
         self._instrumentations: list[Instrumentation] = []
         self._active_streams: set[ActiveStream] = set()
         self._active_calls: set[asyncio.Future[None]] = set()
+        self._native_step: ContextVar[_NativeStep | None] = ContextVar(
+            "aw_native_step", default=None
+        )
         self._task_closed = False
         self._closing: asyncio.Task[BaseException | None] | None = None
         if source._closed:
@@ -106,19 +119,38 @@ class SourceSession:
     def _strict_after(self) -> bool:
         return not self.fallback and self.task is not None and route_has_strict_after(self.task.routes)
 
+    def _native_owner(self) -> object | None:
+        permit = self._native_step.get()
+        return permit.owner if permit is not None else None
+
+    @contextmanager
+    def _admitted_native_step(self, owner: object) -> Iterator[None]:
+        permit = _NativeStep(owner)
+        token = self._native_step.set(permit)
+        try:
+            yield
+        finally:
+            permit.owner = None
+            self._native_step.reset(token)
+
     def _require_open(self) -> None:
-        if self.closed:
+        if self.closed and (self._task_closed or self._native_owner() is None):
             raise AwError("source_session_closed")
 
-    async def _run_admitted_call(self, fn: Callable[[], Any]) -> Any:
+    def _begin_call(self) -> asyncio.Future[None]:
+        """Hold the Task until the admitted operation settles on this loop."""
         self._require_open()
         settled = asyncio.get_running_loop().create_future()
         self._active_calls.add(settled)
+        settled.add_done_callback(self._active_calls.discard)
+        return settled
+
+    async def _run_admitted_call(self, fn: Callable[[], Any]) -> Any:
+        settled = self._begin_call()
         try:
             result = fn()
             return await result if inspect.isawaitable(result) else result
         finally:
-            self._active_calls.discard(settled)
             settled.set_result(None)
 
     def _verify_route_coverage(self) -> None:
@@ -139,14 +171,21 @@ class SourceSession:
         self._verify_route_coverage()
         self._require_open()
 
-    async def _lifecycle(self, event: str, **fields: str) -> dict[str, str]:
+    def _session_identity(self, session_id: str | None) -> str:
+        return self.session_id if session_id is None else validate_identity(session_id)
+
+    async def _lifecycle(
+        self, event: str, *, session_id: str | None = None, **fields: str
+    ) -> dict[str, str]:
+        resolved_session = self._session_identity(session_id)
         if event not in self.events:
             raise AwError("semantic_event_unavailable")
         await self.prepare()
 
         async def emit() -> dict[str, str]:
-            assert self.task is not None
-            decision = await self.task.emit(event, {"session_id": self.session_id, **fields})
+            decision = await self._emit_admitted_lifecycle(
+                event, resolved_session, **fields
+            )
             if decision["decision"] == "block":
                 return decision
             self._require_open()
@@ -154,30 +193,42 @@ class SourceSession:
 
         return await self._run_admitted_call(emit)
 
-    async def session_start(self) -> dict[str, str]:
+    async def _emit_admitted_lifecycle(
+        self, event: str, session_id: str, **fields: str
+    ) -> dict[str, str]:
+        assert self.task is not None
+        return await self.task.emit(event, {"session_id": session_id, **fields})
+
+    async def session_start(self, *, session_id: str | None = None) -> dict[str, str]:
         """Observe native session admission before processing its first turn."""
-        return await self._lifecycle("session.start")
+        return await self._lifecycle("session.start", session_id=session_id)
 
     async def turn_stop(
-        self, turn_id: str, reason: str, *, attempt_id: str | None = None
+        self, turn_id: str, reason: str, *, attempt_id: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, str]:
         """Check a stop attempt; the caller adopts block at the native boundary."""
         fields = {"turn_id": validate_identity(turn_id), "reason": validate_identity(reason)}
         if attempt_id is not None:
             fields["attempt_id"] = validate_identity(attempt_id)
-        return await self._lifecycle("turn.stop", **fields)
+        return await self._lifecycle("turn.stop", session_id=session_id, **fields)
 
-    async def session_end(self, reason: str) -> dict[str, str]:
+    async def session_end(self, reason: str, *, session_id: str | None = None) -> dict[str, str]:
         """Observe actual native session termination before releasing the Scope."""
-        return await self._lifecycle("session.end", reason=validate_identity(reason))
+        return await self._lifecycle(
+            "session.end", session_id=session_id, reason=validate_identity(reason)
+        )
 
-    async def submit(self, text: str, *, turn_id: str | None = None) -> dict[str, str]:
+    async def submit(
+        self, text: str, *, turn_id: str | None = None, session_id: str | None = None
+    ) -> dict[str, str]:
         """Emit input.submit and raise SourceDenied when AW blocks."""
         self._require_open()
         if "input.submit" not in self.events:
             raise AwError("semantic_event_unavailable")
         if not isinstance(text, str):
             raise AwError("source_input_text_required")
+        resolved_session = self._session_identity(session_id)
         resolved_turn = validate_identity(str(uuid4()) if turn_id is None else turn_id)
         await self.prepare()
 
@@ -185,20 +236,22 @@ class SourceSession:
             assert self.task is not None
             decision = await self.task.emit(
                 "input.submit",
-                {"session_id": self.session_id, "turn_id": resolved_turn, "text": text},
+                {"session_id": resolved_session, "turn_id": resolved_turn, "text": text},
             )
             if decision["decision"] == "block":
-                raise SourceDenied("input.submit", session_id=self.session_id, turn_id=resolved_turn)
+                raise SourceDenied("input.submit", session_id=resolved_session, turn_id=resolved_turn)
             self._require_open()
             return decision
 
         return await self._run_admitted_call(emit)
 
     async def before_tool(
-        self, name: str, tool_input: Mapping[str, Any], *, call_id: str | None = None
+        self, name: str, tool_input: Mapping[str, Any], *, call_id: str | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         """Emit tool.before and raise SourceDenied before native tool execution."""
         self._require_open()
+        resolved_session = self._session_identity(session_id)
         tool_name = validate_identity(name)
         resolved_call = validate_identity(str(uuid4()) if call_id is None else call_id)
         snapshot = snapshot_tool_input(tool_input)
@@ -210,7 +263,7 @@ class SourceSession:
                 decision = await self.task.emit(
                     "tool.before",
                     {
-                        "session_id": self.session_id,
+                        "session_id": resolved_session,
                         "call_id": resolved_call,
                         "name": tool_name,
                         "input": snapshot,
@@ -219,7 +272,7 @@ class SourceSession:
                 if decision["decision"] == "block":
                     raise SourceDenied(
                         "tool.before",
-                        session_id=self.session_id,
+                        session_id=resolved_session,
                         call_id=resolved_call,
                         tool_name=tool_name,
                     )
@@ -235,16 +288,20 @@ class SourceSession:
         return resolved_call, snapshot, {"decision": "continue", "coverage": "not_configured"}
 
     async def after_tool(
-        self, name: str, tool_input: Mapping[str, Any], result: Any, *, call_id: str
+        self, name: str, tool_input: Mapping[str, Any], result: Any, *, call_id: str,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """Emit tool.after with original snapshot and normalized result; enforce withholding."""
         with tool_executed():
             self._require_open()
+            resolved_session = self._session_identity(session_id)
             if "tool.after" not in self.events:
                 return {"decision": "continue", "coverage": "not_configured"}
             await self.prepare()
             return await self._run_admitted_call(
-                lambda: self._after_admitted_tool(name, tool_input, result, call_id=call_id)
+                lambda: self._after_admitted_tool(
+                    name, tool_input, result, call_id=call_id, session_id=resolved_session
+                )
             )
 
     async def _after_admitted_tool(
@@ -255,6 +312,7 @@ class SourceSession:
         *,
         call_id: str,
         normalized: bool = False,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         with tool_executed():
             if self._task_closed:
@@ -263,13 +321,14 @@ class SourceSession:
             if task is None or not self._observe_after():
                 coverage = "unavailable" if self.fallback else "not_configured"
                 return {"decision": "continue", "coverage": coverage}
+            resolved_session = self._session_identity(session_id)
             tool_name = validate_identity(name)
             resolved_call = validate_identity(call_id)
             snapshot = snapshot_tool_input(tool_input)
             decision = await task.emit(
                 "tool.after",
                 {
-                    "session_id": self.session_id,
+                    "session_id": resolved_session,
                     "call_id": resolved_call,
                     "name": tool_name,
                     "input": snapshot,
@@ -279,14 +338,14 @@ class SourceSession:
             if decision["decision"] == "withhold":
                 raise SourceResultWithheld(
                     "tool.after",
-                    session_id=self.session_id,
+                    session_id=resolved_session,
                     call_id=resolved_call,
                     tool_name=tool_name,
                 )
             if decision["decision"] == "block":
                 raise SourceDenied(
                     "tool.after",
-                    session_id=self.session_id,
+                    session_id=resolved_session,
                     call_id=resolved_call,
                     tool_name=tool_name,
                 )
