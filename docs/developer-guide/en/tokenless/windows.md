@@ -28,10 +28,13 @@ input unchanged; exit code 2 is reserved for blocking decisions. A missing
 Python interpreter or shared hook resource therefore disables optimization for
 that invocation without requiring another dispatcher.
 
-The Windows installer registers only `PostToolUse`.
+The Windows installer registers the recovery-only `PreToolUse` hook and
+`PostToolUse`, both rewritten to the PowerShell form. The `PreToolUse`
+registration appends `|PowerShell` to its matcher so PowerShell shell events
+reach the rewrite.
 
-The following RTK behavior applies to legacy PreTool registrations and direct
-compatibility tests. RTK decides whether to rewrite each command.
+The following RTK behavior applies to the registered PreTool rewrite and direct
+compatibility tests. RTK decides whether to rewrite each command. RTK decides whether to rewrite each command.
 PowerShell calls run RTK through the native `tokenless.exe` and scope attribution
 variables to that invocation. PostTool classifies PowerShell output as command output,
 retains file-content protection, and avoids compressing RTK output twice.

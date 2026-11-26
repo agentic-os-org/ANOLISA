@@ -303,16 +303,23 @@ def _install(data: Path, target: Path, previous: dict | None) -> None:
         shutil.copytree(PLUGIN_ROOT, new, symlinks=False, ignore=_ignored)
         if platform.system() == "Windows":
             hooks = _read_json(new / "hooks/hooks.json")
-            hooks["hooks"].pop("PreToolUse", None)
-            for groups in hooks["hooks"].values():
+            for event, groups in hooks["hooks"].items():
                 for group in groups:
+                    script = (
+                        "rewrite_hook.py" if event == "PreToolUse" else "compress_response_hook.py"
+                    )
                     python = sys.executable.replace("'", "''")
                     for hook in group["hooks"]:
                         hook["shell"] = "powershell"
                         hook["command"] = (
                             f"& '{python}' -X utf8 -B "
-                            f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/compress_response_hook.py" --agent-id qwenwork'
+                            f'"${{env:QODER_PLUGIN_ROOT}}/hooks/shared/{script}" --agent-id qwenwork'
                         )
+                    if event == "PreToolUse":
+                        # The rewrite hook is recovery-only. Windows hosts may
+                        # also deliver shell tool events as PowerShell, which
+                        # the adapter rewrites through the same bridge.
+                        group["matcher"] = f"{group['matcher']}|PowerShell"
             (new / "hooks/hooks.json").write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
         _validate_runtime(new)
         entries = _inventory(new)
