@@ -94,6 +94,8 @@ SDK session_store、存储镜像和 resume 临时目录仍由 SDK 管理：AW �
 详见[配置参考](../../../../../../docs/developer-guide/zh/aw/configuration.md#claude-sdk-模型网关)。
 HTTPS 使用系统信任及 SSL_CERT_FILE/SSL_CERT_DIR，支持 HTTP(S)
 代理与 NO_PROXY，包含按端口匹配的 NO_PROXY=host:port 规则与 IPv6 主机。
+AW 将本次回环地址和端口加入 Claude CLI 的代理排除列表，在提交提示前核对直连规则。
+转发层沿用原有代理配置访问上游模型。
 重定向、SOCKS、Bedrock/Vertex/Foundry、未知响应块和非法/中断工具流
 明确失败，没有绕过登记的直连后备路径。支持 JSON/SSE Messages 的 text、thinking、
 redacted_thinking 和客户端 tool_use。

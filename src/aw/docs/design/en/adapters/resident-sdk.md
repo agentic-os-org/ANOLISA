@@ -128,6 +128,9 @@ See the [configuration reference](../../../../../../docs/developer-guide/en/aw/c
 HTTPS uses
 system trust plus `SSL_CERT_FILE`/`SSL_CERT_DIR`. HTTP(S) proxies and `NO_PROXY` are
 honored, including port-specific `NO_PROXY=host:port` rules and IPv6 hosts.
+The CLI connects directly to the relay. AW adds its exact loopback host and port to
+the CLI proxy exclusions and checks the effective bypass before submitting a prompt.
+The relay uses the original proxy settings for its upstream connection.
 Redirects, SOCKS proxies, Bedrock/Vertex/Foundry transports, unsupported
 response blocks and malformed/partial tool streams fail visibly; no direct fallback
 bypasses identity registration. Supported blocks are text, thinking,
