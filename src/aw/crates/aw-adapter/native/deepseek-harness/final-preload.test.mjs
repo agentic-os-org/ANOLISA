@@ -37,7 +37,9 @@ test("the DSH process removes only its preload before launching a Node tool", ()
     const module = join(root, "node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js");
     mkdirSync(join(root, "node_modules/@deepseek-ai/dsh-agent-loop/lib"), { recursive: true });
     writeFileSync(module, "export const childModule = true;\n");
-    const preload = pathToFileURL(resolve(import.meta.dirname, "final-preload.mjs"));
+    const bootstrap = pathToFileURL(resolve(import.meta.dirname, "bootstrap.mjs"));
+    const config = join(root, "config.json");
+    writeFileSync(config, JSON.stringify({ hooks: [{ event: "security.violation" }] }));
     const original = "--no-warnings";
     const childScript = `await import(${JSON.stringify(pathToFileURL(module).href)}); console.log(process.env.NODE_OPTIONS ?? '<unset>')`;
     const parent = spawnSync(process.execPath, [
@@ -53,7 +55,7 @@ test("the DSH process removes only its preload before launching a Node tool", ()
     ], {
       encoding: "utf8",
       timeout: 5000,
-      env: { ...process.env, NODE_OPTIONS: `${original} --import=${preload}` },
+      env: { ...process.env, AW_NATIVE_CONFIG: config, NODE_OPTIONS: `${original} --import=${bootstrap}` },
     });
     if (parent.error) throw parent.error;
     if (parent.status !== 0) throw Error(parent.stderr);

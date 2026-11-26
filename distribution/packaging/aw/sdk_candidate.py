@@ -18,6 +18,7 @@ PACKAGES = {"aw", "aw-provider-sec-core", "aw-provider-tokenless"}
 SDK_PACKAGES = (
     ("npm", "core", "src/aw/sdk/typescript"),
     ("npm", "qoder", "src/aw/sdk/typescript-adapters/qoder"),
+    ("npm", "deepseek-harness", "src/aw/sdk/typescript-adapters/deepseek-harness"),
     ("npm", "pi", "src/aw/sdk/typescript-adapters/pi"),
     ("wheel", "core", "src/aw/sdk/python"),
     ("wheel", "claude", "src/aw/sdk/python-adapters/claude"),
@@ -84,7 +85,7 @@ def check_core_boundary(
             name
             for name in payload
             if name.startswith(
-                ("package/dist/native/qoder-sdk/", "package/dist/native/pi/")
+                ("package/dist/native/qoder-sdk/", "package/dist/native/pi/", "package/dist/native/deepseek-harness/")
             )
         )
         if forbidden:
@@ -191,7 +192,7 @@ def build(
             )
         )
         receipt = {
-            "schema": "aw-sdk-candidate/v2",
+            "schema": "aw-sdk-candidate/v3",
             "commit": candidate,
             "artifacts": records,
             "tools": {
@@ -218,8 +219,10 @@ def sdk_records(candidate: str, receipt_path: Path) -> list[dict]:
             "legacy aw-sdk-candidate/v1 receipts (2-artifact layout) must be "
             "verified with the matching pre-split candidate revision"
         )
+    if receipt.get("schema") == "aw-sdk-candidate/v2":
+        raise ValueError("verify six-package v2 receipts with the matching candidate revision")
     if (
-        receipt.get("schema") != "aw-sdk-candidate/v2"
+        receipt.get("schema") != "aw-sdk-candidate/v3"
         or receipt.get("commit") != candidate
     ):
         raise ValueError("SDK receipt candidate mismatch")

@@ -45,7 +45,9 @@ class Model extends LlmAdapter {
     log("model.jsonl", options.messages);
     this.requests++;
     if (this.requests === 1) {
-      if (mode === "parallel")
+      if (mode.startsWith("pii-bash-") || mode === "pii-backend-error")
+        yield* calls([{ name: "bash", args: { description: "read a fixture", command: "touch bash-executed && cat sample.txt" } }]);
+      else if (mode === "parallel")
         yield* calls([
           { args: { command: "first" } },
           { args: { command: "second" } },
@@ -222,6 +224,15 @@ export function apply(ctx) {
       };
     });
   }
+  if (mode.startsWith("pii-bash-"))
+    ctx.on("tools/post-execute", async (_exec, result, next) => {
+      const decision = await next();
+      if (mode === "pii-bash-divergent")
+        return { ...decision, content: [{ type: "text", text: "platform: " + result.content[0].text }] };
+      const value = structuredClone(result.value);
+      value.stdout.text = "platform: " + value.stdout.text;
+      return { kind: "accept", value };
+    });
   ctx.on("tools/result", (exec, result) => {
     globalThis.awLastResult = result;
     log("results.jsonl", {

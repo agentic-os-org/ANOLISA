@@ -8,7 +8,7 @@
 
 - [接入教程](integration.md) · 用本地脚本跑通允许、阻断和故障处理。
 - [Agent / SDK 接入](native-agents.md) · 按框架选择版本、工厂和启动方式。
-- [双语言 Runtime SDK（6 包）](deployment/native-sdk.md) · 核心包与可选适配包选型、`LanguageSource` 零适配接入、Descriptor 与协作 PID 挂接。
+- [双语言 Runtime SDK 包](deployment/native-sdk.md) · 核心包与可选适配包选型、`LanguageSource` 零适配接入、Descriptor 与协作 PID 挂接。
 - [Python SDK](deployment/python-sdk.md) · `anolisa-aw-sdk`、`aw_sdk.sources`、QwenPaw 与 Claude Worker 接入。
 - [Provider 开发](providers/index.md) · `aw-provider/v1alpha1` 三方法最小骨架、`aw.yaml` 挂接、sec-core、Tokenless 和只读展示。
 - [自定义 Hook](providers/hooks.md) · 布尔脚本与原生命令。

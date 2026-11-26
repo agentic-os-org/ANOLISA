@@ -74,6 +74,7 @@ else:
 FIXTURE_SPECS = (
     ("npm", "core", "sdk-core.tgz"),
     ("npm", "qoder", "sdk-qoder.tgz"),
+    ("npm", "deepseek-harness", "sdk-deepseek-harness.tgz"),
     ("npm", "pi", "sdk-pi.tgz"),
     ("wheel", "core", "sdk-core.whl"),
     ("wheel", "claude", "sdk-claude.whl"),
@@ -167,6 +168,7 @@ class CandidateTests(unittest.TestCase):
         for member in (
             "package/dist/native/qoder-sdk/sdk.mjs",
             "package/dist/native/pi/resident.mjs",
+            "package/dist/native/deepseek-harness/hooks.mjs",
         ):
             with self.assertRaisesRegex(ValueError, "must not bundle framework adapters"):
                 candidate.check_core_boundary("npm", "core", {member: b""})
@@ -220,7 +222,7 @@ class CandidateTests(unittest.TestCase):
             receipt.write_text(
                 json.dumps(
                     {
-                        "schema": "aw-sdk-candidate/v2",
+                        "schema": "aw-sdk-candidate/v3",
                         "commit": SHA,
                         "artifacts": records,
                     }
@@ -238,7 +240,7 @@ class CandidateTests(unittest.TestCase):
                 receipt.write_text(
                     json.dumps(
                         {
-                            "schema": "aw-sdk-candidate/v2",
+                            "schema": "aw-sdk-candidate/v3",
                             "commit": SHA,
                             "artifacts": records,
                         }
@@ -270,7 +272,7 @@ class CandidateTests(unittest.TestCase):
                 receipt.write_text(
                     json.dumps(
                         {
-                            "schema": "aw-sdk-candidate/v2",
+                            "schema": "aw-sdk-candidate/v3",
                             "commit": SHA,
                             "artifacts": records,
                         }
@@ -296,7 +298,7 @@ class CandidateTests(unittest.TestCase):
                 {"schema": "aw-sdk-candidate/v1", "commit": SHA, "artifacts": []},
             ]
             invalid += [
-                {"schema": "aw-sdk-candidate/v2", "commit": SHA, "artifacts": rows}
+                {"schema": "aw-sdk-candidate/v3", "commit": SHA, "artifacts": rows}
                 for rows in (
                     None,
                     1,

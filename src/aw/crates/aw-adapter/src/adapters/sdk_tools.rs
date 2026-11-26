@@ -192,8 +192,8 @@ const RESIDENT_DIALECTS: &[ResidentDialect] = &[
     },
     ResidentDialect {
         adapter: "deepseek-harness",
-        entrypoint: None,
-        options: None,
+        entrypoint: Some("cordis"),
+        options: Some(super::deepseek::route_options),
         project_after_validation: false,
         validate: None,
         budget_errors: SDK_BUDGET_ERRORS,

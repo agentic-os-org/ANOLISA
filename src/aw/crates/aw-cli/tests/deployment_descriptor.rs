@@ -76,6 +76,7 @@ fn descriptor_binds_exact_configuration_and_selects_native_waiting() {
     for (adapter, profile, availability) in [
         ("qoder-sdk", "qoder-public-hooks", "native_fallback"),
         ("qwenpaw", "qwenpaw-installed-native-hooks", "required"),
+        ("deepseek-harness", "deepseek-cordis-hooks", "required"),
     ] {
         let mut document = configuration(directory.path(), adapter);
         for input in [false, true] {

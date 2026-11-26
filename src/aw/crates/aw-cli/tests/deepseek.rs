@@ -146,7 +146,7 @@ fn non_agent_commands_fail_before_service_start() {
 #[test]
 fn another_version_uses_the_same_native_contract() {
     let f = Fixture::new();
-    let document = setup(&f, "replace");
+    let mut document = setup(&f, "replace");
     let executable = f.root.join("dsh");
     fs::write(
         &executable,
@@ -164,6 +164,13 @@ fn another_version_uses_the_same_native_contract() {
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["executed"], false);
+    service.released(&f);
+    drop(service);
+    document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+    let service = Service::start(&f, &document);
+    let rejected = f.run(launch(&f, "allow"));
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("failure action is not supported"));
     service.released(&f);
 }
 
@@ -188,5 +195,50 @@ fn invalid_release_or_profile_fails_before_service_start() {
         f.save(&document);
         assert!(!f.run(launch(&f, "allow")).status.success());
         assert!(!f.root.join("state").exists());
+    }
+}
+
+#[test]
+fn cordis_bridge_attaches_by_pid_and_adopts_each_task_result() {
+    for mode in ["replace", "error-after"] {
+        let f = Fixture::new();
+        let mut document = setup(&f, mode);
+        document["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+        let service = Service::start(&f, &document);
+        fs::set_permissions(f.root.join("aw.json"), fs::Permissions::from_mode(0o600)).unwrap();
+        let mut descriptor = f.command();
+        descriptor
+            .args(["config", "descriptor", "--config"])
+            .arg(f.root.join("aw.json"))
+            .args(["--agent", "dsh", "--profile", "deepseek-cordis-hooks"]);
+        let descriptor = f.successful(descriptor);
+        fs::write(
+            f.root.join("deployment.json"),
+            serde_json::to_vec(&descriptor).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(
+            f.root.join("deployment.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut node = Command::new("node");
+        node.current_dir(&f.root)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", f.root.join("home"))
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/deepseek-harness/sdk.mjs"),
+            )
+            .arg(env!("CARGO_BIN_EXE_aw"))
+            .arg(mode);
+        let output = f.run(node);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        service.released(&f);
     }
 }

@@ -24,6 +24,9 @@ elif request["method"] == "invoke":
             del reply["input_digest"]
         elif event["tool"]["input"].get("command") == "forbidden":
             reply["effects"] = [{"type": "block", "reason_code": "security_denied"}]
+    elif mode == "error-after":
+        reply = {"api_version": request["api_version"], "request_id": request["request_id"],
+                 "status": "error", "error_code": "scanner_unavailable"}
     elif mode == "replace":
         projection = event["tool"].get("result_projection", {})
         if projection.get("status") == "success":

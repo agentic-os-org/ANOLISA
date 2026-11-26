@@ -6,16 +6,16 @@
 `anolisa-aw-sdk` Python 核心包。两个核心包提供连接传输、`Instance`、`Task`、`Admission`、
 `TaskScope`、部署 Descriptor 加载、协作式控制与通用语言级 Source Runtime
 （`@anolisa/aw-sdk/sources` 与 `aw_sdk.sources`）。各框架专属集成作为独立可选适配包分发
-（`@anolisa/aw-sdk-qoder`、`@anolisa/aw-sdk-pi`、`anolisa-aw-sdk-qwenpaw`、
+（`@anolisa/aw-sdk-qoder`、`@anolisa/aw-sdk-pi`、`@anolisa/aw-sdk-deepseek-harness`、`anolisa-aw-sdk-qwenpaw`、
 `anolisa-aw-sdk-claude`），不再物理捆绑在核心包内。要求 Linux，Node 包要求 Node.js 22+。
 AW 与 Provider 分别安装。当前交付源码构建候选，registry 发布沿 AW 发行流程。
 
 AW 应与语言包采用同一候选源码版本构建。未提供 `aw-sdk/v1` 的既有发行版会拒绝
 连接；协作式控制还要求 `aw-sdk-control/v1`。安装语言包不会升级 AW。
 
-## 6 包结构与选型
+## 候选包结构与选型
 
-AW 提供 2 个无框架耦合的核心包与 4 个可选框架适配包（3 个 Python wheel 与 3 个 npm tarball）。
+候选构建产出 2 个通用核心包与 5 个可选框架适配包（3 个 Python wheel 与 4 个 npm tarball）。
 请按适用发行渠道获取 AW 核心包与双语言 SDK 产物（例如可用的 OS 软件包、发布或 CI 归档，或按
 [源码构建指南](../../../../../contribute/zh/aw/building.md)自行构建），并按
 [安装指南](../../../../user-guide/zh/aw/installation.md#获取安装包)校验完整性。
@@ -26,6 +26,7 @@ AW 提供 2 个无框架耦合的核心包与 4 个可选框架适配包（3 个
 | Python（`>=3.11`） | `anolisa-aw-sdk`（核心包） | 传输、`Instance`/`Task`/`Admission`/`TaskScope`、Descriptor 加载、协作控制、`LanguageSource` | `aw_sdk`、`aw_sdk.sources` | —（`adapter: sdk`） |
 | Python（`>=3.11`） | `anolisa-aw-sdk-claude`（可选） | 常驻 Claude Agent SDK Worker | `aw_sdk_claude`（`ResidentClaude`） | `claude-resident-hooks` |
 | Python（`>=3.11`） | `anolisa-aw-sdk-qwenpaw`（可选） | QwenPaw 原生插件与工具后延迟插件 | `aw_sdk_qwenpaw`（`QwenPawPlugin`、`AfterOnlyPlugin`） | `qwenpaw-installed-native-hooks` |
+| TypeScript / Node (`>=22.19`) | `@anolisa/aw-sdk-deepseek-harness` | [Cordis Bridge](../agents/deepseek-harness.md) | `createDeepSeekBridge` | `deepseek-cordis-hooks` |
 | TypeScript / Node（`>=22`） | `@anolisa/aw-sdk`（核心包） | 传输、`Instance`/`Task`/`Admission`/`TaskScope`、Descriptor 加载、协作控制、`LanguageSource` | `@anolisa/aw-sdk`、`@anolisa/aw-sdk/sources` | —（`adapter: sdk`） |
 | TypeScript / Node（`>=22`） | `@anolisa/aw-sdk-qoder`（可选） | Qoder Agent SDK 公开 Hook 桥接 | `@anolisa/aw-sdk-qoder`（`createQoderBridge`） | `qoder-public-hooks` |
 | TypeScript / Node（`>=22.19`） | `@anolisa/aw-sdk-pi`（可选） | 常驻 Pi 编程 Agent Worker | `@anolisa/aw-sdk-pi`（`runPiWorker`） | `pi-worker-hooks` |
@@ -198,6 +199,7 @@ SDK 监听并确认 Ready，不启动 Agent，也不会向任意 PID 注入。
 | 目标框架 | `--profile` | SDK 入口 |
 | --- | --- | --- |
 | Qoder SDK | `qoder-public-hooks` | `createQoderBridge(..., descriptorFile)`（`@anolisa/aw-sdk-qoder`） |
+| DeepSeek Harness | `deepseek-cordis-hooks` | `createDeepSeekBridge({ configFile, descriptorFile })` |
 | Pi SDK | `pi-worker-hooks` | `runPiWorker({ ..., descriptorFile })`（`@anolisa/aw-sdk-pi`） |
 | QwenPaw | `qwenpaw-installed-native-hooks` | `QwenPawPlugin.from_config(..., descriptor_file=...)`（`anolisa-aw-sdk-qwenpaw`） |
 | Claude SDK | `claude-resident-hooks` | `ResidentClaude.from_config(..., descriptor_file=...)`（`anolisa-aw-sdk-claude`） |

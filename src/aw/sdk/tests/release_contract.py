@@ -22,7 +22,11 @@ def main(binary: Path, receipt: Path) -> None:
         aw, (packages["wheel", "core"], packages["wheel", "claude"], packages["wheel", "qwenpaw"])
     )
     typescript_package.main(
-        aw, (packages["npm", "core"], packages["npm", "qoder"], packages["npm", "pi"])
+        aw,
+        (
+            packages["npm", "core"], packages["npm", "qoder"],
+            packages["npm", "pi"], packages["npm", "deepseek-harness"],
+        ),
     )
 
 

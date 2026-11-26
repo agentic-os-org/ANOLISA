@@ -176,6 +176,7 @@ MCP、Pilot 接入与覆盖边界见[原生配置](../../../developer-guide/zh/a
 
 ## 使用边界
 
+- DeepSeek Harness 0.2.1-rc.5 支持前台 bash 两处 stdout 同步脱敏。严格输出检查故障时，工具观察者和模型收到固定错误。[DeepSeek Harness](../../../developer-guide/zh/aw/agents/deepseek-harness.md)
 - 普通 Qoder SDK、QwenPaw 可配置后置故障 `withhold_result`，暂扣结果并停止后续派发；已发生的工具副作用保留。
 - AgentScope 2.0.6+ 的 tool.after 可配置 `withhold_result`：严格检查失败时在中间件链末端以错误态占位结果替换未检查原文，其余 after Hook 仍观察原始结果；仅在桥支持结果替换时准入。
 - Pi 受管 tool.after 配置 `on_error: report` 时，Provider 或传输故障保留已检查的原始结果，同一会话可继续下一次 prompt；before 故障、tool.after 的 `block`/`withhold_result` 故障、取消、身份与清理失败仍停止任务。输入拒绝及 block 输入检查故障只拒绝该次 prompt，清理后允许继续提交。

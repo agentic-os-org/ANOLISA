@@ -92,15 +92,15 @@ adopts in DSH:
 | --- | --- | --- |
 | `input.submit` | `agent/pre-step` | Check submitted user text; `block` rejects that submission |
 | `tool.before` | `tools/pre-execute` | Check the tool name and arguments; `block` prevents execution |
-| `tool.after` | `tools/post-execute` | Observe the result or replace eligible text with `replace_result` |
+| `tool.after` | Post-execute or verified rc.5 publication boundary | Observe the result, replace eligible text, or withhold it on a strict check failure |
 | `security.violation` | After finalization, before top-level Session commit | Check the final result; `block` withholds delivery |
 
 For final-result blocking, the Provider must inspect the complete
 `security.violation` result and return `block` on a violation;
 `on_error: block` also withholds the result on a check failure. `tool.after`
-can replace only a successful root call's single-text result. DSH's
-`finalizeContent` may change content after that event, so the final check uses
-an independent `security.violation` step.
+can replace only a successful root call's single-text result. Managed rc.5
+checks native bash replacements and strict routes after `finalizeContent`.
+Other managed replacements run during `tools/post-execute`, before the finalizer.
 
 The DSH plugin also registers native `tools.guard`. It synchronously rechecks
 the `tool.before` decision before execution and denies a call that another
@@ -125,6 +125,68 @@ tool must not execute. For a blocked headless top-level final result, the model
 and CLI receive only a withheld error result. To stop the on-demand AW service,
 run `target/debug/aw service stop --config ./aw.yaml`.
 
+## Application-owned Cordis Bridge
+
+Build AW, the sec-core Provider, the core npm SDK and the optional
+`@anolisa/aw-sdk-deepseek-harness` package from the same candidate. Use the
+Bridge process's normal workspace and credentials. Set `AW_CONFIG` and
+`AW_DESCRIPTOR` to absolute paths in a directory owned by the Bridge user.
+Compile the descriptor during deployment and preload the published rc.5 tools
+module before any DSH imports. Keep that module external when bundling the Bridge.
+
+```bash
+umask 077
+aw config descriptor --config "$AW_CONFIG" --agent dsh \
+  --profile deepseek-cordis-hooks > "$AW_DESCRIPTOR"
+node --import @anolisa/aw-sdk-deepseek-harness/preload bridge.mjs
+```
+
+Add the plugin to the existing profile preparation callback and inject
+`awDeepseek` into the agent-loop entry. Installation starts the SDK control
+listener asynchronously. The Bridge can report application readiness before AW attaches.
+
+```js
+import { createDeepSeekBridge } from "@anolisa/aw-sdk-deepseek-harness";
+
+const aw = await createDeepSeekBridge({
+  configFile: process.env.AW_CONFIG,
+  descriptorFile: process.env.AW_DESCRIPTOR,
+});
+const context = await bootProfile(ctx => ctx.plugin(aw.plugin));
+```
+
+Use the Node Bridge PID in the controller.
+
+```bash
+aw connect --config "$AW_CONFIG" --sdk-pid "$BRIDGE_PID" --timeout-ms 5000
+```
+
+Wrap the full asynchronous run in
+`aw.runTask(sessionId, work, { cwd, signal })`. Start the protected input
+inside `work` and await tool completion and session settlement before returning.
+In a multi-turn bridge this includes `followup()`, `whenIdle()` and draining pending
+children. The SDK admits one run per session and waits up to `attachTimeoutMs`
+(default 5000 ms) for AW. Concurrent sessions have independent policy snapshots.
+Calls from sessions without an active Task are denied. Child sessions with
+distinct IDs need their own ownership binding. Cordis disposal closes the listener.
+
+The cooperative profile covers text `input.submit`, `tool.before` and
+`tool.after`. An application's own sanitizer can keep its ordinary `tools/post-execute`
+listener. DSH first adopts that listener's content or value and runs its
+content finalizer. AW checks the materialized result before `tools/result`,
+Session history and model delivery. This ordering also covers matched native
+bash results on the rc.5 managed replacement path.
+
+For a successful, non-nested foreground `bash` result, AW authorizes
+`content[0].text` and `value.stdout.text` together when their text matches.
+sec-core scans the entire result, including stderr, metadata and additional
+contexts. Both fields receive the verified masked text. Configure
+`tool.after` with `on_error: withhold_result` to deliver a fixed error if a
+scan fails, a sensitive result has divergent fields, or strict verification
+cannot finish. The error contains no original value, metadata or contexts.
+With `on_error: report`, a Provider fault can deliver the original result.
+The tool may already have performed its external action.
+
 ## Coverage
 
 With `security.violation` enabled, the Adapter checks the published DSH
@@ -135,6 +197,6 @@ final-delivery behavior through [native acceptance](../validation.md).
 
 The final check covers the verified headless top-level model, Session, and CLI
 delivery. Nested/PTC results and direct `ToolRuntime.execute` consumers do not
-cross this commit point; same-process `tools/result` observers see raw content
-before the final check. DSH's `skill` tool exposes only its name to the Hook,
+cross this commit point; same-process `tools/result` observers see the tool.after result
+before this independent security check. DSH's `skill` tool exposes only its name to the Hook,
 so `check_skill` cannot receive a resolved Skill object and fails admission.

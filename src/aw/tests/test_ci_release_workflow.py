@@ -82,7 +82,7 @@ class ReleaseReceiptsTests(unittest.TestCase):
                 file.addfile(info, io.BytesIO(data))
         records = []
         for kind, components, suffix in [
-            ("npm", ("core", "qoder", "pi"), ".tgz"), ("wheel", ("core", "claude", "qwenpaw"), ".whl"),
+            ("npm", ("core", "qoder", "pi", "deepseek-harness"), ".tgz"), ("wheel", ("core", "claude", "qwenpaw"), ".whl"),
         ]:
             for component in components:
                 name = f"{component}{suffix}"
@@ -92,7 +92,7 @@ class ReleaseReceiptsTests(unittest.TestCase):
                     "sha256": hashlib.sha256(b"SDK").hexdigest(),
                 })
         (self.root / "sdk-candidate.json").write_text(json.dumps({
-            "schema": "aw-sdk-candidate/v2", "commit": self.sha, "artifacts": records,
+            "schema": "aw-sdk-candidate/v3", "commit": self.sha, "artifacts": records,
         }))
         self.write_checksums()
 

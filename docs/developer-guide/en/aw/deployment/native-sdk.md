@@ -8,7 +8,7 @@ Both core packages provide connection transport, `Instance`, `Task`, `Admission`
 `TaskScope`, Deployment Descriptor loading, cooperative control, and the
 framework-free language-level Source Runtime (`@anolisa/aw-sdk/sources` and
 `aw_sdk.sources`). Framework-specific integrations ship as separate optional
-adapter packages (`@anolisa/aw-sdk-qoder`, `@anolisa/aw-sdk-pi`,
+adapter packages (`@anolisa/aw-sdk-qoder`, `@anolisa/aw-sdk-pi`, `@anolisa/aw-sdk-deepseek-harness`,
 `anolisa-aw-sdk-qwenpaw`, and `anolisa-aw-sdk-claude`) rather than being bundled
 into the core packages. Linux is required; the Node packages need Node.js 22+.
 Install AW and Providers separately. These source-built candidate packages await
@@ -18,10 +18,10 @@ Build AW from the same candidate revision as the language package. Existing
 releases without `aw-sdk/v1` reject connection; cooperative control additionally
 requires `aw-sdk-control/v1`. These source-built packages do not upgrade AW.
 
-## Package layout (6 packages)
+## Package layout (7 candidate packages)
 
-AW ships 2 framework-free core packages and 4 optional framework adapter packages
-(3 Python wheels and 3 npm tarballs). Obtain the core and dual-language SDK
+The candidate build produces 2 framework-free core packages and 5 optional framework adapter packages
+(3 Python wheels and 4 npm tarballs). Obtain the core and dual-language SDK
 packages from your applicable distribution channel (such as OS packages when
 available, published release/CI archives, or a
 [source build](../../../../../contribute/en/aw/building.md)), and verify artifact
@@ -34,6 +34,7 @@ only when your application uses that framework:
 | Python (`>=3.11`) | `anolisa-aw-sdk` (core) | Transport, `Instance`/`Task`/`Admission`/`TaskScope`, Descriptor loader, cooperative control, `LanguageSource` | `aw_sdk`, `aw_sdk.sources` | — (`adapter: sdk`) |
 | Python (`>=3.11`) | `anolisa-aw-sdk-claude` (optional) | Resident Claude Agent SDK worker | `aw_sdk_claude` (`ResidentClaude`) | `claude-resident-hooks` |
 | Python (`>=3.11`) | `anolisa-aw-sdk-qwenpaw` (optional) | QwenPaw native plugin & deferred after-only plugin | `aw_sdk_qwenpaw` (`QwenPawPlugin`, `AfterOnlyPlugin`) | `qwenpaw-installed-native-hooks` |
+| TypeScript / Node (`>=22.19`) | `@anolisa/aw-sdk-deepseek-harness` | [Cordis Bridge](../agents/deepseek-harness.md) | `createDeepSeekBridge` | `deepseek-cordis-hooks` |
 | TypeScript / Node (`>=22`) | `@anolisa/aw-sdk` (core) | Transport, `Instance`/`Task`/`Admission`/`TaskScope`, Descriptor loader, cooperative control, `LanguageSource` | `@anolisa/aw-sdk`, `@anolisa/aw-sdk/sources` | — (`adapter: sdk`) |
 | TypeScript / Node (`>=22`) | `@anolisa/aw-sdk-qoder` (optional) | Public-Hook Qoder Agent SDK bridge | `@anolisa/aw-sdk-qoder` (`createQoderBridge`) | `qoder-public-hooks` |
 | TypeScript / Node (`>=22.19`) | `@anolisa/aw-sdk-pi` (optional) | Resident Pi coding agent worker | `@anolisa/aw-sdk-pi` (`runPiWorker`) | `pi-worker-hooks` |
@@ -249,6 +250,7 @@ cleared (for example, mode `0400`).
 | Target framework | `--profile` | SDK entrypoint |
 | --- | --- | --- |
 | Qoder SDK | `qoder-public-hooks` | `createQoderBridge(..., descriptorFile)` (`@anolisa/aw-sdk-qoder`) |
+| DeepSeek Harness | `deepseek-cordis-hooks` | `createDeepSeekBridge({ configFile, descriptorFile })` |
 | Pi SDK | `pi-worker-hooks` | `runPiWorker({ ..., descriptorFile })` (`@anolisa/aw-sdk-pi`) |
 | QwenPaw | `qwenpaw-installed-native-hooks` | `QwenPawPlugin.from_config(..., descriptor_file=...)` (`anolisa-aw-sdk-qwenpaw`) |
 | Claude SDK | `claude-resident-hooks` | `ResidentClaude.from_config(..., descriptor_file=...)` (`anolisa-aw-sdk-claude`) |

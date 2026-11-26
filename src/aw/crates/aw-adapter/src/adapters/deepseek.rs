@@ -13,6 +13,8 @@ use std::{collections::BTreeMap, ffi::OsStr, fs, time::Duration};
 
 pub(crate) struct DeepSeek;
 
+const RESULT_GATE_RELEASE: &str = "0.2.1-rc.5";
+
 pub(crate) fn replaceable(native: &Value) -> bool {
     let result = &native["tool_response"];
     let structured_bash = native["tool_call"]["name"] == "bash"
@@ -205,7 +207,12 @@ impl Adapter for DeepSeek {
 
 impl PreparedLaunch for Prepared {
     fn capabilities(&self) -> Capabilities {
-        adapter::catalog::DEEPSEEK.capabilities(&self.version, &self.profile)
+        let mut caps = adapter::catalog::DEEPSEEK.capabilities(&self.version, &self.profile);
+        if self.version == RESULT_GATE_RELEASE {
+            caps.failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+        }
+        caps
     }
     fn validate_steps(&self, steps: &[AdmittedStep]) -> Result<()> {
         routes(&self.input.document, &self.input.target, steps).map(|_| ())
@@ -216,9 +223,11 @@ impl PreparedLaunch for Prepared {
             .trim()
             .to_owned();
         let ready = context.files.directory().join("deepseek-ready.json");
+        let result_gate =
+            self.version == RESULT_GATE_RELEASE && steps_need_result_gate(context.steps);
         let config = context.files.write("deepseek-hooks.json", &serde_json::to_vec(&json!({
             "executable":context.executable, "binding":context.binding_path,
-            "ready_path":ready, "ready_token":token, "hooks":hooks,
+            "result_gate":result_gate, "ready_path":ready, "ready_token":token, "hooks":hooks,
             "replacement_step":events.get("tool.after").and_then(|route| route.replacement_step.as_ref())
         }))?)?;
         let plugin = context.files.write(
@@ -226,19 +235,35 @@ impl PreparedLaunch for Prepared {
             include_bytes!("../../native/deepseek-harness/plugin.mjs"),
         )?;
         context.files.write(
+            "hooks.mjs",
+            include_bytes!("../../native/deepseek-harness/hooks.mjs"),
+        )?;
+        context.files.write(
             "callback.mjs",
             include_bytes!("../../native/deepseek-harness/callback.mjs"),
         )?;
-        let final_preload = if events.contains_key("security.violation") {
+        let preload = if result_gate || events.contains_key("security.violation") {
             fs::create_dir(context.files.directory().join("deepseek-harness"))?;
             fs::create_dir_all(context.files.directory().join("shared/js-runtime"))?;
             context.files.write(
                 "shared/js-runtime/module-patch.mjs",
                 include_bytes!("../../native/shared/js-runtime/module-patch.mjs"),
             )?;
+            if result_gate {
+                context.files.write(
+                    "deepseek-harness/result-preload.mjs",
+                    include_bytes!("../../native/deepseek-harness/result-preload.mjs"),
+                )?;
+            }
+            if events.contains_key("security.violation") {
+                context.files.write(
+                    "deepseek-harness/final-preload.mjs",
+                    include_bytes!("../../native/deepseek-harness/final-preload.mjs"),
+                )?;
+            }
             Some(context.files.write(
-                "deepseek-harness/final-preload.mjs",
-                include_bytes!("../../native/deepseek-harness/final-preload.mjs"),
+                "deepseek-harness/bootstrap.mjs",
+                include_bytes!("../../native/deepseek-harness/bootstrap.mjs"),
             )?)
         } else {
             None
@@ -260,9 +285,9 @@ impl PreparedLaunch for Prepared {
             .environment
             .insert("AW_NATIVE_CONFIG".into(), config.into_os_string());
         let provider_environment = command.environment.clone();
-        if let Some(preload) = final_preload {
-            let url = reqwest::Url::from_file_path(preload)
-                .map_err(|_| "DeepSeek final preload path is not a file URL")?;
+        if let Some(path) = preload {
+            let url = reqwest::Url::from_file_path(path)
+                .map_err(|_| "invalid DeepSeek bootstrap path")?;
             let mut options = command
                 .environment
                 .get(OsStr::new("NODE_OPTIONS"))
@@ -290,20 +315,8 @@ impl PreparedLaunch for Prepared {
     }
 }
 
-fn routes(
-    document: &Value,
-    target: &str,
-    steps: &[AdmittedStep],
-) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
-    if !steps.iter().any(|step| step.event == "security.violation")
-        && aw_config::requirements::project_document(document, target)
-            .map_err(|_| "could not project native Hook requirements")?
-            .iter()
-            .any(|requirement| requirement.event == "security.violation")
-    {
-        return Err("DeepSeek final security gate requires a Provider step".into());
-    }
-    let options = aw_core::routes::RouteOptions {
+pub(crate) fn route_options(_: &str) -> aw_core::routes::RouteOptions<'static> {
+    aw_core::routes::RouteOptions {
         events: &[
             "session.start",
             "input.submit",
@@ -320,7 +333,30 @@ fn routes(
         include_replace_input: false,
         include_tool_selectors: false,
         skill_check: aw_core::routes::SkillCheck::Unsupported,
-    };
+    }
+}
+
+fn steps_need_result_gate(steps: &[AdmittedStep]) -> bool {
+    steps.iter().any(|step| {
+        step.event == "tool.after"
+            && (step.execution.replaces_result() || step.on_error == "withhold_result")
+    })
+}
+
+fn routes(
+    document: &Value,
+    target: &str,
+    steps: &[AdmittedStep],
+) -> Result<(BTreeMap<String, HookEvent>, Vec<Value>)> {
+    if !steps.iter().any(|step| step.event == "security.violation")
+        && aw_config::requirements::project_document(document, target)
+            .map_err(|_| "could not project native Hook requirements")?
+            .iter()
+            .any(|requirement| requirement.event == "security.violation")
+    {
+        return Err("DeepSeek final security gate requires a Provider step".into());
+    }
+    let options = route_options("");
     let prepared =
         aw_core::routes::compile(document, steps, &options).map_err(|error| match error {
             aw_core::routes::RouteError::UnsupportedSkillCheck => {
