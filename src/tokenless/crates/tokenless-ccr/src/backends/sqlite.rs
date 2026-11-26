@@ -25,6 +25,10 @@ const DEFAULT_CAPACITY: usize = 10_000;
 /// while opening the database and for every later statement.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Shared by initialization and `reopening_a_full_stash_uses_bounded_generation_query_work`;
+/// keep both on this query so the regression test measures production SQL.
+const MAX_GENERATION_QUERY: &str = "SELECT COALESCE(MAX(generation), 0) FROM stash";
+
 pub struct SqliteStore {
     conn: Mutex<Connection>,
     ttl_seconds: u64,
@@ -137,6 +141,12 @@ impl SqliteStore {
             "CREATE INDEX IF NOT EXISTS idx_stash_expires_at ON stash(expires_at)",
             [],
         )?;
+        // Writable opens reconcile the high-water mark. Keep this lookup off
+        // the payload table, including on existing databases.
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stash_generation ON stash(generation)",
+            [],
+        )?;
         tx.execute(
             "CREATE TABLE IF NOT EXISTS stash_metadata (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -144,11 +154,7 @@ impl SqliteStore {
             )",
             [],
         )?;
-        let max_generation: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(generation), 0) FROM stash",
-            [],
-            |row| row.get(0),
-        )?;
+        let max_generation: i64 = tx.query_row(MAX_GENERATION_QUERY, [], |row| row.get(0))?;
         tx.execute(
             "INSERT INTO stash_metadata(singleton, last_generation)
              VALUES (1, ?)

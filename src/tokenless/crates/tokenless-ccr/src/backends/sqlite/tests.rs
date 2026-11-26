@@ -436,6 +436,47 @@ fn current_generation_schema_migrates_high_water_mark() {
 }
 
 #[test]
+fn reopening_a_full_stash_uses_bounded_generation_query_work() {
+    let (store, dir) = tmp_store(60, DEFAULT_CAPACITY);
+    {
+        let mut conn = store.lock_conn();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO stash(hash, payload, expires_at, generation)
+                     VALUES (?, 'payload', 9999999999, ?)",
+                )
+                .unwrap();
+            for generation in 1..=DEFAULT_CAPACITY as i64 {
+                insert
+                    .execute(rusqlite::params![generation.to_string(), generation])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+    drop(store);
+
+    let reopened = SqliteStore::new(dir.path().join("stash.db")).unwrap();
+    {
+        let conn = reopened.lock_conn();
+        let mut query = conn.prepare(MAX_GENERATION_QUERY).unwrap();
+        let maximum: i64 = query.query_row([], |row| row.get(0)).unwrap();
+        assert_eq!(maximum, DEFAULT_CAPACITY as i64);
+        // Count SQLite work rather than wall time: scanning 10,000 rows
+        // must fail this check even on a fast or lightly loaded host.
+        let steps = query.get_status(rusqlite::StatementStatus::VmStep);
+        assert!(steps < 100, "generation lookup took {steps} VM steps");
+    }
+    assert_eq!(reopened.retrieve("1").unwrap(), Some("payload".into()));
+    assert_eq!(
+        reopened.stash("next").unwrap().generation,
+        DEFAULT_CAPACITY as u64 + 1
+    );
+}
+
+#[test]
 fn pre_generation_schema_migrates_and_starts_at_one() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stash.db");
@@ -467,6 +508,58 @@ fn pre_generation_schema_migrates_and_starts_at_one() {
         )
         .unwrap();
     assert_eq!(generation, 0);
+}
+
+#[test]
+fn concurrent_upgrade_preserves_payloads_and_generation_high_water() {
+    for high_water in [3_u64, 20] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stash.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stash (
+                hash TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                generation INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO stash VALUES ('old', 'retained payload', 9999999999, 7);
+            CREATE TABLE stash_metadata (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                last_generation INTEGER NOT NULL CHECK(last_generation >= 0)
+            );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO stash_metadata VALUES (1, ?)", [high_water])
+            .unwrap();
+        drop(conn);
+
+        let barrier = std::sync::Barrier::new(8);
+        let mut generations = thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let (path, barrier) = (&path, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let store = SqliteStore::new(path).unwrap();
+                        assert_eq!(
+                            store.retrieve("old").unwrap(),
+                            Some("retained payload".into())
+                        );
+                        store.stash(&format!("new payload {i}")).unwrap().generation
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        generations.sort_unstable();
+        let first = high_water.max(7) + 1;
+        assert_eq!(generations, (first..first + 8).collect::<Vec<_>>());
+        assert_eq!(SqliteStore::new(&path).unwrap().len(), 9);
+    }
 }
 
 #[test]
