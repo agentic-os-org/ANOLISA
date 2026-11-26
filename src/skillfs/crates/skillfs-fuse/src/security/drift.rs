@@ -38,7 +38,8 @@
 //! Layout caveat. The lexical classifier reliably covers the **flat**
 //! SkillFS layout (`<source>/<skill>/...`). The **categorized** layout
 //! (`<source>/<category>/<skill>/SKILL.md`, supported by
-//! `skillfs-core::store::is_category_dir`) cannot be told apart from a
+//! `skillfs-core::store::SkillStore::load_from_directory` and
+//! `skillfs-core::store::is_loadable_categorized_skill`) cannot be told apart from a
 //! flat layout without filesystem context. The classifier therefore:
 //!
 //! * refuses skill attribution for any `<source>/<a>/<b>/.../SKILL.md`
@@ -238,7 +239,8 @@ pub fn classify_drift_path(source_root: &Path, observed: &Path) -> DriftScope {
     }
     // Categorized-layout safeguard. SkillFS supports
     // `<source>/<category>/<skill>/SKILL.md` as a first-class layout
-    // (see `skillfs-core::store::is_category_dir`). When we see a
+    // (see `skillfs-core::store::SkillStore::load_from_directory` and
+    // `skillfs-core::store::is_loadable_categorized_skill`). When we see a
     // manifest at depth ≥ 2 (i.e. `<source>/<a>/<b>/.../SKILL.md`)
     // the lexical classifier cannot tell whether `a` is a flat skill
     // with a stray nested manifest or a category whose real skill is

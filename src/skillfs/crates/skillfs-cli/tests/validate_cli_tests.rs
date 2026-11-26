@@ -371,3 +371,51 @@ fn non_utf8_source_path_is_validated() {
         "stdout={stdout}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn unreadable_skill_directory_exits_one_with_json_diagnostic()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return Ok(());
+    }
+    struct RestorePermissions<'a>(&'a Path);
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    for relative in ["demo", "category/demo"] {
+        let source = tempfile::tempdir()?;
+        fs::create_dir(source.path().join("empty"))?;
+        let validate = || -> Result<_, Box<dyn std::error::Error>> {
+            let output = Command::new(bin_path())
+                .arg("validate")
+                .arg(source.path())
+                .args(["--format", "json"])
+                .output()?;
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            Ok((output.status.code(), json))
+        };
+        let (code, json) = validate()?;
+        assert_eq!(code, Some(0), "{json}");
+        assert_eq!(json["failed"], 0);
+
+        create_skill_dir(source.path(), relative, VALID_SKILL);
+        let dir = source.path().join(relative);
+        let _restore = RestorePermissions(&dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000))?;
+        let (code, json) = validate()?;
+        assert_eq!(code, Some(1), "{json}");
+        assert_eq!(json["failed"], 1);
+        let errors = json["errors"].as_array().expect("JSON errors array");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["status"], "load_error");
+        assert_eq!(errors[0]["path"].as_str(), dir.to_str());
+    }
+    Ok(())
+}

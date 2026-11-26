@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::path::Path;
 
 use tracing::{info, warn};
@@ -14,6 +15,26 @@ use crate::{CategoryMeta, ParseConfig, ParseStatus, SkillEntry};
 pub struct LoadError {
     pub path: std::path::PathBuf,
     pub error: String,
+}
+
+const MANIFEST_PROBE_ERROR_PREFIX: &str = "cannot check for SKILL.md:";
+const CATEGORY_READ_ERROR_PREFIX: &str = "cannot read category directory:";
+const CATEGORY_ENTRY_READ_ERROR_PREFIX: &str = "cannot read category directory entry:";
+
+impl LoadError {
+    /// Whether this error came from probing a candidate directory for `SKILL.md`.
+    pub fn is_manifest_probe_error(&self) -> bool {
+        self.error.starts_with(MANIFEST_PROBE_ERROR_PREFIX)
+    }
+
+    /// Whether this error came from inspecting a child directory whose role
+    /// (skill, category, or unrelated auxiliary directory) could not be
+    /// determined due to an I/O failure.
+    pub fn is_directory_inspection_error(&self) -> bool {
+        self.is_manifest_probe_error()
+            || self.error.starts_with(CATEGORY_READ_ERROR_PREFIX)
+            || self.error.starts_with(CATEGORY_ENTRY_READ_ERROR_PREFIX)
+    }
 }
 
 /// Reported for a Skill or category directory whose name cannot be
@@ -99,65 +120,67 @@ impl SkillStore {
             if is_hidden(&path) {
                 continue;
             }
-            // A name that is not valid UTF-8 is never a skill name: the
-            // canonical resolver rejects such a path component
-            // (`invalid_canonical_path`). It is only reported once the
-            // directory turns out to be a Skill or a category.
-            let name = path.file_name().and_then(|n| n.to_str());
-
-            if is_category_dir(&path) {
-                // ---- Categorized layout ----
-                // The max_skills limit is enforced per nested skill by
-                // `load_skills_from_category`, so the category itself is
-                // never charged a slot or an error of its own.
-                let Some(name) = name else {
-                    errors.push(non_utf8_name_error(&path));
-                    continue;
-                };
-                let cat_name = name.to_string();
-
-                // Try to load _category.yaml
-                let cat_meta = load_category_meta(&path, &cat_name, config.max_skill_size);
-                self.categories.insert(cat_name.clone(), cat_meta);
-
-                // Load skills inside this category directory
-                let cat_errors =
-                    self.load_skills_from_category(&path, &cat_name, config, &mut loaded_count);
-                errors.extend(cat_errors);
-            } else {
-                // ---- Flat layout ----
-                // Classify before enforcing the limit: a directory that is
-                // not a skill is skipped silently whether or not the limit
-                // has been reached, exactly as below the limit.
-                if !has_regular_skill_md(&path) {
+            let has_manifest = match probe_regular_skill_md(&path) {
+                Ok(present) => present,
+                Err(e) => {
+                    errors.push(manifest_probe_error(&path, e));
                     continue;
                 }
-                if loaded_count >= config.max_skills {
-                    errors.push(LoadError {
-                        path: path.clone(),
-                        error: format!("max skills limit reached ({})", config.max_skills),
-                    });
-                    continue;
-                }
-                let Some(name) = name else {
-                    errors.push(non_utf8_name_error(&path));
-                    continue;
-                };
-                let skill_md = path.join("SKILL.md");
+            };
+            if has_manifest {
+                self.load_discovered_skill(&path, "", config, &mut loaded_count, &mut errors);
+                continue;
+            }
 
-                match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
-                    Ok(mut entry) => {
-                        let dir_name = name.to_string();
-                        adopt_directory_name(&mut entry, &dir_name);
-                        info!(name = %dir_name, "loaded skill");
-                        self.record_discovered(entry, "", &mut loaded_count, &mut errors);
-                    }
-                    Err(e) => {
+            let entries = match std::fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    if !path_absent(&e) {
                         errors.push(LoadError {
-                            path: skill_md,
-                            error: e.to_string(),
+                            path,
+                            error: format!("{CATEGORY_READ_ERROR_PREFIX} {e}"),
                         });
                     }
+                    continue;
+                }
+            };
+            let mut found_category = false;
+            for child in entries {
+                let child = match child {
+                    Ok(child) => child.path(),
+                    Err(e) => {
+                        errors.push(LoadError {
+                            path: path.clone(),
+                            error: format!("{CATEGORY_ENTRY_READ_ERROR_PREFIX} {e}"),
+                        });
+                        continue;
+                    }
+                };
+                match probe_regular_skill_md(&child) {
+                    Ok(true) => {}
+                    Err(e) if !is_hidden(&child) => {
+                        errors.push(manifest_probe_error(&child, e));
+                        continue;
+                    }
+                    _ => continue,
+                }
+                let Some(category) = path.file_name().and_then(|n| n.to_str()) else {
+                    errors.push(non_utf8_name_error(&path));
+                    break;
+                };
+                if !found_category {
+                    let meta = load_category_meta(&path, category, config.max_skill_size);
+                    self.categories.insert(category.to_owned(), meta);
+                    found_category = true;
+                }
+                if !is_hidden(&child) {
+                    self.load_discovered_skill(
+                        &child,
+                        category,
+                        config,
+                        &mut loaded_count,
+                        &mut errors,
+                    );
                 }
             }
         }
@@ -316,85 +339,41 @@ impl SkillStore {
         self.upsert_checked(entry)
     }
 
-    /// Load skills from a single category directory.
-    fn load_skills_from_category(
+    /// Load a directory whose regular manifest has already been discovered.
+    fn load_discovered_skill(
         &mut self,
-        cat_path: &Path,
+        path: &Path,
         cat_name: &str,
         config: &ParseConfig,
         loaded_count: &mut usize,
-    ) -> Vec<LoadError> {
-        let mut errors = Vec::new();
+        errors: &mut Vec<LoadError>,
+    ) {
+        if *loaded_count >= config.max_skills {
+            errors.push(LoadError {
+                path: path.to_path_buf(),
+                error: format!("max skills limit reached ({})", config.max_skills),
+            });
+            return;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            errors.push(non_utf8_name_error(path));
+            return;
+        };
+        let skill_md = path.join("SKILL.md");
 
-        let entries = match std::fs::read_dir(cat_path) {
-            Ok(e) => e,
+        match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
+            Ok(mut entry) => {
+                adopt_directory_name(&mut entry, name);
+                info!(name, category = %cat_name, "loaded skill");
+                self.record_discovered(entry, cat_name, loaded_count, errors);
+            }
             Err(e) => {
                 errors.push(LoadError {
-                    path: cat_path.to_path_buf(),
-                    error: format!("cannot read category directory: {e}"),
+                    path: skill_md,
+                    error: e.to_string(),
                 });
-                return errors;
-            }
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("failed to read dir entry in category {cat_name}: {e}");
-                    continue;
-                }
-            };
-
-            let path = entry.path();
-            // No-follow entry type: a symlinked child is never a managed
-            // nested Skill (resolver rejects symlinked components).
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-
-            if is_hidden(&path) {
-                continue;
-            }
-
-            // Classify before enforcing the limit: a category child that is
-            // not a skill is skipped silently whether or not the limit has
-            // been reached, exactly as below the limit.
-            if !has_regular_skill_md(&path) {
-                continue;
-            }
-            if *loaded_count >= config.max_skills {
-                errors.push(LoadError {
-                    path: path.clone(),
-                    error: format!("max skills limit reached ({})", config.max_skills),
-                });
-                continue;
-            }
-            // Same rule as the top-level loader: a Skill whose name is not
-            // valid UTF-8 is reported, not loaded under a fallback name.
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                errors.push(non_utf8_name_error(&path));
-                continue;
-            };
-            let skill_md = path.join("SKILL.md");
-
-            match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
-                Ok(mut entry) => {
-                    let dir_name = name.to_string();
-                    adopt_directory_name(&mut entry, &dir_name);
-                    info!(name = %dir_name, category = %cat_name, "loaded skill");
-                    self.record_discovered(entry, cat_name, loaded_count, &mut errors);
-                }
-                Err(e) => {
-                    errors.push(LoadError {
-                        path: skill_md,
-                        error: e.to_string(),
-                    });
-                }
             }
         }
-
-        errors
     }
 
     /// Insert or update a skill entry.
@@ -536,15 +515,33 @@ impl Default for SkillStore {
 /// classification (real directory with a regular-file marker → Skill;
 /// anything else → not a Skill).
 pub fn has_regular_skill_md(dir: &Path) -> bool {
-    // The directory itself must be a real directory, checked no-follow so a
-    // symlink is rejected even when its target is a directory.
-    match std::fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_dir() => {}
-        _ => return false,
+    probe_regular_skill_md(dir).unwrap_or(false)
+}
+
+fn path_absent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
+fn probe_regular_skill_md(dir: &Path) -> io::Result<bool> {
+    let probe = || -> io::Result<bool> {
+        if !std::fs::symlink_metadata(dir)?.is_dir() {
+            return Ok(false);
+        }
+        Ok(std::fs::symlink_metadata(dir.join("SKILL.md"))?.is_file())
+    };
+    match probe() {
+        Err(e) if path_absent(&e) => Ok(false),
+        result => result,
     }
-    match std::fs::symlink_metadata(dir.join("SKILL.md")) {
-        Ok(meta) => meta.file_type().is_file(),
-        Err(_) => false,
+}
+
+fn manifest_probe_error(dir: &Path, error: io::Error) -> LoadError {
+    LoadError {
+        path: dir.to_path_buf(),
+        error: format!("{MANIFEST_PROBE_ERROR_PREFIX} {error}"),
     }
 }
 
@@ -567,7 +564,7 @@ fn non_utf8_name_error(path: &Path) -> LoadError {
 /// real, non-hidden category container under `source` — a loadable
 /// `<source>/<category>/<skill>`.
 ///
-/// This is the store's own layout determination (`is_category_dir` +
+/// This is the store's own layout determination (category discovery +
 /// `has_regular_skill_md` + the hidden-name and non-UTF-8 skips), factored
 /// out so other layers can apply the same judgment the loader does.
 /// Destinations the loader would never touch — a hidden category
@@ -608,27 +605,11 @@ pub fn is_loadable_categorized_skill(source: &Path, dest: &Path) -> bool {
     }
     // The parent must be a genuine category container and the
     // destination a skill directory with a regular-file `SKILL.md`.
-    is_category_dir(category) && has_regular_skill_md(dest)
-}
-
-/// Returns `true` when `dir` looks like a category container:
-/// it has no `SKILL.md` of its own but contains at least one **real
-/// sub-directory** (not a symlink) that does have a `SKILL.md`.
-fn is_category_dir(dir: &Path) -> bool {
-    if has_regular_skill_md(dir) {
-        return false;
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            // No-follow entry type: a symlinked child is never a Skill
-            // directory, so it never makes `dir` a category.
-            let is_real_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if is_real_dir && has_regular_skill_md(&entry.path()) {
-                return true;
-            }
-        }
-    }
-    false
+    matches!(probe_regular_skill_md(category), Ok(false))
+        && has_regular_skill_md(dest)
+        && std::fs::read_dir(category).is_ok_and(|mut entries| {
+            entries.any(|entry| entry.is_ok_and(|entry| entry.path() == dest))
+        })
 }
 
 /// The store exposes every skill under its directory name; that adopted
@@ -1322,6 +1303,49 @@ mod tests {
 
         assert!(errors.is_empty());
         assert!(store.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_directories_report_one_load_error() -> io::Result<()> {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root can search and enumerate directories regardless of their mode.
+        if unsafe { libc::geteuid() } == 0 {
+            return Ok(());
+        }
+        struct RestorePermissions<'a>(&'a Path);
+        impl Drop for RestorePermissions<'_> {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        // Execute-only permits the missing-marker lookup but denies read_dir.
+        for (relative, mode, has_skill) in [
+            ("demo", 0o000, true),
+            ("category/demo", 0o000, true),
+            ("category", 0o111, false),
+        ] {
+            let source = tempfile::tempdir()?;
+            let dir = source.path().join(relative);
+            fs::create_dir_all(&dir)?;
+            if has_skill {
+                fs::write(
+                    dir.join("SKILL.md"),
+                    "---\nname: demo\ndescription: Demo\n---\nBody\n",
+                )?;
+            }
+            let _restore = RestorePermissions(&dir);
+            fs::set_permissions(&dir, fs::Permissions::from_mode(mode))?;
+            let mut store = SkillStore::new();
+            let errors = store.load_from_directory(source.path(), &ParseConfig::default());
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].path, dir);
+            assert!(store.is_empty());
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
