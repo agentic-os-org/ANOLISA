@@ -7,7 +7,7 @@
 //!   - Assistant messages have content blocks: `thinking`, `text`, `tool_use`
 //!   - User messages may have content blocks: `text`, `tool_result`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
@@ -41,6 +41,12 @@ pub fn convert_qoder_events(
     let mut total_prompt_tokens: u64 = 0;
     let mut total_completion_tokens: u64 = 0;
     let mut total_cached_tokens: u64 = 0;
+
+    let superseded_usage = if agent_name == "claude-code" {
+        superseded_claude_usage(events)
+    } else {
+        HashSet::new()
+    };
 
     let mut i: usize = 0;
     while i < events.len() {
@@ -110,13 +116,13 @@ pub fn convert_qoder_events(
         // --- Assistant message ---
         if t == "assistant" {
             // Collect all consecutive assistant events (same LLM turn)
-            let mut turn_events: Vec<&serde_json::Value> = vec![e];
+            let mut turn_events = vec![i];
             let mut j = i + 1;
             while j < events.len() {
                 let ne = &events[j];
                 let nt = ne.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if nt == "assistant" {
-                    turn_events.push(ne);
+                    turn_events.push(j);
                     j += 1;
                 } else if SKIP_TYPES.contains(&nt) {
                     j += 1;
@@ -130,40 +136,15 @@ pub fn convert_qoder_events(
             let mut reasoning_parts: Vec<String> = Vec::new();
             let mut message_parts: Vec<String> = Vec::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let step_timestamp = turn_events[0]
+            let step_timestamp = e
                 .get("timestamp")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let mut step_model: Option<String> = None;
             let mut step_metrics: Option<Metrics> = None;
 
-            // Claude Code splits one message into blocks with cumulative
-            // usage. Other collectors retain per-event partial accounting.
-            let mut last_usage_by_id = HashMap::new();
-            for te in turn_events.iter().filter(|_| agent_name == "claude-code") {
-                let Some(msg) = te.get("message") else {
-                    continue;
-                };
-                if let (Some(id), Some(usage)) = (
-                    msg.get("id")
-                        .and_then(|value| value.as_str())
-                        .filter(|id| !id.is_empty()),
-                    msg.get("usage").filter(|usage| {
-                        usage
-                            .get("input_tokens")
-                            .and_then(|value| value.as_u64())
-                            .is_some()
-                            || usage
-                                .get("output_tokens")
-                                .and_then(|value| value.as_u64())
-                                .is_some()
-                    }),
-                ) {
-                    last_usage_by_id.insert(id, usage);
-                }
-            }
-
-            for te in &turn_events {
+            for index in turn_events {
+                let te = &events[index];
                 let msg = match te.get("message") {
                     Some(m) => m,
                     None => continue,
@@ -172,17 +153,10 @@ pub fn convert_qoder_events(
                     step_model = msg.get("model").and_then(|v| v.as_str()).map(String::from);
                 }
 
-                // Count each Claude Code message once; unidentified records
-                // and other sources keep their existing partial accounting.
-                let message_id = msg
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .filter(|id| agent_name == "claude-code" && !id.is_empty());
-                let usage = match message_id {
-                    Some(id) => last_usage_by_id.remove(id),
-                    None => msg.get("usage"),
-                };
-                if let Some(usage) = usage {
+                if let Some(usage) = msg
+                    .get("usage")
+                    .filter(|_| !superseded_usage.contains(&index))
+                {
                     let pt = usage.get("input_tokens").and_then(|v| v.as_u64());
                     let ct = usage.get("output_tokens").and_then(|v| v.as_u64());
                     let cache_read = usage
@@ -363,6 +337,31 @@ pub fn convert_qoder_events(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Claude streams cumulative snapshots, and a tool result can split one
+/// inference across steps. In reverse order the first valid snapshot wins.
+fn superseded_claude_usage(events: &[serde_json::Value]) -> HashSet<usize> {
+    let mut seen = HashSet::new();
+    let mut superseded = HashSet::new();
+    for (index, event) in events.iter().enumerate().rev() {
+        if event["type"] != "assistant" {
+            continue;
+        }
+        let message = &event["message"];
+        let Some(id) = message["id"].as_str().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let usage = &message["usage"];
+        if usage["input_tokens"].as_u64().is_none() && usage["output_tokens"].as_u64().is_none() {
+            continue;
+        }
+        let request = event["requestId"].as_str().filter(|id| !id.is_empty());
+        if !seen.insert((id, request)) {
+            superseded.insert(index);
+        }
+    }
+    superseded
+}
 
 /// Extract `(session_id, model_name, version)` from the raw events.
 fn extract_agent_info(
