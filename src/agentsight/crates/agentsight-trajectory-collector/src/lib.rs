@@ -132,6 +132,8 @@ fn process_session(
         cline::scan_fingerprint(&session.path, &session.project, file_size, file_mtime_ns)?
     } else if session.source == "gemini-cli" {
         gemini::scan_fingerprint(&session.project, file_size, file_mtime_ns)
+    } else if session.source == "codex" {
+        codex::scan_fingerprint_v1(file_size)
     } else {
         file_size
     };
@@ -274,7 +276,8 @@ fn process_session(
         atif_json,
         project,
         source: session.source.clone(),
-        is_subagent: session.is_subagent,
+        is_subagent: session.is_subagent
+            || (session.source == "codex" && codex::is_subagent(&events)),
         file_path,
         file_size,
         file_mtime_ns,
