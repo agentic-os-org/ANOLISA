@@ -255,9 +255,17 @@ the same user. Compile a descriptor with the `claude-resident-hooks` profile at
 deployment so the worker starts without the configuration parser:
 
 ```bash
-aw config descriptor --config /absolute/aw.yaml --agent claude \
-  --profile claude-resident-hooks > /absolute/aw-claude.descriptor.json
+(
+  set -e
+  staged=$(mktemp)
+  trap 'rm -f "$staged"' EXIT
+  aw config descriptor --config /absolute/aw.yaml --agent claude \
+    --profile claude-resident-hooks > "$staged"
+  install -m 0400 "$staged" /absolute/aw-claude.descriptor.json
+)
 ```
+
+A descriptor with a nonempty `allow_plaintext_http_hosts` list must have all write permissions cleared.
 
 `ResidentClaude.from_config()` reads the same configuration and takes the
 target, Service path and input protection from the descriptor. Without

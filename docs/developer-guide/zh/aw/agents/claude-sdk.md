@@ -214,9 +214,17 @@ Agent SDK 0.2.88（兼容子路径 `aw_sdk.claude` 会在已安装该可选包�
 `claude-resident-hooks` Profile 编译 Descriptor，worker 启动时不再运行配置解析：
 
 ```bash
-aw config descriptor --config /absolute/aw.yaml --agent claude \
-  --profile claude-resident-hooks > /absolute/aw-claude.descriptor.json
+(
+  set -e
+  staged=$(mktemp)
+  trap 'rm -f "$staged"' EXIT
+  aw config descriptor --config /absolute/aw.yaml --agent claude \
+    --profile claude-resident-hooks > "$staged"
+  install -m 0400 "$staged" /absolute/aw-claude.descriptor.json
+)
 ```
+
+当 `allow_plaintext_http_hosts` 非空时，Descriptor 文件必须清除所有写权限位。
 
 `ResidentClaude.from_config()` 读取同一份配置并按 Descriptor 选择目标、Service
 路径和输入保护；省略 `descriptor_file` 时改用 `aw config show` 离线解析。
