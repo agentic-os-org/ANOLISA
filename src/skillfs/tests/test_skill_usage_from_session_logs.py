@@ -518,6 +518,23 @@ class TestPrefixedSkillAttribution(SessionLogsTestCase):
         self.assertIn("Total skill calls: 1", proc.stdout)
         self.assertNotIn("skillfs-views", proc.stdout)
 
+    def test_relative_skill_root_is_not_a_directory_suffix(self) -> None:
+        document = "docs/soft-skills/communication/README.md"
+        self.write_log(
+            [
+                tool_call(f"cat {document}"),
+                tool_call("cat docs/tags=skills/notes/index.md"),
+                tool_call(f"cat {document} 'skills/triage/SKILL.md'"),
+                tool_call("grep --file=skills/triage/patterns.txt notes.txt"),
+                tool_call("skills/triage/run.sh"),
+            ]
+        )
+        output = self.logs_dir / "report.json"
+        proc = self.run_cli("--output", str(output))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(report["by_agent"], {"agent-1": {"triage": 3}})
+
     def test_fallback_does_not_count_extensionless_files(self):
         workspace = self.logs_dir / "ws"
         (workspace / "skills" / "web").mkdir(parents=True)

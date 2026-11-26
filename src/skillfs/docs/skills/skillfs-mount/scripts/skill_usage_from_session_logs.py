@@ -97,8 +97,13 @@ _SHELL_WORD_DELIMITERS = " \t\n\r&|;()<>'\"`"
 _NAVIGATION = (".", "..")
 _GLOB_CHARS = "*?[]{}"
 
-_FALLBACK_SKILL = re.compile(r'skills/([^/\s&|;()<>"\x27`]+)')
-_DIRECT_SKILL = re.compile(r'/skills/([^/\s&|;()<>"\x27`]+)')
+_SKILL_PATH = r'skills/([^/\s&|;()<>"\x27`]+)'
+# A relative path starts a shell word or its assignment/option value
+# (e.g. --file=skills/web/patterns); elsewhere it needs a preceding slash.
+_FALLBACK_SKILL = re.compile(
+    rf"(?:/|(?:^|[{re.escape(_SHELL_WORD_DELIMITERS)}])(?:[\w.-]+=)?)" + _SKILL_PATH
+)
+_DIRECT_SKILL = re.compile("/" + _SKILL_PATH)
 
 
 def _is_named_skill(name: str, known: dict | None) -> bool:

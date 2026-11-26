@@ -373,6 +373,11 @@ skillfs classify /path/to/skills --dry-run
 `list` 输出发现的 skills 及其元数据。`classify` 生成或预览
 `skillfs-views.toml`；前 N 个 skills 进入 default view，其余进入 secondary view。
 
+选择默认视图中的技能时，可使用 `skillfs-mount` 技能附带的
+`skill_usage_from_session_logs.py` 分析 OpenClaw 日志。报告会统计
+`skills/triage/SKILL.md` 这样的技能路径引用，不会把
+`docs/soft-skills/communication/README.md` 这样的普通项目文件计为技能调用。
+
 ## Views 与 Discovery
 
 source 目录下的 `skillfs-views.toml` 控制可见性：
