@@ -415,6 +415,11 @@ skillfs classify /path/to/skills --dry-run
 `skillfs-views.toml`; the first N skills go to the default view and the rest go
 to a secondary view.
 
+To choose which skills to keep in the default view, use the `skillfs-mount`
+skill's `skill_usage_from_session_logs.py` report on OpenClaw logs. It counts
+references such as `skills/triage/SKILL.md`, not ordinary project files such
+as `docs/soft-skills/communication/README.md`.
+
 ## Views and Discovery
 
 `skillfs-views.toml` in the source directory controls visibility:

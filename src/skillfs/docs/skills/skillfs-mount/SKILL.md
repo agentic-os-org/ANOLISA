@@ -37,6 +37,8 @@ python3 <skill_dir>/scripts/skill_usage_from_chat_logs.py
 ```
 
 两个脚本都支持 `--logs-dir` 指向自定义日志目录。
+OpenClaw 报告按命令中的技能路径估算使用次数：`cat skills/triage/SKILL.md` 计入
+`triage`，读取 `docs/soft-skills/communication/README.md` 不计入技能调用。
 
 输出示例：
 ```
