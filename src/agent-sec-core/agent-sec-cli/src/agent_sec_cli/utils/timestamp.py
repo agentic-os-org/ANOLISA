@@ -96,8 +96,20 @@ def epoch_to_utc_iso(epoch: float) -> str:
 
 
 def ns_to_utc_iso(value: int) -> str:
-    """Convert nanoseconds since epoch to a UTC-aware ISO timestamp."""
-    return epoch_to_utc_iso(value / 1_000_000_000)
+    """Convert nanoseconds since epoch to a UTC-aware ISO timestamp.
+
+    Split into whole seconds and the sub-second remainder with integer
+    arithmetic before building the datetime.  Dividing by 1e9 as a float
+    loses precision for current-epoch values: e.g. 1700000000999999999 ns
+    rounds up to 1700000001.0 s and lands on the next second.  Nanoseconds
+    below one microsecond cannot be represented by ``datetime`` and are
+    truncated (floor), which keeps the result on the same second.
+    """
+    seconds, nanos = divmod(value, 1_000_000_000)
+    return (
+        datetime.fromtimestamp(seconds, tz=timezone.utc)
+        + timedelta(microseconds=nanos // 1000)
+    ).isoformat()
 
 
 def utc_iso_to_epoch(value: str, *, field_name: str = "timestamp") -> float:

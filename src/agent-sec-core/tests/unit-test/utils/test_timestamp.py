@@ -55,3 +55,27 @@ def test_utc_iso_to_epoch_requires_utc_aware_input() -> None:
 def test_epoch_and_ns_helpers_emit_utc_iso() -> None:
     assert epoch_to_utc_iso(1_768_000_000.0).endswith("+00:00")
     assert ns_to_utc_iso(1_768_000_000_000_000_000).endswith("+00:00")
+
+
+def test_ns_to_utc_iso_preserves_subsecond_precision() -> None:
+    # Float division by 1e9 rounds these to the wrong second / microsecond.
+    assert (
+        ns_to_utc_iso(1_700_000_000_999_999_999)
+        == "2023-11-14T22:13:20.999999+00:00"
+    )
+    assert (
+        ns_to_utc_iso(1_700_000_000_123_456_789)
+        == "2023-11-14T22:13:20.123456+00:00"
+    )
+    assert (
+        ns_to_utc_iso(1_699_999_999_999_999_999)
+        == "2023-11-14T22:13:19.999999+00:00"
+    )
+
+
+def test_ns_to_utc_iso_matches_float_result_for_whole_seconds() -> None:
+    # Normal inputs must stay byte-identical to the previous behaviour.
+    for seconds in (0, 1, 1_700_000_000, 1_768_000_000):
+        assert ns_to_utc_iso(seconds * 1_000_000_000) == (
+            epoch_to_utc_iso(float(seconds))
+        )
