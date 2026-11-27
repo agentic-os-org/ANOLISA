@@ -57,10 +57,10 @@ jq . ~/.tokenless/config.json
 | `compression_enabled` | `true` | 为 true 时返回压缩结果；false 时进入 dry-run 并返回原文 |
 | `stats_retention_days` | `30` | 正整数启用采样自动清理（每 64 行触发，覆盖 CLI 压缩、`tokenless rtk` 与 `TokenlessRuntime`/Python SDK），删除超期 `stats` 行、关联 `compression_artifacts` 及超期 `retrieve_events`；设为 `0` 或 `null` 可停用（不限制） |
 | `stats_text_retention_days` | `7` | 正整数启用采样自动清理，清除超期 `stats` 行的压缩前后正文载荷，保留数值度量与汇总；设为 `0` 或 `null` 可停用（不限制） |
-| `rtk_rollout` *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | `search`、`build_test` 为 `posttool_native`；`vcs`、`lint`、`cloud_net` 为 `pretool_rtk` | 按命令域配置二态开关（`pretool_rtk` 或 `posttool_native`），控制支持替换的宿主关闭该域的 PreTool RTK 改写以将原生输出交由 PostTool 处理，还是继续走 PreTool RTK 改写。切换为 `posttool_native` 仅关闭该域的 PreTool 改写；实际是否产生原生压缩取决于 PostTool 对所得输出格式是否已有对应压缩器（尚无原生压缩器覆盖的输出，如普通 `git status`，会在 PostTool 原样透传，不再保留原有 RTK 改写缩减）。`vcs` 覆盖 `git`/`diff`/`gt`/`yadm`；`cloud_net` 覆盖 `gh`/`glab`/`docker`/`kubectl`/`oc`/`aws`/`curl`/`wget`/`psql`/`helm`/`terraform`。无 PostTool 替换能力的宿主（`none`）仍保留 RTK 改写（命中 `exclude_commands` 除外）；`lossless_only` 宿主仅对 `search` 域应用 `posttool_native`。截至 `tokenless/v0.9.7` 的已发布版本会忽略此字段。 |
-| `exclude_commands` *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | `[]` | 双端免压命令列表（支持命令名或词前缀，如 `"custom-cli"`、`"cargo xtask"`、`"uv run pytest"`）：命中后同时跳过 PreTool RTK 改写和 PostTool 命令输出压缩（成功态与报错态均原样透传）。支持常见透明包装前缀（含 `env`、`timeout`、`uv run`、`npx`/`pnpx`）以及 Windows `.exe`/`.cmd`/`.bat`/`.ps1` 启动后缀归一化。截至 `tokenless/v0.9.7` 的已发布版本会忽略此字段。 |
+| `rtk_rollout` *（自 `0.9.8` 起）* | `search`、`build_test` 为 `posttool_native`；`vcs`、`lint`、`cloud_net` 为 `pretool_rtk` | 按命令域配置二态开关（`pretool_rtk` 或 `posttool_native`），控制支持替换的宿主关闭该域的 PreTool RTK 改写以将原生输出交由 PostTool 处理，还是继续走 PreTool RTK 改写。切换为 `posttool_native` 仅关闭该域的 PreTool 改写；实际是否产生原生压缩取决于 PostTool 对所得输出格式是否已有对应压缩器（尚无原生压缩器覆盖的输出，如普通 `git status`，会在 PostTool 原样透传，不再保留原有 RTK 改写缩减）。`vcs` 覆盖 `git`/`diff`/`gt`/`yadm`；`cloud_net` 覆盖 `gh`/`glab`/`docker`/`kubectl`/`oc`/`aws`/`curl`/`wget`/`psql`/`helm`/`terraform`。无 PostTool 替换能力的宿主（`none`）仍保留 RTK 改写（命中 `exclude_commands` 除外）；`lossless_only` 宿主仅对 `search` 域应用 `posttool_native`。截至 `tokenless/v0.9.7` 的已发布版本会忽略此字段。 |
+| `exclude_commands` *（自 `0.9.8` 起）* | `[]` | 双端免压命令列表（支持命令名或词前缀，如 `"custom-cli"`、`"cargo xtask"`、`"uv run pytest"`）：命中后同时跳过 PreTool RTK 改写和 PostTool 命令输出压缩（成功态与报错态均原样透传）。支持常见透明包装前缀（含 `env`、`timeout`、`uv run`、`npx`/`pnpx`）以及 Windows `.exe`/`.cmd`/`.bat`/`.ps1` 启动后缀归一化。截至 `tokenless/v0.9.7` 的已发布版本会忽略此字段。 |
 
-`rtk_rollout` 与 `exclude_commands`（未发布；仅源码 `main` 可用，`v0.9.7` 及更早发布版本会忽略）同样支持通过环境变量 `TOKENLESS_RTK_ROLLOUT`（局部或完整 JSON 对象）与 `TOKENLESS_EXCLUDE_COMMANDS`（JSON 字符串数组，`[]` 可清空文件配置）覆盖。Python 生命周期 `TokenlessConfig` 会继承相同的文件与环境变量默认值，并将显式传入的 `rtk_rollout` / `exclude_commands` 同步作用于 `pre_tool` 与进程内 `post_tool`；直接构造 Rust `RuntimeConfig` 与原生 `TokenlessRuntime` 仍采用显式配置并接受用于 `post_tool` 的 `exclude_commands`（`rtk_rollout` 仅在执行 `PreTool` 的 CLI 与 `TokenlessSdk` 生效）。
+`rtk_rollout` 与 `exclude_commands`同样支持通过环境变量 `TOKENLESS_RTK_ROLLOUT`（局部或完整 JSON 对象）与 `TOKENLESS_EXCLUDE_COMMANDS`（JSON 字符串数组，`[]` 可清空文件配置）覆盖。Python 生命周期 `TokenlessConfig` 会继承相同的文件与环境变量默认值，并将显式传入的 `rtk_rollout` / `exclude_commands` 同步作用于 `pre_tool` 与进程内 `post_tool`；直接构造 Rust `RuntimeConfig` 与原生 `TokenlessRuntime` 仍采用显式配置并接受用于 `post_tool` 的 `exclude_commands`（`rtk_rollout` 仅在执行 `PreTool` 的 CLI 与 `TokenlessSdk` 生效）。
 
 Tokenless 写入配置文件时会把权限限制为 `0600`。手动创建文件后也应确认：
 
@@ -297,8 +297,8 @@ token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 
 | `TOKENLESS_COMPRESSION_ENABLED` | 覆盖真实压缩开关 | false 是 dry-run，不是完全停用 |
 | `TOKENLESS_STATS_RETENTION_DAYS` | 覆盖 `stats.db` 记录保留天数 | 正整数设置天数；`0` 停用并覆盖 `config.json`；空值或非法值回退 |
 | `TOKENLESS_STATS_TEXT_RETENTION_DAYS` | 覆盖 `stats.db` 正文载荷保留天数 | 正整数设置天数；`0` 停用并覆盖 `config.json`；空值或非法值回退 |
-| `TOKENLESS_RTK_ROLLOUT` | 覆盖命令域 `rtk_rollout` 路由（`pretool_rtk` / `posttool_native`）*（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | JSON 对象，可按需覆盖 `search`/`vcs`/`build_test`/`lint`/`cloud_net` 中的部分或全部域；非法项向 `stderr` 告警并忽略 |
-| `TOKENLESS_EXCLUDE_COMMANDS` | 覆盖双端免压 `exclude_commands` 列表 *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | JSON 字符串数组（`[]` 清空文件配置）；非法 JSON 向 `stderr` 告警并忽略 |
+| `TOKENLESS_RTK_ROLLOUT` | 覆盖命令域 `rtk_rollout` 路由（`pretool_rtk` / `posttool_native`）*（自 `0.9.8` 起）* | JSON 对象，可按需覆盖 `search`/`vcs`/`build_test`/`lint`/`cloud_net` 中的部分或全部域；非法项向 `stderr` 告警并忽略 |
+| `TOKENLESS_EXCLUDE_COMMANDS` | 覆盖双端免压 `exclude_commands` 列表 *（自 `0.9.8` 起）* | JSON 字符串数组（`[]` 清空文件配置）；非法 JSON 向 `stderr` 告警并忽略 |
 | `TOKENLESS_DATA_DIR` | 存放 `stats.db`、`stash.db` 和 `rtk-outcomes.db` 的目录 | 可访问的任意绝对目录，但不能是文件系统根目录或包含父目录遍历 |
 | `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
