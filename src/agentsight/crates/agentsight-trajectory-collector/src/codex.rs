@@ -57,8 +57,9 @@ pub(crate) fn is_subagent(events: &[serde_json::Value]) -> bool {
 /// Accumulates one agent turn (reasoning + tool calls + assistant text)
 /// before it is flushed into a single ATIF agent step.
 #[derive(Default)]
-struct AgentTurn {
-    timestamp: Option<String>,
+struct AgentTurn<'event> {
+    timestamp: Option<&'event str>,
+    latest_activity: Option<(chrono::DateTime<chrono::FixedOffset>, &'event str)>,
     model: Option<String>,
     effort: Option<serde_json::Value>,
     reasoning: Vec<String>,
@@ -115,7 +116,7 @@ impl PendingCalls {
     }
 }
 
-impl AgentTurn {
+impl AgentTurn<'_> {
     fn is_empty(&self) -> bool {
         self.reasoning.is_empty()
             && self.messages.is_empty()
@@ -125,9 +126,14 @@ impl AgentTurn {
     }
 
     fn into_step(self, step_id: usize) -> Step {
+        // Equal instants retain the first spelling, so the opening event needs no extra.
+        let extra = self
+            .latest_activity
+            .filter(|(_, raw)| Some(*raw) != self.timestamp)
+            .map(|(_, raw)| HashMap::from([("end_timestamp".into(), raw.into())]));
         Step {
             step_id,
-            timestamp: self.timestamp,
+            timestamp: self.timestamp.map(String::from),
             source: StepSource::Agent,
             message: self.messages.join("\n"),
             model_name: self.model,
@@ -150,7 +156,7 @@ impl AgentTurn {
                 })
             },
             metrics: self.metrics,
-            extra: None,
+            extra,
             llm_call_count: None,
             is_copied_context: None,
         }
@@ -635,18 +641,26 @@ fn user_step(step_id: usize, ts: Option<&str>, message: String) -> Step {
     }
 }
 
-fn ensure_turn<'a>(
-    turn: &'a mut Option<AgentTurn>,
-    ts: Option<&str>,
+fn ensure_turn<'turn, 'event>(
+    turn: &'turn mut Option<AgentTurn<'event>>,
+    ts: Option<&'event str>,
     model: &Option<String>,
     effort: &Option<serde_json::Value>,
-) -> &'a mut AgentTurn {
-    turn.get_or_insert_with(|| AgentTurn {
-        timestamp: ts.map(String::from),
+) -> &'turn mut AgentTurn<'event> {
+    let turn = turn.get_or_insert_with(|| AgentTurn {
+        timestamp: ts,
         model: model.clone(),
         effort: effort.clone(),
         ..Default::default()
-    })
+    });
+    if let Some(raw) = ts {
+        if let Ok(time) = chrono::DateTime::parse_from_rfc3339(raw) {
+            if turn.latest_activity.is_none_or(|(latest, _)| time > latest) {
+                turn.latest_activity = Some((time, raw));
+            }
+        }
+    }
+    turn
 }
 
 fn zero_metrics() -> Metrics {
@@ -883,6 +897,11 @@ mod tests {
 
         let agent_step = &traj.steps[1];
         assert_eq!(agent_step.source, StepSource::Agent);
+        // The trailing token delta contributes activity; the task_complete envelope does not.
+        assert_eq!(
+            agent_step.extra.as_ref().unwrap()["end_timestamp"],
+            "2026-08-03T09:57:00.500Z"
+        );
         assert_eq!(agent_step.message, "记录在 ~/.codex/sessions 下");
         assert_eq!(agent_step.model_name.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(
@@ -906,6 +925,28 @@ mod tests {
         assert_eq!(fm.total_prompt_tokens, Some(22161));
         assert_eq!(fm.total_completion_tokens, Some(188));
         assert_eq!(fm.total_cached_tokens, Some(11008));
+    }
+
+    #[test]
+    fn turn_without_later_activity_omits_extra() {
+        let start = "2026-11-08T00:00:01Z";
+        for timestamps in [
+            vec![start, start],
+            vec![
+                start,
+                "2026-11-08T08:00:01+08:00",
+                "2026-11-07T23:59:59Z",
+                "invalid",
+            ],
+        ] {
+            let events: Vec<_> = timestamps.into_iter().map(|ts| serde_json::json!({
+                "type":"response_item","timestamp":ts,"payload":{"type":"reasoning","summary":"plan"}
+            })).collect();
+            let traj = convert_codex_events(&events, "codex").unwrap();
+            let step = &traj.steps[0];
+            assert_eq!(step.timestamp.as_deref(), Some(start));
+            assert!(step.extra.is_none());
+        }
     }
 
     #[test]
