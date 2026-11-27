@@ -185,12 +185,23 @@ impl OptimizationStore {
         dimension: Dimension,
         result_json: &str,
     ) -> Result<(), OptStoreError> {
-        let now_ns = now_ns();
         let conn = self.conn.lock().map_err(|_| OptStoreError::Poisoned)?;
+        Self::upsert_dimension(&conn, session_id, dimension, result_json, now_ns())
+    }
+
+    fn upsert_dimension(
+        conn: &Connection,
+        session_id: &str,
+        dimension: Dimension,
+        result_json: &str,
+        now_ns: i64,
+    ) -> Result<(), OptStoreError> {
         let sql = format!(
             "INSERT INTO optimization_results (session_id, {col}, created_at_ns, updated_at_ns)
              VALUES (?1, ?2, ?3, ?3)
-             ON CONFLICT(session_id) DO UPDATE SET {col} = ?2, updated_at_ns = ?3",
+             ON CONFLICT(session_id) DO UPDATE SET
+                 {col} = excluded.{col},
+                 updated_at_ns = MAX(optimization_results.updated_at_ns, excluded.updated_at_ns)",
             col = dimension.column()
         );
         conn.execute(&sql, params![session_id, result_json, now_ns])?;
@@ -373,6 +384,8 @@ mod tests {
         store
             .save_dimension("s1", Dimension::Perf, r#"{"total":1}"#)
             .unwrap();
+        let first = store.get("s1").unwrap().unwrap();
+        assert_eq!(first.updated_at_ns, first.created_at_ns);
         store
             .save_dimension("s1", Dimension::Accuracy, r#"{"issues":[]}"#)
             .unwrap();
@@ -383,6 +396,8 @@ mod tests {
         assert_eq!(rec.accuracy.as_deref(), Some(r#"{"issues":[]}"#));
         assert!(rec.cost.is_none());
         assert!(rec.created_at_ns > 0);
+        assert_eq!(rec.created_at_ns, first.created_at_ns);
+        assert!(rec.updated_at_ns >= first.updated_at_ns);
     }
 
     #[test]
@@ -505,6 +520,51 @@ mod tests {
         store.save_dimension("s1", Dimension::Cost, "2").unwrap();
         let rec = store.get("s1").unwrap().unwrap();
         assert_eq!(rec.cost.as_deref(), Some("2"));
+    }
+
+    fn save_at(store: &OptimizationStore, dimension: Dimension, payload: &str, timestamp: i64) {
+        let conn = store.conn.lock().unwrap();
+        OptimizationStore::upsert_dimension(&conn, "s1", dimension, payload, timestamp).unwrap();
+    }
+
+    #[test]
+    fn earlier_write_from_another_connection_preserves_recent_result() {
+        let (store, path) = temp_store();
+        let other = OptimizationStore::new_with_path(&path).unwrap();
+        save_at(&store, Dimension::Perf, "1", 200);
+        save_at(&other, Dimension::Cost, "2", 100);
+
+        assert_eq!(store.prune_before(150).unwrap(), 0);
+        let records = store.list(150, 250, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        let rec = &records[0];
+        assert_eq!(rec.session_id, "s1");
+        assert_eq!(rec.perf.as_deref(), Some("1"));
+        assert_eq!(rec.cost.as_deref(), Some("2"));
+        assert_eq!(rec.created_at_ns, 200);
+        assert_eq!(rec.updated_at_ns, 200);
+    }
+
+    #[test]
+    fn later_timestamp_advances_update_time() {
+        let (store, _path) = temp_store();
+        save_at(&store, Dimension::Perf, "1", 100);
+        save_at(&store, Dimension::Cost, "2", 200);
+
+        let rec = store.get("s1").unwrap().unwrap();
+        assert_eq!(rec.created_at_ns, 100);
+        assert_eq!(rec.updated_at_ns, 200);
+        assert_eq!(store.prune_before(150).unwrap(), 0);
+    }
+
+    #[test]
+    fn earlier_timestamp_still_overwrites_dimension() {
+        let (store, _path) = temp_store();
+        save_at(&store, Dimension::Cost, "1", 200);
+        save_at(&store, Dimension::Cost, "2", 100);
+        let rec = store.get("s1").unwrap().unwrap();
+        assert_eq!(rec.cost.as_deref(), Some("2"));
+        assert_eq!(rec.updated_at_ns, 200);
     }
 
     #[test]
