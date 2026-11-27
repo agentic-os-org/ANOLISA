@@ -46,8 +46,8 @@ aw update --agent TARGET
 aw service status --config aw.yaml
 ```
 
-同一目标有多个实例时，用 `--instance ID` 选择。从共享配置所在目录运行 `aw update`。后续策略修改沿用已安装的启动接点和原生设置；
-允许更新的策略字段之外的变化需要重启。
+同一目标有多个实例时，按实例 ID 或存活进程的 PID 选择。从共享配置所在目录运行 `aw update`。
+后续策略修改沿用已安装的启动接点和原生设置，允许更新的策略字段之外的变化需要重启。
 
 ## 应用候选策略
 
@@ -62,7 +62,10 @@ aw service status --config current.yaml
 ```
 
 成功响应返回 `policy_revision`、前版本、审计 key 及准备和激活耗时。确认成功后恢复派发，每个新任务取得完整策略快照。
-同一目标有多个实例时增加 `--instance ID`。所有 Session 共用实例策略，任务子 scope 不能单独更新。
+同一目标有多个实例时，用 `--instance ID` 或 `--pid PID` 选择。
+使用 `--pid` 时，AW 在所选服务中按 PID、进程启动时间、用户和 PID namespace 匹配存活的根实例。
+调用者须与进程同用户且处于同一 PID namespace。可加上 `--agent TARGET` 限定配置目标。
+Session 和子 scope 使用实例策略。
 
 也可直接编辑 `current.yaml`，再执行 `aw update --config current.yaml --agent TARGET`。
 AW 保存该路径连接的服务身份；文件不会自动加载。`--policy` 形式不会改写任一文件，后续单文件更新需先写入完整期望策略。
@@ -72,6 +75,7 @@ AW 保存该路径连接的服务身份；文件不会自动加载。`--policy` 
 | 结果 | 下一步 |
 | --- | --- |
 | `busy` | 旧策略继续生效；等待请求和清理结束后显式重试 |
+| PID 不可用、无匹配或匹配到多个实例 | 用 `aw service status` 核对进程关联和目标，必要时用 `--instance ID` 选择指定实例 |
 | 准备失败、版本冲突或能力不支持 | 修正候选或查询新版本，再决定是否重试 |
 | 超时、结果不确定 | 查询实际版本后再派发工作 |
 | 激活后审计持久化失败 | 停止受影响 worker，修复原因，按期望配置重启服务和 worker |
@@ -87,7 +91,8 @@ aw update --socket "$AW_SOCKET" --instance "$AW_INSTANCE" \
   --policy next.yaml --expected-revision "$AW_POLICY_REVISION"
 ```
 
-`--expected-revision` 指定并发前置版本，冲突不自动重试。CLI 没有 `aw update --pid` 选择器。
+使用 `--socket` 时，可通过 `--instance ID` 或 `--pid PID` 选择实例，并须提供 `--policy FILE`。
+`--expected-revision` 指定并发前置版本，冲突需要显式重试。
 只读容器为启动、更新、status、stop 共用一个绝对 `XDG_RUNTIME_DIR`，属运行用户且权限 `0700`。
 连接元数据位于 `$XDG_RUNTIME_DIR/aw/connections`，未设置时为 `/tmp/aw-UID/connections`；worker 和服务停止后再清理该运行时挂载。
 

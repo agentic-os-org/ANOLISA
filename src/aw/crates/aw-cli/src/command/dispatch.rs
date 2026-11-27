@@ -85,6 +85,7 @@ pub(super) fn run(command: Command) -> Result<Exit> {
                 options([
                     ("agent", value.agent),
                     ("instance", value.instance),
+                    ("pid", value.pid.map(|pid| pid.to_string())),
                     ("policy", value.policy),
                     ("expected-revision", value.expected_revision),
                 ])

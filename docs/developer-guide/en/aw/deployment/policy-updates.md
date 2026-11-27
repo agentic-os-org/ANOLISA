@@ -52,7 +52,8 @@ aw update --agent TARGET
 aw service status --config aw.yaml
 ```
 
-Use `--instance ID` to select one of several instances. Run `aw update` from the directory containing the shared configuration.
+If a target has several instances, select one by instance ID or by its live
+process PID. Run `aw update` from the directory containing the shared configuration.
 The startup connection and native settings remain in place for subsequent policy
 changes. Changes outside the permitted policy fields require restart.
 
@@ -69,7 +70,11 @@ aw service status --config current.yaml
 ```
 
 Success returns `policy_revision`, the previous revision, audit key, preparation and activation durations. Resume dispatch after confirmation; each new task receives a complete policy snapshot.
-Add `--instance ID` when a target has multiple instances. Sessions share the instance policy; task child scopes cannot be updated separately.
+Use `--instance ID` or `--pid PID` to select one of several instances.
+With `--pid`, AW matches the PID, process start time, user and PID namespace
+against the selected service's live root instances. Run as the same user and
+in the same PID namespace as the process. Add `--agent TARGET` to constrain
+the match to that target. Sessions and child scopes use the instance policy.
 
 Alternatively, edit `current.yaml` and run `aw update --config current.yaml --agent TARGET`.
 AW records the service identity connected to that path; files are not watched. `--policy` rewrites neither file, so put the full desired policy into the main file before a later single-file update.
@@ -79,6 +84,7 @@ AW records the service identity connected to that path; files are not watched. `
 | Result | Action |
 | --- | --- |
 | `busy` | Old policy remains active; explicitly retry after requests and cleanup finish |
+| PID is unavailable or matches zero or multiple instances | Check the process association and target with `aw service status`. Use `--instance ID` to address a specific instance if needed |
 | Preparation failure, revision conflict or unsupported capability | Correct the candidate or query the new revision before deciding to retry |
 | Timeout or uncertain outcome | Query the active revision before dispatching work |
 | Audit persistence failure after activation | Stop the affected worker, fix the cause, and restart service and worker with the desired configuration |
@@ -94,7 +100,9 @@ aw update --socket "$AW_SOCKET" --instance "$AW_INSTANCE" \
   --policy next.yaml --expected-revision "$AW_POLICY_REVISION"
 ```
 
-`--expected-revision` sets a concurrency precondition; conflicts do not retry automatically. The CLI has no `aw update --pid` selector.
+With `--socket`, either `--instance ID` or `--pid PID` can select the instance
+and `--policy FILE` is required. `--expected-revision` sets a concurrency
+precondition. Conflicts require an explicit retry.
 Read-only containers must share one absolute `XDG_RUNTIME_DIR` across launch, update, status and stop, owned by the runtime user with mode `0700`.
 Connection metadata lives in `$XDG_RUNTIME_DIR/aw/connections`, or `/tmp/aw-UID/connections` when unset. Retain this runtime mount until both worker and service stop.
 

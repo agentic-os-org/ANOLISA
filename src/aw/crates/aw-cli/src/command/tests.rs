@@ -269,8 +269,6 @@ fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
         parse("update --config aw.yaml --agent qoder").unwrap(),
         Command::Update(Update { policy: None, .. })
     ));
-    assert!(parse("update --config aw.yaml --pid 123").is_err());
-    assert!(parse("update --config aw.yaml --pid 123 --agent worker").is_err());
     assert!(parse("update --socket /socket --agent qoder").is_err());
     assert!(matches!(parse("update --config boot.yaml --agent qoder --instance one --policy next.yaml --expected-revision abc").unwrap(), Command::Update(_)));
     for input in [
@@ -281,6 +279,48 @@ fn idle_policy_update_keeps_intersecting_selection_and_local_options() {
         "request --socket /socket --timeout-ms 60001",
     ] {
         assert!(parse(input).is_err(), "{input}");
+    }
+}
+
+#[test]
+fn policy_update_pid_supports_target_constraints_and_explicit_sockets() {
+    let Command::Update(value) = parse("update --pid 123").unwrap() else {
+        panic!("expected update");
+    };
+    assert_eq!(value.pid, Some(123));
+    assert_eq!(value.config, "aw.yaml");
+    assert!(value.agent.is_none() && value.instance.is_none());
+
+    let Command::Update(value) =
+        parse("update --socket /socket --pid 123 --agent worker --policy next.yaml").unwrap()
+    else {
+        panic!("expected socket update");
+    };
+    assert_eq!(value.pid, Some(123));
+    assert_eq!(value.agent.as_deref(), Some("worker"));
+    assert_eq!(value.socket.as_deref(), Some("/socket"));
+    assert_eq!(value.policy.as_deref(), Some("next.yaml"));
+
+    for (input, kind) in [
+        (
+            "update --pid 123 --instance one --agent worker",
+            clap::error::ErrorKind::ArgumentConflict,
+        ),
+        ("update --pid 0", clap::error::ErrorKind::ValueValidation),
+        (
+            "update --pid 4294967296",
+            clap::error::ErrorKind::ValueValidation,
+        ),
+        (
+            "update --socket /socket --pid 123",
+            clap::error::ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            "update --config aw.yaml --socket /socket --pid 123 --policy next.yaml",
+            clap::error::ErrorKind::ArgumentConflict,
+        ),
+    ] {
+        assert_eq!(parse(input).unwrap_err().kind(), kind, "{input}");
     }
 }
 

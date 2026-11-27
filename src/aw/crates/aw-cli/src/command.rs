@@ -199,6 +199,7 @@ struct Validate {
 }
 
 #[derive(Args, Debug, PartialEq)]
+#[command(group(clap::ArgGroup::new("selection").required(true).multiple(true).args(["agent", "instance", "pid"])))]
 struct Update {
     /// Original launch configuration; defaults to aw.yaml without --socket
     #[arg(
@@ -211,12 +212,15 @@ struct Update {
     /// Explicit service socket; requires a separate --policy
     #[arg(long, value_name = "ABS_PATH", requires = "policy")]
     socket: Option<String>,
-    /// Select a configured target; combine with --instance to disambiguate
-    #[arg(long, value_name = "TARGET", required_unless_present = "instance")]
+    /// Select a configured target or constrain --instance or --pid
+    #[arg(long, value_name = "TARGET")]
     agent: Option<String>,
     /// Select an instance, optionally intersecting --agent
-    #[arg(long, value_name = "ID", required_unless_present = "agent")]
+    #[arg(long, value_name = "ID")]
     instance: Option<String>,
+    /// Select the root instance associated with this live local process
+    #[arg(long, conflicts_with = "instance", value_name = "PID", value_parser = clap::value_parser!(u32).range(1..))]
+    pid: Option<u32>,
     /// Separate candidate; defaults to --config for an existing connection
     #[arg(long, value_name = "FILE")]
     policy: Option<String>,
