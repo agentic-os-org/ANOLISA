@@ -353,7 +353,7 @@ class StreamContractMixin:
 
     async def test_non_object_tool_input_recovers_with_empty_arguments(self):
         self.content_type = "text/event-stream"
-        for payload in ("[1, 2, 3]", '"private-tool"', "123", "null"):
+        for payload in ("[1]", "[1, 2, 3]", '"private-tool"', "123", "null"):
             with self.subTest(payload=payload):
                 self.body = START + b"".join(line + b"\n\n" for line in tool_frames(payload)) + STOP
                 log = io.StringIO()
@@ -362,6 +362,7 @@ class StreamContractMixin:
                 events = [json.loads(line[6:]) for line in response.content.splitlines()
                           if line.startswith(b"data: ")]
                 call_id = events[1]["content_block"]["id"]
+                self.assertEqual(events[2]["delta"]["partial_json"], payload)
                 entry = self.bridge.invocations.active[call_id]
                 self.assertEqual((entry.phase, entry.arguments), ("issued", digest({})))
                 self.assertEqual(log.getvalue().splitlines(), [
@@ -371,7 +372,15 @@ class StreamContractMixin:
                 self.assertNotIn("private-tool", log.getvalue())
                 self.assertIsNone(self.bridge.failure)
                 self.assertFalse(self.stopped.is_set())
-                self.bridge.invocations.active.pop(call_id)
+                result = {"type": "tool_result", "tool_use_id": call_id, "is_error": False}
+                history = {"messages": [{"content": [result]}]}
+                with self.assertRaisesRegex(RuntimeError, "precedes tool result adoption"):
+                    await self.bridge.invocations.check_model_request(history)
+                result["is_error"] = True
+                self.body = START + STOP
+                self.assertEqual((await self.post(json.dumps(history).encode())).status_code, 200)
+                self.assertFalse(self.bridge.invocations.active)
+                self.assertIsNone(self.bridge.failure)
 
     async def test_upstream_stream_error_with_and_without_open_tool_reuses_relay(self):
         self.content_type = "text/event-stream"
