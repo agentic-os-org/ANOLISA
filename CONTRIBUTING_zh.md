@@ -37,7 +37,7 @@ ANOLISA 是一个 monorepo。下表列出组件支持的开发平台与入口。
 | agent-memory | `src/agent-memory/` | 仅 Linux | `memory` | `memory` | `make build`、`make fmt-check`、`make lint`、`make test`；MCP 改动追加 `make smoke` |
 | os-skills | `src/os-skills/` | 资源跨平台；单个脚本自行声明限制 | `skills` | `skill` | 源码安装需要 Python 3.6+；无需编译；使用 Python 3.11 运行[组件回归测试](#skill-回归测试与路径归属) |
 | anolisa | `distribution/anolisa/` | Linux 和 macOS arm64 | 不适用 | `anolisa` | `cargo fmt --all --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` |
-| SkillFS | `src/skillfs/` | 仅 Linux | 不适用 | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
+| SkillFS | `src/skillfs/` | 仅 Linux | `skillfs` | `skillfs` | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；修改 FUSE 时运行 `scripts/test.sh` |
 | ws-ckpt | `src/ws-ckpt/` | 仅 Linux | `ws-ckpt` | `ckpt` | `make build`、`make test` |
 | ktuner | `src/ktuner/` | 仅 Linux | 不适用 | `ktuner` | `cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` |
 
@@ -89,37 +89,56 @@ Fork 贡献者可以使用其他分支名，分支检查只会给出非阻塞警
 
 ### 统一构建
 
-`scripts/build-all.sh` 是 Linux 便捷构建入口。重复使用 `--component`，选择需要的
-维护中组件：`skills`、`sec-core`、`tokenless`、`ws-ckpt`、`memory`、`cosh-ng` 和 `sight`。
+`scripts/build-all.sh` 是 Linux 便捷构建入口。不指定组件或使用 `--all` 时，脚本会准备依赖、
+构建并安装默认组件栈：`cosh-ng`、`skillfs`、`ws-ckpt`、`tokenless`、`agentsight`、
+`agent-sec-core` 和 `aw`。每个选中的后端如果存在对应的 AW Provider，也会从
+`providers/<component>/` 一并纳入。重复使用 `--component` 可以选择子集；别名
+`sec-core`、`sight`、`skills` 和 `memory` 分别对应 `agent-sec-core`、`agentsight`、
+`os-skills` 和 `agent-memory`。`agent-memory` 和 `os-skills` 是默认选择之外的可选组件。
+单独指定 `aw-provider-<name>` 时只构建该 Provider。
 
-脚本不会构建 `anolisa`、`skillfs` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
+脚本不会构建 `anolisa` 或 `ktuner`，这些组件请使用上方矩阵中的组件门禁。
 
-不指定安装模式时，各组件按自己的安装规则选择用户主目录内的路径，这一步不需要提权。
-依赖引导仍可能为了安装系统包请求 `sudo`。使用 `--system` 或 `--usr` 会采用系统
-安装模式，通常需要 `sudo`。开发时建议指定组件并关闭安装。
+默认安装模式是 `system`，`PREFIX=/usr/local`。在该模式下，缺失的系统包和系统文件安装
+可能需要 `sudo`；请以普通构建用户身份运行脚本，以保留用户自有的缓存。使用 `--user`
+切换到用户模式（`PREFIX="$HOME/.local"`）。在默认组件栈中，只有 `cosh-ng`、`tokenless`、
+`aw` 及其 Provider 支持用户模式安装文件；在 `--user` 下加 `--supported-only`
+可报告并跳过其他组件。
+用户模式默认不安装系统包，也不会调用 `sudo`，除非设置 `--install-system-deps`。
+开发时建议指定组件并关闭安装：
 
 ```bash
 ./scripts/build-all.sh --help
-./scripts/build-all.sh --no-install --component cosh-ng
+./scripts/build-all.sh --user --no-install --component cosh-ng
 ./scripts/build-all.sh --no-install --component sec-core
 ./scripts/build-all.sh --no-install --component sec-core --component tokenless
 ```
+
+`--no-install` 只跳过文件安装，仍会准备依赖。若要把文件暂存到包根目录而不是安装，
+请使用绝对路径指定 `--destdir`；即使同时给出 `--no-install`，DESTDIR 暂存仍会执行，
+并跳过运行时能力检查。`--check-deps` 只检查依赖，不改动主机，用户模式下同样适用。
 
 主要选项如下。
 
 | 选项 | 作用 |
 | --- | --- |
-| `--no-install` | 安装依赖并构建，随后跳过安装。 |
-| `--install-mode <mode>` | 选择 `user` 或 `system`，默认是 `user`。 |
-| `--usr`、`--system` | 选择系统安装模式。 |
+| `--all` | 选择默认组件及其对应的 Provider。 |
+| `--component <name>` | 选择一个组件或 Provider，可以重复指定。 |
+| `--no-install` | 准备依赖并构建，随后跳过安装文件。 |
+| `--install` | 准备、构建并安装文件（默认）。 |
+| `--system`、`--user` | 选择安装模式；`--install-mode <mode>` 与之等价。默认是 `system`。 |
+| `--supported-only` | 配合 `--user`，报告并跳过不支持用户安装的组件。 |
+| `--install-system-deps` | 允许在用户模式下安装原生构建包；组件文件仍使用用户路径。 |
 | `--ignore-deps` | 跳过依赖准备和运行时校验；仅用于已配好依赖的主机。 |
 | `--deps-only` | 只安装依赖，不构建。 |
-| `--uninstall` | 删除已安装文件；与 `--component` 一起使用可限定组件。 |
-| `--dry-run` | 只打印动作，不修改文件或 systemd 状态。 |
+| `--check-deps` | 检查构建依赖，不改动主机。 |
+| `--prefix PATH`、`--destdir PATH` | 设置目标前缀，或将文件暂存到绝对包根目录；即使配合 `--no-install` 也会执行 DESTDIR 暂存。 |
+| `--dry-run` | 只打印计划，不下载文件或修改文件系统。 |
 | `--interactive`、`--non-interactive` | 打开引导流程，或明确选择自动化模式。 |
-| `--component <name>` | 构建或卸载一个受支持的组件，可以重复指定。 |
 
-开发时请明确选择组件，完整脚本接口见 `./scripts/build-all.sh --help`。
+`--usr` 已被拒绝：安装范围请使用 `--system`，包路径请使用 `--prefix /usr`。
+`--uninstall` 也已被拒绝：请按组件专属的移除流程删除已安装文件。完整脚本接口见
+`./scripts/build-all.sh --help`。
 
 `sight` 选项使用 Linux eBPF 构建。macOS 应在组件目录运行 `make build-mac`。
 
