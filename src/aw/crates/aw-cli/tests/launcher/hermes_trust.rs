@@ -171,8 +171,7 @@ else:
     (fixture, profile)
 }
 
-fn installed_hermes_fixture() -> (Fixture, PathBuf) {
-    let (fixture, profile) = hermes_fixture();
+fn copy_hermes_plugin(profile: &std::path::Path, dir_mode: u32) {
     let plugin = profile.join("plugins/aw-native-hooks");
     fs::create_dir_all(&plugin).unwrap();
     let source =
@@ -194,8 +193,13 @@ fn installed_hermes_fixture() -> (Fixture, PathBuf) {
     fs::write(plugin.join(".aw-owned"), "aw-hermes-plugin/v1alpha1\n").unwrap();
     fs::set_permissions(plugin.join(".aw-owned"), fs::Permissions::from_mode(0o600)).unwrap();
     for path in [profile.join("plugins"), plugin] {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(dir_mode)).unwrap();
     }
+}
+
+fn installed_hermes_fixture() -> (Fixture, PathBuf) {
+    let (fixture, profile) = hermes_fixture();
+    copy_hermes_plugin(&profile, 0o700);
     let original = "plugins: {enabled: [aw-native-hooks]}\nunknown: keep\n";
     fs::write(profile.join("config.yaml"), original).unwrap();
     (fixture, profile)
@@ -441,29 +445,7 @@ fn hermes_rejects_non_executable_or_special_explicit_entrypoints() {
 fn hermes_rejects_writable_native_paths_before_any_probe() {
     use std::os::unix::fs::symlink;
     let (fixture, profile) = hermes_fixture();
-    let plugin = profile.join("plugins/aw-native-hooks");
-    fs::create_dir_all(&plugin).unwrap();
-    for path in [profile.join("plugins"), plugin.clone()] {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let source =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native/hermes");
-    for name in [
-        "plugin.yaml",
-        "__init__.py",
-        "aw_gateway.py",
-        "aw_gateway_attach.py",
-        "aw_gateway_lifecycle.py",
-        "aw_identity.py",
-        "aw_result.py",
-        "aw_sdk_attach.py",
-        "aw_skill.py",
-    ] {
-        fs::copy(source.join(name), plugin.join(name)).unwrap();
-        fs::set_permissions(plugin.join(name), fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    fs::write(plugin.join(".aw-owned"), "aw-hermes-plugin/v1alpha1\n").unwrap();
-    fs::set_permissions(plugin.join(".aw-owned"), fs::Permissions::from_mode(0o600)).unwrap();
+    copy_hermes_plugin(&profile, 0o700);
     let original = "plugins: {enabled: [aw-native-hooks]}\nunknown: keep\n";
     fs::write(profile.join("config.yaml"), original).unwrap();
     let bin = profile.parent().unwrap().join("writable-bin");
