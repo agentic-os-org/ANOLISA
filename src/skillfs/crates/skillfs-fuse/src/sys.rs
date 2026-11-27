@@ -167,6 +167,21 @@ pub(crate) fn fstatat_leaf(
     Ok(st)
 }
 
+/// Change the mode of a leaf relative to its open parent directory.
+pub(crate) fn fchmodat_leaf(
+    dir: &std::fs::File,
+    leaf: &std::ffi::OsStr,
+    mode: libc::mode_t,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let c = cstring_from_os_str(leaf)?;
+    let rc = unsafe { libc::fchmodat(dir.as_raw_fd(), c.as_ptr(), mode, 0) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// `fchownat` against an open parent directory, the owner-setting twin of
 /// [`fstatat_leaf`]: `follow == false` changes the leaf's own owner the way
 /// `lchown` does on a nameable path.
@@ -245,4 +260,24 @@ pub(crate) fn renameat2_leaf(
     _flags: u32,
 ) -> std::io::Result<()> {
     Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn fchmodat_updates_leaf_relative_to_parent() -> std::io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let dir = open_dir_path(tmp.path())?;
+        let leaf = OsStr::new("file");
+        let file = std::fs::File::create(tmp.path().join(leaf))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+
+        fchmodat_leaf(&dir, leaf, 0o600)?;
+        assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
 }

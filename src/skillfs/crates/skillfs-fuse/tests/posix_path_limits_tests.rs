@@ -175,6 +175,7 @@ struct LongSourceMount {
     source: PathBuf,
     mount: PathBuf,
     handle: Option<MountHandle>,
+    _mount_guard: parking_lot::MutexGuard<'static, ()>,
 }
 
 impl LongSourceMount {
@@ -182,6 +183,10 @@ impl LongSourceMount {
         if !common::fuse_available() {
             return None;
         }
+        // Concurrent libfuse mounts in one process can cross their fusermount
+        // communication fds. Hold the lock through unmount and fixture cleanup.
+        static MOUNT_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        let mount_guard = MOUNT_LOCK.lock();
         let source_root = tempfile::tempdir().expect("source tempdir");
         let mount_root = tempfile::tempdir().expect("mount tempdir");
 
@@ -230,6 +235,7 @@ impl LongSourceMount {
             source: padded_source,
             mount: mount_path,
             handle: Some(handle),
+            _mount_guard: mount_guard,
         })
     }
 
@@ -616,5 +622,44 @@ fn fuse_nofollow_setattr_via_openat_fallback_at_max_path() {
             target_after_chown.st_gid, target_before.st_gid,
             "the symlink target's group must be untouched"
         );
+    }
+}
+
+#[test]
+fn fuse_chmod_via_openat_fallback_at_max_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    skip_if_no_fuse!();
+    let fx = LongSourceMount::new().expect("mount long-source fixture");
+    let source_sandbox = fx.source_sandbox();
+    let (source_parent, leaf) = seed_dirs_to_overflow(&source_sandbox, PATH_MAX_LINUX + 30);
+    let source_parent_fd = open_dir_for_at(&source_parent).expect("open source parent");
+    let mount_parent = fx.mount_sandbox().join(
+        source_parent
+            .strip_prefix(&source_sandbox)
+            .expect("relative parent"),
+    );
+
+    // Seed through the backing directory fd so setup is independent of mounted chmod.
+    let seed_parent = PathBuf::from(format!("/proc/self/fd/{}", source_parent_fd.as_raw_fd()));
+    for (suffix, initial, requested) in [("file", 0o644, 0o600), ("dir", 0o755, 0o700)] {
+        let leaf = format!("{leaf}{suffix}");
+        let mount_leaf = mount_parent.join(&leaf);
+        assert!(source_parent.join(&leaf).as_os_str().len() >= PATH_MAX_LINUX);
+        assert!(mount_leaf.as_os_str().len() < PATH_MAX_LINUX);
+
+        let seed = seed_parent.join(&leaf);
+        if suffix == "file" {
+            std::fs::File::create(&seed).expect("seed backing file");
+        } else {
+            std::fs::create_dir(&seed).expect("seed backing directory");
+        }
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(initial))
+            .expect("set initial mode independently of umask");
+        std::fs::set_permissions(&mount_leaf, std::fs::Permissions::from_mode(requested))
+            .expect("chmod through mount");
+
+        let st = fstatat_local(&source_parent_fd, &leaf, false).expect("stat backing leaf");
+        assert_eq!(st.st_mode & 0o777, requested);
     }
 }

@@ -13,7 +13,7 @@ use crate::handles::open_options_from_flags;
 use crate::path::{PathType, hermes_nested_sync_eligible, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
-use crate::sys::{errno, fchownat_leaf, fstatat_leaf, openat_leaf, utimensat_leaf};
+use crate::sys::{errno, fchmodat_leaf, fchownat_leaf, fstatat_leaf, openat_leaf, utimensat_leaf};
 
 /// Convert a FUSE `TimeOrNow` into the `timespec` the kernel expects;
 /// `None` becomes `UTIME_OMIT`. Pre-epoch instants are normalized so
@@ -1567,8 +1567,17 @@ impl SkillFs {
                 reply.error(libc::EOPNOTSUPP);
                 return;
             }
-            let perms = std::fs::Permissions::from_mode(new_mode);
-            if let Err(e) = std::fs::set_permissions(&physical, perms) {
+            let chmod_result = if long_path {
+                match self.open_parent_dir_for(&path) {
+                    Ok((parent_fd, leaf)) => {
+                        fchmodat_leaf(&parent_fd, &leaf, new_mode as libc::mode_t)
+                    }
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e)),
+                }
+            } else {
+                std::fs::set_permissions(&physical, std::fs::Permissions::from_mode(new_mode))
+            };
+            if let Err(e) = chmod_result {
                 reply.error(errno(&e));
                 return;
             }
