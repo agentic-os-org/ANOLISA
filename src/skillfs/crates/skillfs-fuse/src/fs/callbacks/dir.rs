@@ -16,6 +16,12 @@ use crate::security::{
 };
 use crate::sys::errno;
 
+/// Only UTF-8 child names are addressable through the virtual namespace.
+fn named_entry(entry: std::fs::DirEntry) -> Option<(std::fs::DirEntry, String)> {
+    let name = entry.file_name().into_string().ok()?;
+    Some((entry, name))
+}
+
 impl SkillFs {
     pub(in crate::fs) fn readdir_dynamic(
         &mut self,
@@ -62,14 +68,13 @@ impl SkillFs {
                     (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(self.source_base()) {
-                    for entry in dir_iter.flatten() {
+                    for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                         if entry
                             .file_type()
                             .is_ok_and(|file_type| file_type.is_symlink())
                         {
                             continue;
                         }
-                        let name = entry.file_name().to_string_lossy().to_string();
                         // The ordinary view hides the same top-level entries
                         // the flat `/skills` listing hides (S3 reserved roots,
                         // I2 staging roots, D1.1 hidden skills).
@@ -193,8 +198,7 @@ impl SkillFs {
                     ];
                     let phys_dir = self.source_base().join(&skill_name);
                     if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                        for entry in dir_iter.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                             if name == SKILL_META_DIR && !show_meta {
                                 continue;
                             }
@@ -239,8 +243,7 @@ impl SkillFs {
                             .skill_read_dir(&skill_name)
                             .unwrap_or_else(|| self.skill_physical_dir(&skill_name));
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                            for entry in dir_iter.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                                 if name == "SKILL.md" {
                                     continue;
                                 }
@@ -285,8 +288,7 @@ impl SkillFs {
                             (parent_ino, FileType::Directory, "..".to_string()),
                         ];
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                            for entry in dir_iter.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -349,8 +351,7 @@ impl SkillFs {
                         let mut listed: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                            for entry in dir_iter.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                                 let kind = match self.grace_child_kind(
                                     &skill_name,
                                     &gate,
@@ -383,8 +384,7 @@ impl SkillFs {
                         if let Some(snapshot_dir) = gate.snapshot_dir.as_deref() {
                             let snap_dir = snapshot_dir.join(&relative_path);
                             if let Ok(dir_iter) = std::fs::read_dir(&snap_dir) {
-                                for entry in dir_iter.flatten() {
-                                    let name = entry.file_name().to_string_lossy().to_string();
+                                for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                                     if self.is_post_publish_grace_allowed(
                                         &skill_name,
                                         Some(&relative_path.join(&name)),
@@ -412,8 +412,7 @@ impl SkillFs {
                     (parent_ino, FileType::Directory, "..".to_string()),
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(self.source_base()) {
-                    for entry in dir_iter.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
+                    for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                         if !Self::is_inbox_skill_name_allowed(&name) {
                             continue;
                         }
@@ -447,8 +446,7 @@ impl SkillFs {
                 ];
                 match std::fs::read_dir(&phys_dir) {
                     Ok(dir_iter) => {
-                        for entry in dir_iter.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = format!("{}/{}", path, name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -484,8 +482,7 @@ impl SkillFs {
                 ];
                 match std::fs::read_dir(&phys_dir) {
                     Ok(dir_iter) => {
-                        for entry in dir_iter.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = format!("{}/{}", path, name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -507,8 +504,7 @@ impl SkillFs {
                     (parent_ino, FileType::Directory, "..".to_string()),
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                    for entry in dir_iter.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
+                    for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = format!("{}/{}", path, name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -538,8 +534,7 @@ impl SkillFs {
                     (parent_ino, FileType::Directory, "..".to_string()),
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                    for entry in dir_iter.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
+                    for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = format!("{}/{}", path, name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -557,14 +552,13 @@ impl SkillFs {
                     (parent_ino, FileType::Directory, "..".to_string()),
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                    for entry in dir_iter.flatten() {
+                    for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                         if entry
                             .file_type()
                             .is_ok_and(|file_type| file_type.is_symlink())
                         {
                             continue;
                         }
-                        let name = entry.file_name().to_string_lossy().to_string();
                         let is_dir = entry.path().is_dir();
                         // Activation gating applies only to real nested
                         // skill leaves (directories with SKILL.md). Plain
@@ -644,8 +638,7 @@ impl SkillFs {
                     (parent_ino, FileType::Directory, "..".to_string()),
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                    for entry in dir_iter.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
+                    for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                         if name == SKILL_META_DIR && !show_meta {
                             continue;
                         }
@@ -691,8 +684,7 @@ impl SkillFs {
                             (parent_ino, FileType::Directory, "..".to_string()),
                         ];
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                            for entry in dir_iter.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -727,8 +719,7 @@ impl SkillFs {
                             (parent_ino, FileType::Directory, "..".to_string()),
                         ];
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                            for entry in dir_iter.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -800,14 +791,13 @@ impl SkillFs {
                     Ok(dir_iter) => {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-                        for entry in phys_entries {
+                        for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                             if entry
                                 .file_type()
                                 .is_ok_and(|file_type| file_type.is_symlink())
                             {
                                 continue;
                             }
-                            let name = entry.file_name().to_string_lossy().to_string();
                             // The ordinary view hides the same top-level
                             // entries the flat `/skills` listing hides (S3
                             // reserved roots, I2 staging roots, D1.1 hidden
@@ -943,8 +933,7 @@ impl SkillFs {
                     if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-                        for entry in phys_entries {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                             if name == SKILL_META_DIR && !show_meta {
                                 continue;
                             }
@@ -1000,8 +989,7 @@ impl SkillFs {
                             let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                             phys_entries.sort_by_key(|e| e.file_name());
 
-                            for entry in phys_entries {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                                 if name == "SKILL.md" {
                                     continue;
                                 }
@@ -1048,8 +1036,7 @@ impl SkillFs {
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                             phys_entries.sort_by_key(|e| e.file_name());
-                            for entry in phys_entries {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -1119,8 +1106,7 @@ impl SkillFs {
                             let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                             phys_entries.sort_by_key(|e| e.file_name());
 
-                            for entry in phys_entries {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                                 let kind = match self.grace_child_kind(
                                     skill_name,
                                     &gate,
@@ -1157,8 +1143,7 @@ impl SkillFs {
                                 Err(_) => Vec::new(),
                             };
                             snap_entries.sort_by_key(|e| e.file_name());
-                            for entry in snap_entries {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in snap_entries.into_iter().filter_map(named_entry) {
                                 if self.is_post_publish_grace_allowed(
                                     skill_name,
                                     Some(&relative_path.join(&name)),
@@ -1188,8 +1173,7 @@ impl SkillFs {
                 if let Ok(dir_iter) = std::fs::read_dir(self.source_base()) {
                     let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                     phys_entries.sort_by_key(|e| e.file_name());
-                    for entry in phys_entries {
-                        let name = entry.file_name().to_string_lossy().to_string();
+                    for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                         if !Self::is_inbox_skill_name_allowed(&name) {
                             continue;
                         }
@@ -1224,8 +1208,7 @@ impl SkillFs {
                     Ok(dir_iter) => {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-                        for entry in phys_entries {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = format!("{}/{}", path, name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -1260,8 +1243,7 @@ impl SkillFs {
                     Ok(dir_iter) => {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-                        for entry in phys_entries {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = format!("{}/{}", path, name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -1295,8 +1277,7 @@ impl SkillFs {
                     Ok(dir_iter) => {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-                        for entry in phys_entries {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = format!("{}/{}", path, name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -1329,14 +1310,13 @@ impl SkillFs {
                     Ok(dir_iter) => {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-                        for entry in phys_entries {
+                        for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                             if entry
                                 .file_type()
                                 .is_ok_and(|file_type| file_type.is_symlink())
                             {
                                 continue;
                             }
-                            let name = entry.file_name().to_string_lossy().to_string();
                             // A dot-prefixed directory with SKILL.md is never
                             // a managed Skill (the store loader skips hidden
                             // directories and the resolver refuses dot
@@ -1416,8 +1396,7 @@ impl SkillFs {
                     Ok(dir_iter) => {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-                        for entry in phys_entries {
-                            let name = entry.file_name().to_string_lossy().to_string();
+                        for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                             if name == SKILL_META_DIR && !show_meta {
                                 continue;
                             }
@@ -1465,8 +1444,7 @@ impl SkillFs {
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                             phys_entries.sort_by_key(|e| e.file_name());
-                            for entry in phys_entries {
-                                let name = entry.file_name().to_string_lossy().to_string();
+                            for (entry, name) in phys_entries.into_iter().filter_map(named_entry) {
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -1504,8 +1482,9 @@ impl SkillFs {
                             Ok(dir_iter) => {
                                 let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                                 phys_entries.sort_by_key(|e| e.file_name());
-                                for entry in phys_entries {
-                                    let name = entry.file_name().to_string_lossy().to_string();
+                                for (entry, name) in
+                                    phys_entries.into_iter().filter_map(named_entry)
+                                {
                                     let kind = dir_entry_file_type(&entry);
                                     let entry_path = format!("{}/{}", path, name);
                                     let entry_ino = self.inodes.readdir_ino(&entry_path);

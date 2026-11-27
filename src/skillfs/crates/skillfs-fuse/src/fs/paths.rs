@@ -200,13 +200,17 @@ impl SkillFs {
     }
 
     /// Build the canonical FUSE path from a parent inode and child name.
-    pub(super) fn build_fuse_path(&self, parent: u64, name: &std::ffi::OsStr) -> Option<String> {
-        let parent_path = self.inodes.get_path(parent)?;
-        let name_str = name.to_string_lossy();
+    pub(super) fn build_fuse_path(
+        &self,
+        parent: u64,
+        name: &std::ffi::OsStr,
+    ) -> Result<String, i32> {
+        let parent_path = self.inodes.get_path(parent).ok_or(libc::ENOENT)?;
+        let name_str = name.to_str().ok_or(libc::EINVAL)?;
         if parent_path == "/" {
-            Some(format!("/{}", name_str))
+            Ok(format!("/{}", name_str))
         } else {
-            Some(format!("{}/{}", parent_path, name_str))
+            Ok(format!("{}/{}", parent_path, name_str))
         }
     }
 
@@ -598,6 +602,27 @@ mod tests {
     use skillfs_core::{ParseConfig, store::SkillStore};
 
     use super::*;
+
+    #[test]
+    fn build_fuse_path_distinguishes_invalid_child_from_missing_parent() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            Arc::new(RwLock::new(SkillStore::new())),
+            false,
+        );
+        let invalid = OsStr::from_bytes(b"note-\xff");
+        assert_eq!(fs.build_fuse_path(FUSE_ROOT_ID, invalid), Err(libc::EINVAL));
+        assert_eq!(fs.build_fuse_path(u64::MAX, invalid), Err(libc::ENOENT));
+        assert_eq!(
+            fs.build_fuse_path(FUSE_ROOT_ID, OsStr::new("note-\u{fffd}")),
+            Ok("/note-\u{fffd}".to_owned())
+        );
+    }
 
     #[test]
     fn skills_dir_ino_survives_kernel_forget() {

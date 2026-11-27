@@ -22,22 +22,11 @@ impl SkillFs {
         name: &std::ffi::OsStr,
         reply: ReplyEntry,
     ) {
-        let name_str = name.to_string_lossy();
-        debug!(parent, name = %name_str, "lookup");
-
-        let parent_path = match self.inodes.get_path(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Ok(path_str) = self.build_fuse_path(parent, name) else {
+            reply.error(libc::ENOENT);
+            return;
         };
-
-        let path_str = if parent_path == "/" {
-            format!("/{}", name_str)
-        } else {
-            format!("{}/{}", parent_path, name_str)
-        };
+        debug!(parent, ?name, "lookup");
         let path = Path::new(&path_str);
 
         match self.parse_fuse_path(path) {
