@@ -69,6 +69,8 @@ pub fn compress_json_with(
                 min_toon_chars: usize::MAX,
                 allow_unrecoverable: true,
                 embedded_html: false,
+                embedded_content: false,
+                is_error: false,
             },
         )
         .expect("serialized JSON value parses");

@@ -21,7 +21,10 @@
 //! ([`retainable`]): Stash payloads and compressor output must stay parseable
 //! by the rest of the toolchain.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::ops::Range;
 
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -128,6 +131,25 @@ impl<'a> ExactValue<'a> {
 #[derive(Debug)]
 pub(crate) struct ScanRejected;
 
+/// Byte span and decoded content of a string value inside a serialized JSON
+/// container (`Object` or `Array`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StringSlot {
+    /// Start byte offset of the opening `"` in the source text.
+    pub(crate) start: usize,
+    /// End byte offset just past the closing `"` in the source text.
+    pub(crate) end: usize,
+    /// Unescaped string value, validated by `serde_json` rules.
+    pub(crate) decoded: String,
+    /// Zero-based container nesting depth inside the serialized document.
+    pub(crate) inner_depth: usize,
+}
+
+struct SlotRecord {
+    active: bool,
+    slot: StringSlot,
+}
+
 /// Parses one JSON document, retaining every number token verbatim.
 ///
 /// # Errors
@@ -136,6 +158,19 @@ pub(crate) struct ScanRejected;
 /// accepts. The caller re-derives the `serde_json` diagnostic.
 pub(crate) fn parse(source: &str) -> Result<ExactValue<'_>, ScanRejected> {
     Scanner::new(source).scan()
+}
+
+/// Validates a serialized JSON container (`Object` or `Array`) and returns the
+/// active string value slots in source order, leaving object keys out.
+///
+/// When an object repeats a key, slots inside earlier shadowed values are
+/// excluded so active slots match the surviving values of `serde_json::Map`.
+///
+/// # Errors
+///
+/// Returns [`ScanRejected`] when `source` is not a valid JSON object or array.
+pub(crate) fn scan_string_slots(source: &str) -> Result<Vec<StringSlot>, ScanRejected> {
+    Scanner::new(source).scan_slots()
 }
 
 struct Scanner<'a> {
@@ -263,6 +298,16 @@ impl<'a> Scanner<'a> {
     }
 
     fn string(&mut self) -> Result<String, ScanRejected> {
+        self.string_span_cow()
+            .map(|(_, _, decoded)| decoded.into_owned())
+    }
+
+    fn string_span(&mut self) -> Result<(usize, usize, String), ScanRejected> {
+        self.string_span_cow()
+            .map(|(start, end, decoded)| (start, end, decoded.into_owned()))
+    }
+
+    fn string_span_cow(&mut self) -> Result<(usize, usize, Cow<'a, str>), ScanRejected> {
         if self.peek() != Some(b'"') {
             return Err(ScanRejected);
         }
@@ -295,15 +340,137 @@ impl<'a> Scanner<'a> {
         // `serde_json` owns string semantics: escapes, surrogate pairs, and the
         // rejection of raw control bytes. Delegating every escaped leaf keeps
         // this scanner from becoming a second, subtly different source of
-        // truth. An unescaped payload needs no decoding, and copying it
-        // directly is what keeps string-heavy documents at one pass; UTF-8
+        // truth. An unescaped payload needs no decoding, and borrowing it
+        // directly keeps object-key duplicate tracking allocation-free; UTF-8
         // continuation bytes are all above ASCII, so the byte scan above only
         // ever stops on a character boundary.
-        let raw = self.text.get(start..self.position).ok_or(ScanRejected)?;
+        let end = self.position;
+        let raw = self.text.get(start..end).ok_or(ScanRejected)?;
         if needs_decoding {
-            return serde_json::from_str::<String>(raw).map_err(|_| ScanRejected);
+            let decoded = serde_json::from_str::<String>(raw).map_err(|_| ScanRejected)?;
+            return Ok((start, end, Cow::Owned(decoded)));
         }
-        Ok(raw[1..raw.len() - 1].to_owned())
+        Ok((start, end, Cow::Borrowed(&raw[1..raw.len() - 1])))
+    }
+
+    fn scan_slots(mut self) -> Result<Vec<StringSlot>, ScanRejected> {
+        self.skip_whitespace();
+        let mut records = Vec::new();
+        match self.peek() {
+            Some(b'{') => self.scan_object_slots(0, &mut records)?,
+            Some(b'[') => self.scan_array_slots(0, &mut records)?,
+            _ => return Err(ScanRejected),
+        }
+        self.skip_whitespace();
+        if self.position != self.bytes.len() {
+            return Err(ScanRejected);
+        }
+        Ok(records
+            .into_iter()
+            .filter(|record| record.active)
+            .map(|record| record.slot)
+            .collect())
+    }
+
+    fn scan_slot_value(
+        &mut self,
+        inner_depth: usize,
+        records: &mut Vec<SlotRecord>,
+    ) -> Result<(), ScanRejected> {
+        match self.peek() {
+            Some(b'"') => {
+                let (start, end, decoded) = self.string_span()?;
+                records.push(SlotRecord {
+                    active: true,
+                    slot: StringSlot {
+                        start,
+                        end,
+                        decoded,
+                        inner_depth,
+                    },
+                });
+                Ok(())
+            }
+            Some(b'{') => self.scan_object_slots(inner_depth + 1, records),
+            Some(b'[') => self.scan_array_slots(inner_depth + 1, records),
+            Some(b't') => self.keyword(b"true", ExactValue::Bool(true)).map(|_| ()),
+            Some(b'f') => self.keyword(b"false", ExactValue::Bool(false)).map(|_| ()),
+            Some(b'n') => self.keyword(b"null", ExactValue::Null).map(|_| ()),
+            Some(b'-' | b'0'..=b'9') => self.number().map(|_| ()),
+            _ => Err(ScanRejected),
+        }
+    }
+
+    fn scan_object_slots(
+        &mut self,
+        depth: usize,
+        records: &mut Vec<SlotRecord>,
+    ) -> Result<(), ScanRejected> {
+        if depth == MAX_CONTAINER_DEPTH {
+            return Err(ScanRejected);
+        }
+        self.position += 1;
+        self.skip_whitespace();
+        if self.peek() == Some(b'}') {
+            self.position += 1;
+            return Ok(());
+        }
+        let mut seen_keys: HashMap<Cow<'a, str>, Range<usize>> = HashMap::new();
+        loop {
+            self.skip_whitespace();
+            let (_, _, key) = self.string_span_cow()?;
+            self.skip_whitespace();
+            if self.peek() != Some(b':') {
+                return Err(ScanRejected);
+            }
+            self.position += 1;
+            self.skip_whitespace();
+            let before = records.len();
+            self.scan_slot_value(depth, records)?;
+            if let Some(previous) = seen_keys.insert(key, before..records.len()) {
+                for record in &mut records[previous] {
+                    record.active = false;
+                }
+            }
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.position += 1,
+                Some(b'}') => {
+                    self.position += 1;
+                    return Ok(());
+                }
+                _ => return Err(ScanRejected),
+            }
+        }
+    }
+
+    fn scan_array_slots(
+        &mut self,
+        depth: usize,
+        records: &mut Vec<SlotRecord>,
+    ) -> Result<(), ScanRejected> {
+        if depth == MAX_CONTAINER_DEPTH {
+            return Err(ScanRejected);
+        }
+        self.position += 1;
+        self.skip_whitespace();
+        if self.peek() == Some(b']') {
+            self.position += 1;
+            return Ok(());
+        }
+        loop {
+            self.skip_whitespace();
+            self.scan_slot_value(depth, records)?;
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.position += 1,
+                Some(b']') => {
+                    self.position += 1;
+                    return Ok(());
+                }
+                _ => return Err(ScanRejected),
+            }
+        }
     }
 
     fn number(&mut self) -> Result<ExactValue<'a>, ScanRejected> {
@@ -551,6 +718,82 @@ fn write_string(value: &str, output: &mut String) {
     }
     output.push_str(&value[flushed..]);
     output.push('"');
+}
+
+/// Encodes `value` as a canonical RFC 8259 JSON string literal (`"..."`)
+/// without cloning `value` into an intermediate [`ExactValue::String`].
+pub(crate) fn encode_string_literal(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    write_string(value, &mut output);
+    output
+}
+
+/// Exact Unicode scalar count of `encode_string_literal(value)`, computed
+/// without allocating.
+pub(crate) fn encoded_string_char_len(value: &str) -> usize {
+    2 + value
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\x08' | '\t' | '\n' | '\x0c' | '\r' => 2,
+            c if (c as u32) < 0x20 => 6,
+            _ => 1,
+        })
+        .sum::<usize>()
+}
+
+/// Reports whether `raw_literal` (including outer quotes) matches the exact
+/// canonical RFC 8259 escaping emitted by [`write_string`] for `decoded`,
+/// without allocating or cloning.
+pub(crate) fn is_canonical_string_literal(raw_literal: &str, decoded: &str) -> bool {
+    let raw = raw_literal.as_bytes();
+    if raw.len() < 2 || raw[0] != b'"' || raw[raw.len() - 1] != b'"' {
+        return false;
+    }
+    let inner = &raw[1..raw.len() - 1];
+    let bytes = decoded.as_bytes();
+    if !bytes.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20) {
+        return inner == bytes;
+    }
+    let mut cursor = 0usize;
+    for &byte in bytes {
+        let expected: &[u8] = match byte {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            0x08 => b"\\b",
+            b'\t' => b"\\t",
+            b'\n' => b"\\n",
+            0x0c => b"\\f",
+            b'\r' => b"\\r",
+            b if b < 0x20 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let seq = [
+                    b'\\',
+                    b'u',
+                    b'0',
+                    b'0',
+                    HEX[(b >> 4) as usize],
+                    HEX[(b & 0x0f) as usize],
+                ];
+                if !inner[cursor..].starts_with(&seq) {
+                    return false;
+                }
+                cursor += 6;
+                continue;
+            }
+            _ => {
+                if inner.get(cursor).copied() != Some(byte) {
+                    return false;
+                }
+                cursor += 1;
+                continue;
+            }
+        };
+        if !inner[cursor..].starts_with(expected) {
+            return false;
+        }
+        cursor += expected.len();
+    }
+    cursor == inner.len()
 }
 
 /// Approximates a document as `serde_json::Value` for TOON encoding.

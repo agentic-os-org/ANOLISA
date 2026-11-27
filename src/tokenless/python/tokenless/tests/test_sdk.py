@@ -256,6 +256,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "html_extraction_enabled",
                 "compression_enabled",
                 "browser_snapshot_enabled",
+                "embedded_content_enabled",
                 "rtk_rollout",
                 "exclude_commands",
             },
@@ -287,6 +288,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "TOKENLESS_SEARCH_PATH_SHARING_ENABLED": "false",
                 "TOKENLESS_DIFF_COMPRESSION_ENABLED": "yes",
                 "TOKENLESS_HTML_EXTRACTION_ENABLED": "0",
+                "TOKENLESS_EMBEDDED_CONTENT_ENABLED": "false",
             },
         ):
             sdk = self.sdk(rtk_enabled=False)
@@ -294,6 +296,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sdk.config.search_path_sharing_enabled)
         self.assertTrue(sdk.config.diff_compression_enabled)
         self.assertFalse(sdk.config.html_extraction_enabled)
+        self.assertFalse(sdk.config.embedded_content_enabled)
         content = json.dumps([{"id": i, "name": "record " * 20} for i in range(10)], indent=4)
         request = PostToolRequest(
             result_kind=ResultKind.TOOL,
@@ -1257,6 +1260,90 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_policy.call_count, 1)
         self.assertEqual(single_load.exclude_commands, ("cached-cli",))
         self.assertEqual(explicit_config.exclude_commands, ())
+
+    async def test_embedded_content_and_exclude_commands_coexist_on_same_sdk(self) -> None:
+        cargo_lines = [
+            f"   Compiling sdk-mod-{idx:02d} v0.1.{idx} (/work/sdk-mod)"
+            for idx in range(1, 33)
+        ] + [
+            "error[E0308]: mismatched types",
+            "  --> src/lib.rs:4:5",
+            "   |",
+            "4  |     1",
+            "   |     ^ expected `()`, found integer",
+            "error: could not compile `sdk-mod` (lib) due to 1 previous error",
+        ]
+        cargo_log = "\n".join(cargo_lines) + "\n"
+        payload = json.dumps({"status": "failed", "stdout": cargo_log})
+        capabilities = PostToolCapabilities(
+            replace_output=True,
+            recovery=RecoveryMethod.tool("tokenless_retrieve"),
+            replace_with_text=False,
+        )
+        sdk = self.sdk(
+            rtk_enabled=False,
+            embedded_content_enabled=True,
+            exclude_commands=("custom-cli", "cat"),
+        )
+        self.assertTrue(sdk.config.embedded_content_enabled)
+        self.assertEqual(sdk.config.exclude_commands, ("custom-cli", "cat"))
+
+        excluded = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="Bash",
+                content=payload,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.COMMAND_OUTPUT,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=capabilities,
+                attribution=Attribution("sdk-agent", "coexist-session", "call-1"),
+                command="timeout 15 custom-cli --json",
+            )
+        )
+        self.assertEqual(excluded.disposition.value, "passthrough")
+        self.assertEqual(excluded.output, payload)
+        self.assertEqual(excluded.applied_operations, ())
+        self.assertEqual(excluded.stash_keys, ())
+
+        for idx, (origin, cmd) in enumerate(
+            [
+                (ContentOrigin.COMMAND_OUTPUT, "other-cli --json"),
+                (ContentOrigin.API_RESPONSE, "custom-cli --json"),
+            ],
+            start=2,
+        ):
+            attr = Attribution("sdk-agent", "coexist-session", f"call-{idx}")
+            routed = await sdk.post_tool(
+                PostToolRequest(
+                    result_kind=ResultKind.TOOL,
+                    tool_name="Bash",
+                    content=payload,
+                    status=ToolResultStatus.SUCCESS,
+                    content_origin=origin,
+                    output_optimization=OutputOptimization.NONE,
+                    capabilities=capabilities,
+                    attribution=attr,
+                    command=cmd,
+                )
+            )
+            self.assertEqual(routed.disposition.value, "applied")
+            self.assertEqual(
+                tuple(op.value for op in routed.applied_operations),
+                ("build_log_reduction",),
+            )
+            self.assertEqual(len(routed.stash_keys), 1)
+            rendered = json.loads(routed.output)
+            self.assertTrue(rendered["stdout"].startswith("[Build log reduced; "))
+            restored = await sdk.retrieve(
+                RetrieveRequest(
+                    routed.stash_keys[0],
+                    frozenset(routed.stash_keys),
+                    attr,
+                )
+            )
+            self.assertEqual(restored.payload, cargo_log)
+
 
 
 if __name__ == "__main__":

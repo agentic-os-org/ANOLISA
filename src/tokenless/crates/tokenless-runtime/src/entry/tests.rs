@@ -123,6 +123,7 @@ fn options() -> EntryOptions {
         search_path_sharing_enabled: true,
         diff_compression_enabled: false,
         html_extraction_enabled: false,
+        embedded_content_enabled: false,
         browser_snapshot_enabled: false,
         mixed_content_enabled: false,
         stash_enabled: true,

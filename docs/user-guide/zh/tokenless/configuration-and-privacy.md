@@ -163,7 +163,7 @@ adapter 分类：文件读取工具的结果透传；shell 工具的结果附带
 只替换该值。字段名、其他值、JSON 类型、精确数字字面量以及该值在记录中的位置都保持不变。
 新值以类似 `[HTML rendered as Markdown; removed 1 style. If needed, run in shell: tokenless
 retrieve <hash>]` 的一行开头，其后是混合 Markdown 视图。按该指令可取回这一个值，内容与收
-到时完全一致。字符串中序列化的 JSON 不会被解析，也不会变成对象。
+到时完全一致。字符串中序列化的 JSON 绝不会变成对象或数组；符合条件时仅就地路由其内部字符串槽位并保持外层字符串表示不变（见下文）。
 
 与页面不同，值会被完整转写，不移除任何可见内容。只移除纯外观样式表和注释并在首行计数，
 纯外观行内样式（含不改变阅读顺序的 flex/grid 布局、间距、阴影、轮廓及表现属性）会被去
@@ -236,6 +236,16 @@ Markdown 时，整个值仍原样保留：
 统计数据可区分嵌入片段（`json`）与转写页面（`html`）。上述规则已用合成片段和文档验证；
 它们是防护手段，不能证明每个片段对模型都保持原意。
 
+### JSON 值中的构建日志、表格与序列化 JSON
+
+JSON 字符串值内的非 HTML 嵌入内容路由在 Stash 恢复可用时默认开启（含 `file_read` 来源——本地文件读取仅绕过 HTML，`file_content` 仍在入口整体透传）。可通过 `TOKENLESS_EMBEDDED_CONTENT_ENABLED=0`（或 SDK `TokenlessConfig(embedded_content_enabled=False)`／Rust `RuntimeConfig.embedded_content_enabled = false`）独立于 `TOKENLESS_HTML_EXTRACTION_ENABLED` 关闭。路由器仅检查长度在 256 个字符至 256 KiB 之间的值本身（从不参考字段名），处理三类非 HTML 形态：
+
+- **构建与测试日志**：通过构建日志检测器的多行字符串复用终端清理、Stage 1 布局压紧与常规进度折叠，完整保留编译诊断、Stack Trace、警告与汇总行（携带 `exit_code` 的错误响应自动启用 `DiagnosticFailure` 模式以保护 `FactInvariantGuard` 事实锚点）。槽位首行为 `[Build log reduced; <recovery_instruction>]`；当改写视图净省至少 16 个估算 token 且满足当前外层字符串长度上限时写入 1 条 Stash 记录（若缩减结果或外层容器仍超出 `truncate_strings_at`，则回退为普通字符串截断且不产生孤儿 Stash 写入）。
+- **CSV 与 TSV 表格**（仅非错误响应）：在未引号字符下界与渲染视图均未超出有效字符串上限、且计入 `[Tabular data compacted; <recovery_instruction>]` 首行与 JSON 转义后仍净省至少 16 个估算 token 时，去除冗余引号与规范化 CRLF 行尾并写入 1 条 Stash 记录；超限或低收益表格在写库前直接跳过。
+- **序列化 JSON 容器（`{...}` 或 `[...]`）**：编码在字符串中的合法 JSON 对象或数组始终保持 JSON 字符串类型，绝不展开为对象或数组。当外层非槽位骨架字符数不超过有效字符串上限时，扫描器定位满足 RFC 8259 规范转义的内部字符串值字面量并递归路由（内部容器深度计入 32 层上限），其余外层空白缩进、键顺序、精确数字字面量及 `\u003c` 等非规范转义逐字节不变，恢复叶节点 Stash 后可逐字节还原外层字符串。
+
+所有嵌入域共享同一单文档预算（深度 32 层、最多渲染 128 个值和 2 MiB），并复用既有的 `build_log_reduction`、`tabular_compaction` 与 `html_extraction` 操作标识（内容类型为 `json`）。
+
 ## 浏览器快照重编码
 
 浏览器快照重编码默认开启。在 Tokenless 或其宿主 Agent 继承的环境中设置
@@ -305,6 +315,7 @@ token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | 启用 Git Diff 上下文裁剪 | 默认开启；`0` 关闭；显式 SDK 参数优先 |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | HTML 页面转写开关，包括 JSON 值中的 HTML | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
+| `TOKENLESS_EMBEDDED_CONTENT_ENABLED` | JSON 字符串值内构建日志、CSV/TSV 表格与序列化 JSON 路由开关 | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
 | `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | 浏览器快照重编码开关（Playwright MCP 快照；chrome-devtools-mcp 快照仅识别并直通） | 默认开启；`1`、`true`、`yes` 开启，其他非空值关闭；不覆盖 SDK 参数 |
 | `TOKENLESS_MIXED_CONTENT_ENABLED` | 混合内容区域压缩开关 | 默认关闭；`1`、`true`、`yes` 启用；不覆盖 SDK 参数 |
 
@@ -351,7 +362,7 @@ SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路�
 | 数据 | 默认路径 | 默认内容 | 保留方式 | 如何停止新增 |
 |------|----------|----------|----------|--------------|
 | 本地统计 | `~/.tokenless/stats.db` | 压缩前后完整文本、标识和度量 | 默认保留 30 天记录与事件、7 天正文载荷（CLI 压缩、`tokenless rtk` 与 `TokenlessRuntime`/Python SDK 均按每 64 行采样清理）；可通过 `stats_retention_days` / `stats_text_retention_days` 覆盖（`0` 或 `null` 表示不限制），或手动执行 `tokenless stats prune` / `clear` / `compact` | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容、被转写 HTML 页面的完整原文，以及 JSON 中每个被转写的 HTML 值 | TTL 1 小时、最多 10,000 个有效条目；过期行延迟清理，批量或大 WAL 清理后自动执行非阻塞 WAL checkpoint | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
+| Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容、被转写 HTML 页面的完整原文，以及 JSON 中每个被改写的嵌入字符串值（HTML、构建日志或 CSV/TSV 表格） | TTL 1 小时、最多 10,000 个有效条目；过期行延迟清理，批量或大 WAL 清理后自动执行非阻塞 WAL checkpoint | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
 | 配置 | `~/.tokenless/config.json` | 布尔开关、可选保留天数设置、`rtk_rollout` 及 `exclude_commands` | 持续保留 | 不适用 |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | 度量和标识，不含压缩原文 | 由 SLS/Logtail 设施管理 | `TOKENLESS_SLS_ENABLED=0` 或配置为 false |
 

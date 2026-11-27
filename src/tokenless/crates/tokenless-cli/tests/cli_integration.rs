@@ -8256,3 +8256,88 @@ fn compress_honors_rtk_rollout_and_dual_end_exclude_commands_env_overrides() {
     assert_eq!(broken_json["result"]["disposition"], "passthrough");
     assert_eq!(broken_json["result"]["output"], payload);
 }
+
+#[test]
+fn cli_embedded_content_env_switch_controls_json_embedded_domains() {
+    let fixture = TempDataDir::new().unwrap();
+    let mut cargo_log = String::new();
+    for idx in 1..=30 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut cargo_log,
+            format_args!("   Compiling cli-mod-{idx:02} v0.1.{idx} (/work/cli-mod-{idx:02})\n"),
+        );
+    }
+    cargo_log.push_str(
+        "error[E0308]: mismatched types\n  --> src/main.rs:14:9\n   |\n14 |     return 1;\n   |            ^ expected `()`, found integer\nerror: could not compile `cli-mod` (bin) due to 1 previous error\n",
+    );
+    let body = serde_json::json!({
+        "exit_code": 101,
+        "stdout": cargo_log,
+    })
+    .to_string();
+    let req = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {"agent_id": "claude-code", "session_id": "s-emb", "tool_use_id": "t-emb"},
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "mcp_runner",
+            "content": body,
+            "status": "error",
+            "exit_code": 101,
+            "content_origin": "api_response",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "recovery": {"kind": "shell"},
+                "replace_with_text": false
+            }
+        }
+    });
+
+    // Default (enabled): compresses embedded build log in DiagnosticFailure mode and passes fact guard.
+    let enabled_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &req.to_string(),
+    );
+    assert!(enabled_out.status.success());
+    let enabled_json: serde_json::Value = serde_json::from_slice(&enabled_out.stdout).unwrap();
+    assert_eq!(enabled_json["result"]["disposition"], "applied");
+    assert_eq!(
+        enabled_json["result"]["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    let rendered: serde_json::Value =
+        serde_json::from_str(enabled_json["result"]["output"].as_str().unwrap()).unwrap();
+    let stdout_str = rendered["stdout"].as_str().unwrap();
+    assert!(
+        stdout_str.starts_with("[Build log reduced; "),
+        "{stdout_str}"
+    );
+    assert!(stdout_str.contains("error[E0308]"), "{stdout_str}");
+
+    // Explicitly disabled via TOKENLESS_EMBEDDED_CONTENT_ENABLED=0: skips embedded build-log routing.
+    let disabled_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_EMBEDDED_CONTENT_ENABLED", "0")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &req.to_string(),
+    );
+    assert!(disabled_out.status.success());
+    let disabled_json: serde_json::Value = serde_json::from_slice(&disabled_out.stdout).unwrap();
+    assert!(
+        !disabled_json["result"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("[Build log reduced; ")
+    );
+}

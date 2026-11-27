@@ -26,6 +26,7 @@ pub(super) fn embedded_document() -> String {
 fn embedded_config() -> PostToolPipelineConfig {
     let mut config = build_log_config();
     config.html_extraction_enabled = true;
+    config.embedded_content_enabled = true;
     config
 }
 
@@ -423,4 +424,297 @@ fn embedded_html_starting_with_image_before_text_compresses() {
         assert!(text.starts_with(EMBEDDED_HEADER), "{text}");
         assert!(text.contains("![Icon](/icon.png)Venue"), "{text}");
     }
+}
+
+fn embedded_cargo_log(label: &str) -> String {
+    let mut log = String::new();
+    for idx in 1..=30 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut log,
+            format_args!("   Compiling {label}-crate-{idx:02} v0.2.{idx} (/work/{label})\n"),
+        );
+    }
+    let _ = std::fmt::Write::write_fmt(
+        &mut log,
+        format_args!(
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.41s ({label})\n"
+        ),
+    );
+    log
+}
+
+fn embedded_quoted_csv() -> String {
+    let mut csv = String::from("\"id\",\"service\",\"status\",\"latency_ms\"\r\n");
+    for idx in 1..=26 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut csv,
+            format_args!("\"svc-{idx:03}\",\"gateway-router\",\"healthy\",\"12\"\r\n"),
+        );
+    }
+    csv
+}
+
+#[test]
+fn embedded_build_log_tabular_and_serialized_json_map_to_existing_wire_operations() {
+    let log = embedded_cargo_log("api");
+    let csv = embedded_quoted_csv();
+    let nested_json = serde_json::to_string(&serde_json::json!({
+        "html": rich_text("nested"),
+        "build": embedded_cargo_log("nested"),
+    }))
+    .unwrap();
+    let input = serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "stdout": log,
+        "report_csv": csv,
+        "envelope": nested_json,
+    }))
+    .unwrap();
+
+    // All three embedded leaf domains active -> existing Protocol v2 operations.
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let req = api_request(&input);
+    let run = PostToolPipeline::run(&req, &embedded_config(), Some(&store));
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(run.response.content_type, Some(ContentType::Json));
+    assert_eq!(
+        run.response.applied_operations,
+        [
+            AppliedOperation::HtmlExtraction,
+            AppliedOperation::BuildLogReduction,
+            AppliedOperation::TabularCompaction,
+        ]
+    );
+    assert_eq!(run.response.recoverability, Recoverability::Retrievable);
+    assert_eq!(run.response.stash_keys.len(), 4);
+    assert_eq!(concrete.len(), 4);
+
+    let output: serde_json::Value = serde_json::from_str(&run.response.output).unwrap();
+    assert!(output["envelope"].is_string());
+
+    // Turning off `html_extraction_enabled` OR reading a local file (`FileRead`)
+    // disables only HTML (outer and nested) while keeping embedded build-log,
+    // tabular, and serialized-JSON routing active per `src/tokenless/AGENTS.md`.
+    for file_read_or_no_html in [false, true] {
+        let sub_concrete = Arc::new(CountingStore::default());
+        let sub_store: Arc<dyn StashStore> = sub_concrete.clone();
+        let mut sub_req = req.clone();
+        let mut sub_cfg = embedded_config();
+        if file_read_or_no_html {
+            sub_req.content_origin = ContentOrigin::FileRead;
+        } else {
+            sub_cfg.html_extraction_enabled = false;
+        }
+        let sub_run = PostToolPipeline::run(&sub_req, &sub_cfg, Some(&sub_store));
+        assert_eq!(sub_run.response.disposition, Disposition::Applied);
+        assert_eq!(
+            sub_run.response.applied_operations,
+            [
+                AppliedOperation::BuildLogReduction,
+                AppliedOperation::TabularCompaction,
+            ]
+        );
+        assert_eq!(sub_run.response.stash_keys.len(), 3);
+        let sub_out: serde_json::Value = serde_json::from_str(&sub_run.response.output).unwrap();
+        let sub_inner: serde_json::Value =
+            serde_json::from_str(sub_out["envelope"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            sub_inner["html"].as_str(),
+            Some(rich_text("nested").as_str())
+        );
+    }
+
+    // Turning off `embedded_content_enabled` disables build-log, tabular, and
+    // serialized-JSON routing while keeping standalone/top-level embedded HTML on.
+    let html_only_doc = serde_json::to_string(&serde_json::json!({
+        "card": rich_text("top-card"),
+        "stdout": embedded_cargo_log("skipped"),
+        "report_csv": embedded_quoted_csv(),
+        "envelope": nested_json,
+    }))
+    .unwrap();
+    let html_only_concrete = Arc::new(CountingStore::default());
+    let html_only_store: Arc<dyn StashStore> = html_only_concrete.clone();
+    let mut html_only_cfg = embedded_config();
+    html_only_cfg.embedded_content_enabled = false;
+    let html_only_run = PostToolPipeline::run(
+        &api_request(&html_only_doc),
+        &html_only_cfg,
+        Some(&html_only_store),
+    );
+    assert_eq!(html_only_run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        html_only_run.response.applied_operations,
+        [AppliedOperation::HtmlExtraction]
+    );
+    assert_eq!(html_only_run.response.stash_keys.len(), 1);
+    let html_only_val: serde_json::Value =
+        serde_json::from_str(&html_only_run.response.output).unwrap();
+    assert_eq!(
+        html_only_val["envelope"].as_str(),
+        Some(nested_json.as_str())
+    );
+
+    // Both switches off, FileContent, missing recovery, disabled stash, and Grep
+    // keep every embedded domain verbatim with zero Stash writes.
+    for mode in 0..5 {
+        let mut gated_req = api_request(&input);
+        let mut gated_cfg = embedded_config();
+        let gated_concrete = Arc::new(CountingStore::default());
+        let gated_store: Arc<dyn StashStore> = gated_concrete.clone();
+        match mode {
+            0 => {
+                gated_cfg.html_extraction_enabled = false;
+                gated_cfg.embedded_content_enabled = false;
+            }
+            1 => gated_req.content_origin = ContentOrigin::FileContent,
+            2 => gated_req.capabilities.recovery = tokenless_protocol::RecoveryMethod::None,
+            3 => gated_cfg.stash_enabled = false,
+            4 => gated_req.tool_name = "Grep".into(),
+            _ => unreachable!(),
+        }
+        let gated = PostToolPipeline::run(&gated_req, &gated_cfg, Some(&gated_store));
+        assert_eq!(gated.response.output, input, "mode {mode}");
+        assert_eq!(
+            gated_concrete.stash_calls.load(Ordering::Relaxed),
+            0,
+            "mode {mode}"
+        );
+    }
+}
+
+#[test]
+fn record_reduction_deletes_orphaned_embedded_build_log_rows() {
+    let records = (0..40)
+        .map(|index| {
+            let text = format!("record {index} {}", "plain words ".repeat(250));
+            serde_json::json!({
+                "id": index,
+                "m1": text,
+                "m2": text,
+                "m3": text,
+                "stdout": embedded_cargo_log(&format!("job-{index}")),
+            })
+        })
+        .collect::<Vec<_>>();
+    let input = serde_json::to_string(&records).unwrap();
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&api_request(&input), &embedded_config(), Some(&store));
+
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.applied_operations,
+        [
+            AppliedOperation::JsonRecordReduction,
+            AppliedOperation::BuildLogReduction,
+        ]
+    );
+    let output: Vec<serde_json::Value> = serde_json::from_str(&run.response.output).unwrap();
+    let kept = output.iter().filter(|item| item.is_object()).count();
+    assert_eq!(kept, 32);
+    assert_eq!(run.response.stash_keys.len(), kept + 1);
+    assert_eq!(concrete.len(), kept + 1);
+    assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 40 - kept);
+}
+
+#[test]
+fn error_status_json_routes_diagnostic_failure_build_logs_skips_html_and_tabular_and_passes_fact_guard()
+ {
+    let mut cargo_err = String::new();
+    for idx in 1..=35 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut cargo_err,
+            format_args!("   Compiling app-mod-{idx:02} v0.3.{idx} (/work/crates/mod-{idx:02})\n"),
+        );
+    }
+    cargo_err.push_str(
+        "error[E0308]: mismatched types\n          --> crates/app/src/handler.rs:42:9\n           |\n        42 |     return count;\n           |            ^^^^^ expected `Result<(), Error>`, found `usize`\n        error: could not compile `app` (lib) due to 1 previous error\n",
+    );
+
+    let mut pytest_err = String::from(
+        "============================= test session starts ==============================\n",
+    );
+    for idx in 1..=25 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut pytest_err,
+            format_args!("tests/test_suite.py::test_ok_{idx:02} PASSED\n"),
+        );
+    }
+    pytest_err.push_str(
+        "tests/test_auth.py::test_token_refresh FAILED\n         =================================== FAILURES ===================================\n         _____________________________ test_token_refresh _______________________________\n         tests/test_auth.py:77: in test_token_refresh\n         E   AssertionError: expected status 200, got 401\n         =========================== short test summary info ============================\n         FAILED tests/test_auth.py::test_token_refresh - AssertionError: expected status 200, got 401\n         ========================= 1 failed, 25 passed in 1.12s =========================\n",
+    );
+
+    let csv = embedded_quoted_csv();
+    let html = rich_text("error-card");
+    let nested_envelope = serde_json::to_string(&serde_json::json!({
+        "pytest_stdout": pytest_err,
+        "nested_csv": csv,
+        "nested_html": html,
+    }))
+    .unwrap();
+    let input = serde_json::to_string(&serde_json::json!({
+        "exit_code": 101,
+        "cargo_stdout": cargo_err,
+        "envelope": nested_envelope,
+        "export_csv": csv,
+        "banner_html": html,
+    }))
+    .unwrap();
+
+    let mut req = api_request(&input);
+    req.status = ToolResultStatus::Error;
+    req.exit_code = Some(101);
+
+    let concrete = Arc::new(CountingStore::default());
+    let store: Arc<dyn StashStore> = concrete.clone();
+    let run = PostToolPipeline::run(&req, &embedded_config(), Some(&store));
+
+    assert_eq!(run.fact_guard_violation, None);
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.applied_operations,
+        [AppliedOperation::BuildLogReduction]
+    );
+    assert_eq!(
+        crate::post_tool::fact_guard::verify(&input, &run.response.output),
+        Ok(())
+    );
+    // Only the 2 build logs (outer Cargo + nested pytest) are rewritten & stashed;
+    // HTML and Tabular fields stay untouched on error status.
+    assert_eq!(run.response.stash_keys.len(), 2);
+    assert_eq!(concrete.len(), 2);
+
+    let output: serde_json::Value = serde_json::from_str(&run.response.output).unwrap();
+    assert_eq!(output["export_csv"].as_str(), Some(csv.as_str()));
+    assert_eq!(output["banner_html"].as_str(), Some(html.as_str()));
+    let rendered_cargo = output["cargo_stdout"].as_str().unwrap();
+    assert!(
+        rendered_cargo.starts_with("[Build log reduced; "),
+        "{rendered_cargo}"
+    );
+    assert!(rendered_cargo.contains("error[E0308]"), "{rendered_cargo}");
+    assert!(
+        rendered_cargo.contains("crates/app/src/handler.rs:42:9"),
+        "{rendered_cargo}"
+    );
+
+    let rendered_inner: serde_json::Value =
+        serde_json::from_str(output["envelope"].as_str().unwrap()).unwrap();
+    assert_eq!(rendered_inner["nested_csv"].as_str(), Some(csv.as_str()));
+    assert_eq!(rendered_inner["nested_html"].as_str(), Some(html.as_str()));
+    let rendered_pytest = rendered_inner["pytest_stdout"].as_str().unwrap();
+    assert!(
+        rendered_pytest.starts_with("[Build log reduced; "),
+        "{rendered_pytest}"
+    );
+    assert!(
+        rendered_pytest.contains("FAILED tests/test_auth.py::test_token_refresh"),
+        "{rendered_pytest}"
+    );
+    assert!(
+        rendered_pytest.contains("1 failed, 25 passed in 1.12s"),
+        "{rendered_pytest}"
+    );
 }

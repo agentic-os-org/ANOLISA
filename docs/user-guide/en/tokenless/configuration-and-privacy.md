@@ -192,8 +192,9 @@ Only the value changes. Field names, other values, JSON types, exact number lite
 and the position of the value in its record are kept. The new value starts with a line
 such as `[HTML rendered as Markdown; removed 1 style. If needed, run in shell: tokenless
 retrieve <hash>]`, followed by the hybrid Markdown view. The instruction retrieves that
-one value exactly as received. Serialized JSON inside a string is never parsed or turned
-into an object.
+one value exactly as received. Serialized JSON inside a string is never turned into an
+object or array; when eligible, its inner string slots are routed in place while keeping
+the outer string representation intact (see below).
 
 Unlike a page, a value is rendered whole and nothing visible is removed. Only cosmetic
 style sheets and comments are removed and counted in the first line, and cosmetic inline
@@ -293,6 +294,43 @@ The response reports `html_extraction` with content type `json` and recoverabili
 pages (`html`). These rules have been verified with synthetic fragments and documents;
 they are guards, not proof that every fragment keeps its meaning for a model.
 
+### Build logs, tables, and serialized JSON inside JSON values
+
+Embedded non-HTML string routing is enabled by default when Stash-backed recovery is
+available (including on `file_read` outputs, where only HTML stays verbatim; `file_content`
+still passes through at pipeline entry). Set `TOKENLESS_EMBEDDED_CONTENT_ENABLED=0` (or
+pass `TokenlessConfig(embedded_content_enabled=False)` /
+`RuntimeConfig.embedded_content_enabled = false`) to disable it independently of
+`TOKENLESS_HTML_EXTRACTION_ENABLED`. Consulting only the value itself (256 characters up
+to 256 KiB) and never the field name, the router handles three non-HTML shapes:
+
+- **Build and test logs**: multi-line values recognized by the build-log detector reuse
+  terminal cleanup, Stage 1 layout compaction, and inline routine-progress collapse while
+  retaining diagnostics, stack traces, warnings, and summaries (`DiagnosticFailure` mode
+  on `exit_code`-opted error responses so `FactInvariantGuard` anchors stay intact). The
+  slot begins with `[Build log reduced; <recovery_instruction>]` and writes the complete
+  original string to Stash once when the rewritten view saves at least 16 estimated
+  tokens and fits within the active outer string bound (values whose reduced form or
+  enclosing container still exceeds `truncate_strings_at` fall back to normal bounded
+  truncation without orphan Stash writes).
+- **CSV and TSV tables** (non-error responses only): multi-line rectangular tables
+  compact redundant quoting and CRLF endings behind
+  `[Tabular data compacted; <recovery_instruction>]`, pruning tables whose unquoted size
+  or rendered view exceeds the active string limit before touching Stash and writing one
+  Stash entry only when the JSON-escaped view still saves at least 16 estimated tokens.
+- **Serialized JSON containers (`{...}` or `[...]`)**: valid JSON objects and arrays
+  encoded inside strings stay JSON strings and are never expanded into objects or arrays.
+  When the outer non-slot skeleton fits within the active string bound, the scanner
+  locates inner string value literals that use canonical RFC 8259 escaping and routes
+  them recursively (counting nested container depth toward the 32-level limit), leaving
+  surrounding whitespace, key order, exact numeric literals, and non-canonical escapes
+  such as `\u003c` untouched so restoring leaf Stash entries reconstructs the outer
+  string byte for byte.
+
+All embedded domains share the same per-document budget (depth 32, 128 rendered values,
+2 MiB) and reuse the existing `build_log_reduction`, `tabular_compaction`, and
+`html_extraction` operation labels with content type `json`.
+
 ## Browser snapshot re-encoding
 
 Browser snapshot re-encoding is enabled by default. Set
@@ -381,6 +419,7 @@ Local region compression and reconstruction have been verified on finite samples
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | Enable Git Diff context cropping | On by default; `0` disables; explicit SDK options take precedence |
 | `TOKENLESS_HTML_EXTRACTION_ENABLED` | Switch HTML page rendering, including HTML inside JSON values | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
+| `TOKENLESS_EMBEDDED_CONTENT_ENABLED` | Switch build-log, CSV/TSV, and serialized-JSON routing inside JSON string values | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 | `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | Switch browser-snapshot re-encoding (Playwright MCP snapshots; chrome-devtools-mcp snapshots are recognized and passed through) | On by default; `1`, `true`, or `yes` enables, any other non-empty value disables; does not override SDK options |
 | `TOKENLESS_MIXED_CONTENT_ENABLED` | Enable mixed-content region compression | Off by default; `1`, `true`, or `yes` enables; does not override SDK options |
 
@@ -432,7 +471,7 @@ them from source control or backups as required by your data policy.
 | Data | Default path | Default content | Retention | Stop new data |
 |------|--------------|-----------------|-----------|---------------|
 | Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | Default 30 days for rows/events and 7 days for stored text payloads (sampled cleanup every 64 rows across CLI compression, `tokenless rtk`, and `TokenlessRuntime` / Python SDK); override via `stats_retention_days` / `stats_text_retention_days` (`0` or `null` for unlimited) or manual `tokenless stats prune` / `clear` / `compact` | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, the complete original of rendered HTML pages, and each HTML value rendered inside JSON | One-hour TTL and 10,000 live entries; expired rows are purged lazily with non-blocking WAL checkpointing after batch or large-WAL purges | CLI: `--no-stash`; agent: disable the adapter |
+| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, the complete original of rendered HTML pages, and each embedded string value (HTML, build log, or CSV/TSV table) rewritten inside JSON | One-hour TTL and 10,000 live entries; expired rows are purged lazily with non-blocking WAL checkpointing after batch or large-WAL purges | CLI: `--no-stash`; agent: disable the adapter |
 | Configuration | `~/.tokenless/config.json` | Boolean toggles, optional retention day settings, `rtk_rollout`, and `exclude_commands` | Persistent | Not applicable |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | Metrics and identifiers, no compressed source text | Managed by SLS/Logtail infrastructure | `TOKENLESS_SLS_ENABLED=0` or config false |
 

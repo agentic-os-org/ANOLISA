@@ -59,6 +59,8 @@ fn pretty_response_canonical_compacts_without_omitting_values() {
                 min_toon_chars: usize::MAX,
                 allow_unrecoverable: false,
                 embedded_html: false,
+                embedded_content: false,
+                is_error: false,
             },
         )
         .unwrap();

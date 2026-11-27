@@ -31,7 +31,7 @@ Stash。识别范围、输出还原方法与验证限制参见 [CTest 测试输�
 | 能力 | 节省率示例 | 说明 |
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
-| Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON 路由给 `JsonCompressor`；完整候选保留全部字段与空值，节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
+| Content-aware 响应压缩 | 取决于具体负载 | 把成功 JSON（以及携带 `exit_code`、经 `FactInvariantGuard` 校验的失败 JSON）路由给 `JsonCompressor`；完整候选保留全部字段与空值，并在 Stash 恢复可用时就地路由字符串值中嵌入的 HTML（非 `file_read`、非错误）、构建/测试日志（错误态走 `DiagnosticFailure`）、CSV/TSV 表格（非错误）与序列化 JSON（可通过 `TOKENLESS_EMBEDDED_CONTENT_ENABLED=0` 关闭非 HTML 嵌入路由）；节省达到 15% 时优先采用，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理 SGR 颜色，并可恢复地缩减已识别 Cargo、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C 和通用命令日志的常规进度；pnpm 还可在无需恢复时压紧已识别的通知、依赖清单和装饰条布局，保留全部任务相关事实 |
 | 搜索路径共享 | 取决于工作负载 | 默认开启：API 搜索记录及已识别的原生 Shell 搜索共享连续路径；命令或 API 的纯路径列表共享目录前缀，保留全部已收到路径和字节。文件读取跳过路径列表策略。通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭 |
 | Git Diff 上下文裁剪 | 取决于工作负载 | 默认开启，通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 或 SDK `diff_compression_enabled=False` 关闭；保留全部增删行，按 hunk 裁剪上下文并提供原文恢复。尚未证实稳定的 Agent 整轮 token 收益 |

@@ -311,6 +311,7 @@ config = TokenlessConfig(
 | `compression_enabled` | `TOKENLESS_COMPRESSION_ENABLED` | `True` |
 | `search_path_sharing_enabled` | `TOKENLESS_SEARCH_PATH_SHARING_ENABLED` | `True` |
 | `html_extraction_enabled` | `TOKENLESS_HTML_EXTRACTION_ENABLED` | `True` |
+| `embedded_content_enabled` | `TOKENLESS_EMBEDDED_CONTENT_ENABLED` | `True` |
 | `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
 | `mixed_content_enabled` | `TOKENLESS_MIXED_CONTENT_ENABLED` | `False` |
 | `browser_snapshot_enabled` | `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | `True` |

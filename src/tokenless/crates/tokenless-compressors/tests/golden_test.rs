@@ -341,6 +341,8 @@ fn json_goldens() {
                         min_toon_chars: 0,
                         allow_unrecoverable: false,
                         embedded_html: false,
+                        embedded_content: false,
+                        is_error: false,
                     },
                 )
                 .unwrap();
