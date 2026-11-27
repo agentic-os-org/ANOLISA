@@ -1349,13 +1349,28 @@ export const AtifViewerPage: React.FC = () => {
 
                   {/* Right: causal attribution panel */}
                   <div className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
-                    <CausalAttributionPanel
-                      sessionId={loadedQuery?.id ?? ''}
-                      roundIndex={selectedRound ?? undefined}
-                      roundLabel={activeRound?.label}
-                      isPreambleRound={activeRound?.isPreamble ?? false}
-                      idKind={loadedQuery?.type}
-                    />
+                    {(() => {
+                      const isSubagentView = activeDoc !== doc;
+                      const rootIds = new Set<string>();
+                      if (doc?.session_id?.trim()) rootIds.add(doc.session_id.trim());
+                      if (loadedQuery?.id?.trim()) rootIds.add(loadedQuery.id.trim());
+                      const subSessionId = isSubagentView ? (activeDoc?.session_id?.trim() ?? '') : '';
+                      const unsupportedSubagent = isSubagentView && (!subSessionId || rootIds.has(subSessionId));
+                      const causalSessionId = isSubagentView
+                        ? (unsupportedSubagent ? '' : subSessionId)
+                        : (loadedQuery?.id ?? '');
+                      const causalIdKind = isSubagentView ? 'session' : loadedQuery?.type;
+                      return (
+                        <CausalAttributionPanel
+                          sessionId={causalSessionId}
+                          roundIndex={selectedRound ?? undefined}
+                          roundLabel={activeRound?.label}
+                          isPreambleRound={activeRound?.isPreamble ?? false}
+                          idKind={causalIdKind}
+                          unsupportedTarget={unsupportedSubagent}
+                        />
+                      );
+                    })()}
                   </div>
                 </div>
               )}
