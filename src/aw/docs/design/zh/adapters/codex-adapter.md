@@ -42,8 +42,9 @@ Bearer 密钥的环境变量名。五项 Provider 设置须归属 `model_provide
 Adapter 以会话和工具调用身份标准化原生事件。单个 AW 命令经 Service、Host、Provider
 依次执行准入步骤。工具执行前的阻断使用 Codex 原生拒绝状态；允许结果仍由原生审批决定。
 Codex 0.163.0 和 0.166.0 可将 PostToolUse 的 `continue:false` reason 用作普通模型请求中的文本。
-AW 只在关闭 Code Mode、没有其他 PostToolUse Hook 时准入这一 Hook 路径；最终替换步骤的
-Provider 失败或结果缺少可投影文本时，使用 `withhold_result`。Codex 仍在 Hook 前捕获和记录
+AW 只在关闭 Code Mode、没有其他 PostToolUse Hook 时准入这一 Hook 路径；最终替换步骤
+支持按需配置 `on_error: withhold_result`（Provider 失败或结果缺少可投影文本时扣留）或
+`on_error: report`（记录失败审计并放行原结果）。Codex 仍在 Hook 前捕获和记录
 部分原结果，原生 Hook 命令失败时也可能交付原文；完整结果保护需要另行验证交付门禁。
 
 凭证协作模式下，控制器移除自己的 Bash PostToolUse，在带鉴权的 Responses 网关调用

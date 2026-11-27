@@ -88,7 +88,7 @@ if mode == "hold":
     sys.exit(1)
 native = {"cwd": os.getcwd(), "session_id": "codex-session", "turn_id": "turn",
           "tool_use_id": "call", "tool_name": "Bash", "tool_input": {"command": mode}, "scenario": mode}
-if mode in ("replace-mcp", "replace-mcp-failure"):
+if mode in ("replace-mcp", "replace-mcp-failure", "replace-media"):
     native["tool_name"] = "mcp__fixture__echo"
 results = []
 for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
@@ -96,7 +96,9 @@ for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
     if event == "UserPromptSubmit":
         native["prompt"] = mode
     if event == "PostToolUse":
-        if native["tool_name"] == "mcp__fixture__echo":
+        if mode == "replace-media":
+            native["tool_response"] = {"content": [{"type": "image", "data": "abc"}], "isError": False}
+        elif native["tool_name"] == "mcp__fixture__echo":
             native["tool_response"] = {"content": [{"type": "text", "text": "original output"}], "isError": False}
         elif mode in ("replace", "replace-failure"):
             native["tool_response"] = "original output"

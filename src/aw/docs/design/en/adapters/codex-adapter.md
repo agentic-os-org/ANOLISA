@@ -62,7 +62,9 @@ Provider. A before block exits with Codex's native denial status; an allow leave
 native approval intact. Codex 0.163.0 and 0.166.0 can turn a PostToolUse `continue:false`
 reason into ordinary model-visible text. AW admits this Hook behavior
 only with Code Mode disabled and no peer PostToolUse Hooks. The final replacement
-step uses `withhold_result` on Provider failure or unsupported projection.
+step supports configurable `on_error: withhold_result` (withholding on Provider
+failure or unsupported projection) or `on_error: report` (auditing failures and
+delivering the original result).
 Codex still captures and logs some original results before the Hook, and native
 Hook command failures may expose the original; complete result enforcement
 needs an independently verified result-delivery boundary.

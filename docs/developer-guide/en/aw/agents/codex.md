@@ -81,8 +81,10 @@ PostToolUse records completion. Codex 0.163.0 and 0.166.0 have been verified
 with the example's final `scan_tool_output` step, which returns `replace_result`
 for detected output PII in ordinary model-visible text. Its
 `on_error: withhold_result` supplies fixed withheld text when the Provider
-fails or the Hook result lacks a supported text projection. A bound PostToolUse
-Hook also withholds if callback preparation fails, including inputs above the
+fails or the Hook result lacks a supported text projection; setting
+`on_error: report` instead audits the failure and allows the original result
+through. A bound PostToolUse
+Hook still withholds if callback preparation fails, including inputs above the
 1 MiB Hook limit, before Provider scanning. Admission rejects Code Mode and
 other PostToolUse Hooks for this configuration. The example sets
 `pii.output_mode: replace_result`; sec-core
