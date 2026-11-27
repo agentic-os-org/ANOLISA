@@ -10,7 +10,7 @@
 use super::{ParseResult, ParsedMessage};
 use crate::event::Event;
 use crate::parser::http::{HttpParser, ParsedHttpMessage};
-use crate::parser::http2::Http2Parser;
+use crate::parser::http2::{Http2Parser, Http2TrackingState};
 use crate::parser::proctrace::ProcTraceParser;
 use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::proctrace::VariableEvent;
@@ -70,8 +70,10 @@ impl Parser {
         // arbitrary bytes. Connections sitting on a clean frame boundary only
         // route here when the buffer does not look like an HTTP/1.x start, so
         // an SSL* pointer reused for HTTP/1.x is not buffered or hijacked.
-        let h2_mid_frame = self.http2_parser.has_pending_bytes(&ssl_event);
-        if h2_mid_frame || (self.http2_parser.is_tracking(&ssl_event) && !ssl_event.is_http()) {
+        let h2_state = self.http2_parser.tracking_state(&ssl_event);
+        if h2_state == Http2TrackingState::MidFrame
+            || (h2_state == Http2TrackingState::FrameBoundary && !ssl_event.is_http())
+        {
             let frames = self.http2_parser.parse(ssl_event.clone());
             if !frames.is_empty() {
                 return ParseResult {
@@ -82,7 +84,7 @@ impl Parser {
 
         // 1. HTTP/1.x detection (text-based protocols)
         if ssl_event.is_http() {
-            if !h2_mid_frame {
+            if h2_state == Http2TrackingState::FrameBoundary {
                 self.http2_parser.clear_tracking(&ssl_event);
             }
             match self.http_parser.parse(ssl_event.clone()) {
