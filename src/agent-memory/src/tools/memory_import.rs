@@ -1,7 +1,7 @@
 //! Memory import — deserialize an Anolisa Memory Archive (AMA) JSON into the
 //! memory store. Supports merge/overwrite/skip-existing strategies.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::{Path, PathBuf};
@@ -170,11 +170,11 @@ pub fn memory_import(
 
     // Pre-pass (own throwaway seen-set): the destructive overwrite wipe may
     // only run for a fully well-formed archive — one whose every entry
-    // passes the creation-path and duplicate checks. A malformed archive
+    // passes the filesystem and archive path checks. A malformed archive
     // (even partly) skips the wipe; per-entry reporting below still
     // applies, so valid entries import and invalid ones are listed.
     let archive_is_malformed = {
-        let mut prepass_seen = std::collections::HashSet::new();
+        let mut prepass_seen = SeenArchivePaths::default();
         archive
             .memories
             .iter()
@@ -238,7 +238,7 @@ pub fn memory_import(
     // One shared seen-set for memories and tasks: both write into the same
     // mount namespace, so a task and a memory with the same path collide on
     // disk and must be reported rather than double-written.
-    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_paths = SeenArchivePaths::default();
 
     // Import memories
     for mem in &archive.memories {
@@ -323,6 +323,12 @@ enum ImportAction {
     Skipped,
 }
 
+#[derive(Default)]
+struct SeenArchivePaths {
+    files: HashSet<PathBuf>,
+    ancestors: HashSet<PathBuf>,
+}
+
 /// Validate and resolve one archive entry before the wipe or a write.
 ///
 /// The AMA format only ever contains markdown memory paths: `mem_export`
@@ -335,7 +341,7 @@ enum ImportAction {
 fn check_and_record_entry_path(
     svc: &MemoryService,
     mem: &ExportedMemory,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut SeenArchivePaths,
     clearing: bool,
 ) -> Result<PathBuf> {
     if mem.path.is_empty() {
@@ -357,18 +363,35 @@ fn check_and_record_entry_path(
     // distinct (the duplicate guard was bypassable), and the trailing
     // slash additionally defeated the skip-existing `exists()` check
     // with ENOTDIR once the file was there.
-    let normalized: std::path::PathBuf = Path::new(&mem.path).components().collect();
-    let normalized = normalized.to_string_lossy().into_owned();
-    if !seen.insert(normalized.clone()) {
+    let normalized: PathBuf = Path::new(&mem.path).components().collect();
+    if seen.files.contains(&normalized) {
         return Err(MemoryError::InvalidArgument(format!(
             "duplicate entry path '{}' in archive; each memory may appear once",
             mem.path
         )));
     }
+    let ancestors = normalized
+        .ancestors()
+        .skip(1)
+        .filter(|p| !p.as_os_str().is_empty());
+    if let Some(parent) = ancestors.clone().find(|p| seen.files.contains(*p)) {
+        return Err(MemoryError::InvalidArgument(format!(
+            "archive entry '{}' uses archive file '{}' as a parent directory",
+            mem.path,
+            parent.display()
+        )));
+    }
+    if seen.ancestors.contains(&normalized) {
+        return Err(MemoryError::InvalidArgument(format!(
+            "archive entry '{}' conflicts with a parent directory required by another archive entry",
+            mem.path
+        )));
+    }
+    let normalized_str = normalized.to_string_lossy();
     // Use the same safety checks before the destructive wipe and each write.
-    let target = crate::ns::paths::resolve_for_create(&svc.mount, &normalized)?;
+    let target = crate::ns::paths::resolve_for_create(&svc.mount, &normalized_str)?;
     let mut probe = PathBuf::new();
-    for component in Path::new(&normalized).components() {
+    for component in normalized.components() {
         probe.push(component);
         match crate::safe_fs::metadata(svc.mount.root_fd.as_fd(), &probe) {
             Ok(metadata) => {
@@ -377,7 +400,7 @@ fn check_and_record_entry_path(
                 if clearing
                     && metadata.is_file()
                     && probe.extension().and_then(|e| e.to_str()) == Some("md")
-                    && !normalized.starts_with(".git")
+                    && !normalized_str.starts_with(".git")
                 {
                     break;
                 }
@@ -386,6 +409,8 @@ fn check_and_record_entry_path(
             Err(error) => return Err(error),
         }
     }
+    seen.ancestors.extend(ancestors.map(Path::to_path_buf));
+    seen.files.insert(normalized);
     Ok(target)
 }
 
@@ -395,7 +420,7 @@ fn import_single(
     strategy: ImportStrategy,
     dry_run: bool,
     clear_planned: bool,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut SeenArchivePaths,
 ) -> Result<ImportAction> {
     let target_path = check_and_record_entry_path(svc, mem, seen, dry_run && clear_planned)?;
 
