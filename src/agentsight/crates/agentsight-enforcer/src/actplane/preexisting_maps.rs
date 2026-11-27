@@ -90,7 +90,7 @@ pub(super) fn reject_preexisting_read_mappings(
         return Ok(());
     }
     for pid in process_tree(root_pid) {
-        let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
+        let maps = match read_proc_lossy(&format!("/proc/{pid}/maps")) {
             Ok(maps) => maps,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && pid != root_pid => {
                 continue;
@@ -119,7 +119,7 @@ fn reject_writable_shared_mappings(
     pid: i32,
     protected: &[ProtectedEntry],
 ) -> Result<(), BackendError> {
-    let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) else {
+    let Ok(maps) = read_proc_lossy(&format!("/proc/{pid}/maps")) else {
         return Ok(());
     };
     for line in maps.lines() {
@@ -269,6 +269,10 @@ fn parse_file_mapping(line: &str, shared_only: bool) -> Option<Mapping> {
     })
 }
 
+fn read_proc_lossy(path: &str) -> std::io::Result<String> {
+    fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Reverses the kernel's octal escapes for space, tab, newline and backslash.
 fn unescape_maps_path(raw: &str) -> String {
     let bytes = raw.as_bytes();
@@ -346,7 +350,7 @@ fn walk_tree(root_pid: i32, children: &HashMap<i32, Vec<i32>>) -> Vec<i32> {
 }
 
 fn parent_of(pid: i32) -> Option<i32> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let stat = read_proc_lossy(&format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.rsplit_once(')')?.1;
     // Fields after comm: state, ppid, ...
     rest.split_whitespace().nth(1)?.parse().ok()
@@ -548,5 +552,110 @@ mod tests {
         drop(held);
         reject_preexisting_write_access(pid, &protected).expect("clean tree applies");
         std::fs::remove_dir_all(&dir).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn non_utf8_proc_maps_entry_does_not_bypass_or_abort_preflight() {
+        use std::ffi::OsString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-preexisting-maps-utf8-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+
+        let non_utf8_path = dir.join(OsString::from_vec(b"nonutf8-\xff\xfe.bin".to_vec()));
+        std::fs::write(&non_utf8_path, vec![0x41u8; 4096]).expect("non-utf8 fixture");
+        let non_utf8_file = std::fs::File::open(&non_utf8_path).expect("open non-utf8 fixture");
+        // SAFETY: maps one valid page read-only and unmaps before cleanup.
+        let non_utf8_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                non_utf8_file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(non_utf8_addr, libc::MAP_FAILED, "mmap non-utf8 fixture");
+        drop(non_utf8_file);
+
+        let shared_path = dir.join("shared.bin");
+        std::fs::write(&shared_path, vec![0x42u8; 4096]).expect("shared fixture");
+        let shared_meta = std::fs::metadata(&shared_path).expect("stat shared fixture");
+        let shared_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&shared_path)
+            .expect("open shared fixture");
+        // SAFETY: maps one valid page shared read/write and unmaps before cleanup.
+        let shared_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                shared_file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(shared_addr, libc::MAP_FAILED, "mmap shared fixture");
+        drop(shared_file);
+
+        let clean_path = dir.join("unmapped.bin");
+        std::fs::write(&clean_path, b"clean").expect("clean fixture");
+        let clean_meta = std::fs::metadata(&clean_path).expect("stat clean fixture");
+
+        let protected_shared = vec![ProtectedEntry {
+            path: shared_path.to_string_lossy().into_owned(),
+            scope: ProtectedScope::Exact {
+                dev: userspace_dev_to_kernel(shared_meta.dev()),
+                ino: shared_meta.ino(),
+            },
+        }];
+        let protected_clean = vec![ProtectedEntry {
+            path: clean_path.to_string_lossy().into_owned(),
+            scope: ProtectedScope::Exact {
+                dev: userspace_dev_to_kernel(clean_meta.dev()),
+                ino: clean_meta.ino(),
+            },
+        }];
+        let pid = std::process::id() as i32;
+
+        let shared_res = reject_writable_shared_mappings(pid, &protected_shared);
+        let read_mapped_res = reject_preexisting_read_mappings(pid, &protected_shared);
+        let read_clean_res = reject_preexisting_read_mappings(pid, &protected_clean);
+
+        // SAFETY: pointers were returned by the matching 4096-byte `mmap` calls above.
+        unsafe {
+            libc::munmap(shared_addr, 4096);
+            libc::munmap(non_utf8_addr, 4096);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let shared_err = shared_res.expect_err(
+            "writable shared mapping must be rejected even when another mapping has non-UTF-8 bytes",
+        );
+        assert!(
+            matches!(shared_err, BackendError::PreexistingWritableMap { .. }),
+            "unexpected writable-shared error: {shared_err}"
+        );
+
+        let read_err =
+            read_mapped_res.expect_err("read mapping of protected target must be rejected");
+        let read_msg = read_err.to_string();
+        assert!(
+            matches!(read_err, BackendError::CompileFailure(_))
+                && read_msg.contains("shared.bin")
+                && !read_msg.contains("cannot inspect read protection mappings"),
+            "read rejection must report the mapped protected target instead of a UTF-8 read failure: {read_msg}"
+        );
+
+        read_clean_res
+            .expect("unmapped clean target must pass despite unrelated non-UTF-8 maps entry");
     }
 }
