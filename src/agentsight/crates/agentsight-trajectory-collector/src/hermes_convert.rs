@@ -95,10 +95,10 @@ pub(crate) fn convert_session(
         "hermes_session_id".into(),
         Value::String(session.id.clone()),
     );
-    if let Some(parent) = &session.parent_session_id {
+    if let Some(parent) = parent_session_id(session) {
         trajectory_extra.insert(
             "hermes_parent_session_id".into(),
-            Value::String(parent.clone()),
+            Value::String(parent.to_string()),
         );
         trajectory_extra.insert(
             "parent_session_id".into(),
@@ -388,12 +388,30 @@ pub(crate) fn timestamp_ns(timestamp: f64) -> i64 {
     }
 }
 
+fn parent_session_id(session: &HermesSession) -> Option<&str> {
+    session
+        .parent_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+pub(crate) fn is_subagent(session: &HermesSession) -> bool {
+    parent_session_id(session).is_some()
+}
+
 pub(crate) fn source_fingerprint(
     schema_version: Option<i64>,
     session: &HermesSession,
     messages: &[HermesMessage],
 ) -> i64 {
     let mut hasher = DefaultHasher::new();
+    // Domain tag child sessions so legacy unchanged rows stored with
+    // `is_subagent = 0` invalidate their scan state while main sessions keep
+    // identical fingerprints.
+    if is_subagent(session) {
+        "hermes-subagent-v1".hash(&mut hasher);
+    }
     schema_version.hash(&mut hasher);
     session.id.hash(&mut hasher);
     session.source.hash(&mut hasher);
