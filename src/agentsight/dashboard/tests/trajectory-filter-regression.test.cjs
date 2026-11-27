@@ -96,6 +96,15 @@ function viewer({ readFailure = false } = {}) {
     rounds: () => nodes(render(), (node) => node.type?.name === 'RoundListItem'),
     detail: () => nodes(render(), (node) => node.type?.name === 'RoundDetail')[0],
     filter(value) { nodes(render(), (node) => node.type === 'input' && node.props.type === 'search')[0].props.onChange({ target: { value } }); },
+    pressFilterKey(key, { isComposing = false, ...modifiers } = {}) {
+      const input = nodes(render(), (node) => node.type === 'input' && node.props.type === 'search')[0];
+      let prevented = false;
+      input.props.onKeyDown?.({ key, ...modifiers, nativeEvent: { isComposing }, preventDefault() { prevented = true; } });
+      return prevented;
+    },
+    filterButton(label) {
+      return nodes(render(), (node) => node.type === 'button' && node.props.children === label)[0];
+    },
     unmount() { for (const cleanup of cleanups) cleanup?.(); },
     load(id) {
       nodes(render(), (node) => node.type === 'input' && node.props.type === 'text')[0].props.onChange({ target: { value: id } });
@@ -160,6 +169,67 @@ test('no matches preserve selected detail and clearing preserves original round 
   assert.equal(page.detail().props.round.key, 2);
   page.rounds()[0].props.onSelect();
   assert.equal(page.detail().props.round.key, 1);
+});
+
+function withNonconsecutiveMatches() {
+  const doc = trajectory();
+  doc.steps.push({ step_id: 6, source: 'user', message: 'ALPHA again' });
+  return loaded(doc);
+}
+
+test('match buttons wrap through visible rounds without selecting hidden rounds', () => {
+  const page = withNonconsecutiveMatches();
+  page.filter('alpha');
+  assert.deepEqual(keys(page), [1, 3]);
+  assert.equal(page.detail().props.round.key, 0, 'typing leaves the current detail open');
+
+  const next = () => page.filterButton('atif.nextRoundMatch')?.props.onClick();
+  const previous = () => page.filterButton('atif.previousRoundMatch')?.props.onClick();
+  previous();
+  assert.equal(page.detail().props.round.key, 3, 'the first backward action opens the last match');
+  next();
+  assert.equal(page.detail().props.round.key, 1, 'next wraps from the last match');
+  next();
+  assert.equal(page.detail().props.round.key, 3, 'next skips the hidden round');
+  previous();
+  assert.equal(page.detail().props.round.key, 1);
+  previous();
+  assert.equal(page.detail().props.round.key, 3, 'previous wraps from the first match');
+  assert.equal(page.nodes((node) => node.props?.['aria-live'] === 'polite')[0].props.children,
+    'atif.activeRoundMatch{"index":2,"matched":2,"total":4}');
+});
+
+test('Enter and Shift+Enter navigate matches, while composing or modified keys do not', () => {
+  const page = withNonconsecutiveMatches();
+  page.filter('alpha');
+
+  assert.equal(page.pressFilterKey('Enter', { isComposing: true }), false);
+  assert.equal(page.pressFilterKey('Enter', { ctrlKey: true }), false);
+  assert.equal(page.pressFilterKey('ArrowDown'), false);
+  assert.equal(page.detail().props.round.key, 0);
+  assert.equal(page.pressFilterKey('Enter'), true);
+  assert.equal(page.detail().props.round.key, 1);
+  assert.equal(page.pressFilterKey('Enter', { shiftKey: true }), true);
+  assert.equal(page.detail().props.round.key, 3);
+});
+
+test('empty results disable navigation and clearing returns to ordinary list selection', () => {
+  const page = loaded();
+  page.rounds()[2].props.onSelect();
+  page.filter('never matches');
+  assert.equal(page.filterButton('atif.previousRoundMatch')?.props.disabled, true);
+  assert.equal(page.filterButton('atif.nextRoundMatch')?.props.disabled, true);
+  assert.equal(page.pressFilterKey('Enter'), false);
+  assert.equal(page.detail().props.round.key, 2);
+
+  page.filterButton('atif.clearRoundFilter').props.onClick();
+  assert.equal(page.filterButton('atif.nextRoundMatch'), undefined);
+  assert.equal(page.pressFilterKey('Enter'), false);
+  assert.deepEqual(keys(page), [0, 1, 2]);
+  assert.equal(page.detail().props.round.key, 2);
+  page.filter('   ');
+  assert.equal(page.filterButton('atif.nextRoundMatch'), undefined);
+  assert.equal(page.pressFilterKey('Enter'), false);
 });
 test('importing another document resets the prior query', () => {
   const page = loaded(); page.filter('alpha');

@@ -449,6 +449,7 @@ const RoundListItem: React.FC<RoundListItemProps> = ({ round, isActive, onSelect
   return (
     <button
       onClick={onSelect}
+      aria-current={isActive || undefined}
       className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${
         isActive
           ? 'bg-blue-50 border-blue-300 shadow-sm'
@@ -1051,6 +1052,18 @@ export const AtifViewerPage: React.FC = () => {
     () => rounds.filter((round) => roundMatchesText(round.steps, roundFilter)),
     [rounds, roundFilter],
   );
+  const hasRoundFilter = roundFilter.trim().length > 0;
+  const canNavigateMatches = hasRoundFilter && visibleRounds.length > 0;
+  const matchIndex = hasRoundFilter ? visibleRounds.findIndex(round => round.key === selectedRound) : -1;
+
+  function navigateRoundMatch(direction: -1 | 1) {
+    if (!canNavigateMatches) return;
+    const count = visibleRounds.length;
+    const boundary = direction === 1 ? 0 : count - 1;
+    const nextIndex = matchIndex < 0 ? boundary : (matchIndex + direction + count) % count;
+    setSelectedRound(visibleRounds[nextIndex].key);
+  }
+
   const activeRound = rounds.find(r => r.key === selectedRound) ?? null;
   const computedMetrics = activeDoc ? (() => {
     const fm = activeDoc.final_metrics;
@@ -1308,14 +1321,40 @@ export const AtifViewerPage: React.FC = () => {
                         type="search"
                         value={roundFilter}
                         onChange={(event) => setRoundFilter(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (!canNavigateMatches || event.key !== 'Enter' || event.nativeEvent.isComposing ||
+                              event.altKey || event.ctrlKey || event.metaKey) return;
+                          event.preventDefault();
+                          navigateRoundMatch(event.shiftKey ? -1 : 1);
+                        }}
                         aria-label={t('atif.filterRounds')}
                         placeholder={t('atif.filterRounds')}
                         className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
                       />
                       <div className="flex items-center justify-between gap-2 text-xs text-gray-500">
-                        <span aria-live="polite">{t('atif.matchingRounds', { matched: visibleRounds.length, total: rounds.length })}</span>
+                        <span aria-live="polite">
+                          {matchIndex < 0
+                            ? t('atif.matchingRounds', { matched: visibleRounds.length, total: rounds.length })
+                            : t('atif.activeRoundMatch', { index: matchIndex + 1, matched: visibleRounds.length, total: rounds.length })}
+                        </span>
                         {roundFilter && <button onClick={() => setRoundFilter('')} className="text-blue-600 hover:text-blue-800">{t('atif.clearRoundFilter')}</button>}
                       </div>
+                      {hasRoundFilter && (
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button" disabled={!canNavigateMatches} onClick={() => navigateRoundMatch(-1)}
+                            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 enabled:hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            {t('atif.previousRoundMatch')}
+                          </button>
+                          <button
+                            type="button" disabled={!canNavigateMatches} onClick={() => navigateRoundMatch(1)}
+                            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 enabled:hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            {t('atif.nextRoundMatch')}
+                          </button>
+                        </div>
+                      )}
                     </div>
                     {visibleRounds.length === 0 && <p className="p-4 text-sm text-gray-500">{t('atif.noMatchingRounds')}</p>}
                     {visibleRounds.map(round => (

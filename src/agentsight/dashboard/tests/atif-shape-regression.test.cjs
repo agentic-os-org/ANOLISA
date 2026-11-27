@@ -189,7 +189,7 @@ test('an imported user observation remains searchable and expands through the re
 
   page.search('user-observation-needle');
   let rendered = page.renderAll();
-  assert.ok(JSON.stringify(rendered).includes(page.t('atif.matchingRounds', { matched: 1, total: 2 })));
+  assert.ok(JSON.stringify(rendered).includes(page.t('atif.activeRoundMatch', { index: 1, matched: 1, total: 2 })));
 
   const title = page.t('atif.observation');
   let buttons = collapsibles(page, rendered, title);
