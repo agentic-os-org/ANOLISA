@@ -27,7 +27,10 @@ mod entry;
 mod post_tool;
 mod taxonomy;
 
-pub use entry::{EntryOptions, EntryOutcome, dispatch_with_store, response_operation};
+pub use entry::{
+    EntryOptions, EntryOutcome, dispatch_with_store, post_tool_command_is_excluded,
+    response_operation,
+};
 use entry::{before_model_with_store, post_tool_with_outcomes, retrieve_authorized_with_store};
 use post_tool::{PostToolPipeline, PostToolPipelineConfig};
 
@@ -35,6 +38,8 @@ use post_tool::{PostToolPipeline, PostToolPipelineConfig};
 /// disposition vocabulary, re-exported verbatim so CLI, Runtime, and
 /// language bindings share one set of names and wire strings (roadmap §5.6).
 pub use tokenless_protocol::Disposition;
+/// Per-domain PreTool RTK rollout switches re-exported for runtime callers.
+pub use tokenless_stats::{DomainRolloutMode, RtkRolloutConfig};
 
 /// Maximum accepted response size, matching the standalone CLI input limit.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -75,6 +80,9 @@ pub struct RuntimeConfig {
     /// Whether structured regions inside mixed tool outputs may be compressed
     /// individually. Disabled by default.
     pub mixed_content_enabled: bool,
+    /// Command names or word prefixes excluded from PostTool command-output
+    /// compression.
+    pub exclude_commands: Vec<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -89,6 +97,7 @@ impl Default for RuntimeConfig {
             html_extraction_enabled: true,
             browser_snapshot_enabled: true,
             mixed_content_enabled: false,
+            exclude_commands: Vec::new(),
         }
     }
 }
@@ -407,6 +416,8 @@ impl TokenlessRuntime {
             stash_enabled: true,
             rtk_launcher: None,
             rtk_data_dir: None,
+            rtk_rollout: RtkRolloutConfig::default(),
+            exclude_commands: self.config.exclude_commands.clone(),
         };
         let outcome = before_model_with_store(request, &options, self.stash_store.as_ref())?;
         record_entry_stats(
@@ -442,6 +453,8 @@ impl TokenlessRuntime {
             stash_enabled: true,
             rtk_launcher: None,
             rtk_data_dir: Some(self.data_dir.clone()),
+            rtk_rollout: RtkRolloutConfig::default(),
+            exclude_commands: self.config.exclude_commands.clone(),
         };
         let outcome =
             post_tool_with_outcomes(request, &options, self.stash_store.as_ref(), attribution)?;

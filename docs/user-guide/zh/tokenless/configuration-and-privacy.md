@@ -14,7 +14,7 @@ Tokenless 默认启用压缩、本地统计和 SLS 度量。由于本地统计�
 
 空环境变量视为未设置。布尔环境变量中，`1`、`true`、`yes`（大小写不敏感）表示 true；其他非空值表示 false。为了可读性，建议明确使用 `true` 或 `false`。对于保留天数环境变量（`TOKENLESS_STATS_RETENTION_DAYS`、`TOKENLESS_STATS_TEXT_RETENTION_DAYS`），正整数设置保留天数，`0` 表示停用保留策略（覆盖 `config.json`），空值或非整数值则回退到 `config.json` 或默认值。
 
-当前实现有一个例外：只有当五个配置项（`TOKENLESS_STATS_ENABLED`、`TOKENLESS_SLS_ENABLED`、`TOKENLESS_COMPRESSION_ENABLED`、`TOKENLESS_STATS_RETENTION_DAYS` 和 `TOKENLESS_STATS_TEXT_RETENTION_DAYS`）都提供了有效的非空环境变量覆盖时，代码才会跳过配置文件，因为所有配置均已确定；否则仍会读取 `~/.tokenless/config.json` 补齐未覆盖的字段。
+当前实现有一个例外：在非命令路由子命令（`compress-schema`、`compress-toon`、`stats status`、`before_model`、`retrieve` 及 `TokenlessRuntime::new`）上，当五个基础配置项（`TOKENLESS_STATS_ENABLED`、`TOKENLESS_SLS_ENABLED`、`TOKENLESS_COMPRESSION_ENABLED`、`TOKENLESS_STATS_RETENTION_DAYS` 和 `TOKENLESS_STATS_TEXT_RETENTION_DAYS`）都提供了有效的非空环境变量覆盖时，代码会跳过配置文件读取，因为当前操作所需配置均已确定。对于 `PreTool`，仅当上述五个基础变量、包含全部 5 个域的合法 `TOKENLESS_RTK_ROLLOUT` 与合法 `TOKENLESS_EXCLUDE_COMMANDS` 均由环境变量提供时才跳过 `~/.tokenless/config.json`；对于 `PostTool`，只要五个基础变量与合法 `TOKENLESS_EXCLUDE_COMMANDS` 均由环境变量提供即跳过读盘（不依赖 `TOKENLESS_RTK_ROLLOUT`）。其余情况下仍会读取 `~/.tokenless/config.json` 补齐未覆盖的字段。
 
 ## 配置文件
 
@@ -32,11 +32,19 @@ Tokenless 默认启用压缩、本地统计和 SLS 度量。由于本地统计�
   "sls_enabled": true,
   "compression_enabled": true,
   "stats_retention_days": 30,
-  "stats_text_retention_days": 7
+  "stats_text_retention_days": 7,
+  "rtk_rollout": {
+    "search": "posttool_native",
+    "vcs": "pretool_rtk",
+    "build_test": "posttool_native",
+    "lint": "pretool_rtk",
+    "cloud_net": "pretool_rtk"
+  },
+  "exclude_commands": []
 }
 ```
 
-配置文件缺失、不可读或 JSON 无效时，当前代码会静默使用内存中的默认值（开关为 `true`，`stats_retention_days` 默认 `30` 天，`stats_text_retention_days` 默认 `7` 天）。手动编辑后可先验证：
+配置文件缺失或不可读时使用内存默认值（开关为 `true`，`stats_retention_days` 默认 `30` 天，`stats_text_retention_days` 默认 `7` 天，`rtk_rollout` 为默认域分配，`exclude_commands` 为 `[]`）。JSON 语法非法或顶层非对象时向 `stderr` 告警并回退默认值；单个字段非法（例如 `rtk_rollout` 某域拼写错误、保留天数非法或 `exclude_commands` 非字符串数组）时仅告警并回退该字段，保留 `stats_enabled: false`、`sls_enabled: false`、`stats_retention_days: 0` 等其他合法配置。手动编辑后可先验证：
 
 ```bash
 jq . ~/.tokenless/config.json
@@ -49,6 +57,10 @@ jq . ~/.tokenless/config.json
 | `compression_enabled` | `true` | 为 true 时返回压缩结果；false 时进入 dry-run 并返回原文 |
 | `stats_retention_days` | `30` | 正整数启用采样自动清理（每 64 行触发，覆盖 CLI 压缩、`tokenless rtk` 与 `TokenlessRuntime`/Python SDK），删除超期 `stats` 行、关联 `compression_artifacts` 及超期 `retrieve_events`；设为 `0` 或 `null` 可停用（不限制） |
 | `stats_text_retention_days` | `7` | 正整数启用采样自动清理，清除超期 `stats` 行的压缩前后正文载荷，保留数值度量与汇总；设为 `0` 或 `null` 可停用（不限制） |
+| `rtk_rollout` *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | `search`、`build_test` 为 `posttool_native`；`vcs`、`lint`、`cloud_net` 为 `pretool_rtk` | 按命令域配置二态开关（`pretool_rtk` 或 `posttool_native`），控制支持替换的宿主关闭该域的 PreTool RTK 改写以将原生输出交由 PostTool 处理，还是继续走 PreTool RTK 改写。切换为 `posttool_native` 仅关闭该域的 PreTool 改写；实际是否产生原生压缩取决于 PostTool 对所得输出格式是否已有对应压缩器（尚无原生压缩器覆盖的输出，如普通 `git status`，会在 PostTool 原样透传，不再保留原有 RTK 改写缩减）。`vcs` 覆盖 `git`/`diff`/`gt`/`yadm`；`cloud_net` 覆盖 `gh`/`glab`/`docker`/`kubectl`/`oc`/`aws`/`curl`/`wget`/`psql`/`helm`/`terraform`。无 PostTool 替换能力的宿主（`none`）仍保留 RTK 改写（命中 `exclude_commands` 除外）；`lossless_only` 宿主仅对 `search` 域应用 `posttool_native`。截至 `tokenless/v0.9.7` 的已发布版本会忽略此字段。 |
+| `exclude_commands` *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | `[]` | 双端免压命令列表（支持命令名或词前缀，如 `"custom-cli"`、`"cargo xtask"`、`"uv run pytest"`）：命中后同时跳过 PreTool RTK 改写和 PostTool 命令输出压缩（成功态与报错态均原样透传）。支持常见透明包装前缀（含 `env`、`timeout`、`uv run`、`npx`/`pnpx`）以及 Windows `.exe`/`.cmd`/`.bat`/`.ps1` 启动后缀归一化。截至 `tokenless/v0.9.7` 的已发布版本会忽略此字段。 |
+
+`rtk_rollout` 与 `exclude_commands`（未发布；仅源码 `main` 可用，`v0.9.7` 及更早发布版本会忽略）同样支持通过环境变量 `TOKENLESS_RTK_ROLLOUT`（局部或完整 JSON 对象）与 `TOKENLESS_EXCLUDE_COMMANDS`（JSON 字符串数组，`[]` 可清空文件配置）覆盖。Python 生命周期 `TokenlessConfig` 会继承相同的文件与环境变量默认值，并将显式传入的 `rtk_rollout` / `exclude_commands` 同步作用于 `pre_tool` 与进程内 `post_tool`；直接构造 Rust `RuntimeConfig` 与原生 `TokenlessRuntime` 仍采用显式配置并接受用于 `post_tool` 的 `exclude_commands`（`rtk_rollout` 仅在执行 `PreTool` 的 CLI 与 `TokenlessSdk` 生效）。
 
 Tokenless 写入配置文件时会把权限限制为 `0600`。手动创建文件后也应确认：
 
@@ -285,6 +297,8 @@ token 仲裁；没有区域发生变化、未产生暂存 Stash 写入且没有 
 | `TOKENLESS_COMPRESSION_ENABLED` | 覆盖真实压缩开关 | false 是 dry-run，不是完全停用 |
 | `TOKENLESS_STATS_RETENTION_DAYS` | 覆盖 `stats.db` 记录保留天数 | 正整数设置天数；`0` 停用并覆盖 `config.json`；空值或非法值回退 |
 | `TOKENLESS_STATS_TEXT_RETENTION_DAYS` | 覆盖 `stats.db` 正文载荷保留天数 | 正整数设置天数；`0` 停用并覆盖 `config.json`；空值或非法值回退 |
+| `TOKENLESS_RTK_ROLLOUT` | 覆盖命令域 `rtk_rollout` 路由（`pretool_rtk` / `posttool_native`）*（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | JSON 对象，可按需覆盖 `search`/`vcs`/`build_test`/`lint`/`cloud_net` 中的部分或全部域；非法项向 `stderr` 告警并忽略 |
+| `TOKENLESS_EXCLUDE_COMMANDS` | 覆盖双端免压 `exclude_commands` 列表 *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | JSON 字符串数组（`[]` 清空文件配置）；非法 JSON 向 `stderr` 告警并忽略 |
 | `TOKENLESS_DATA_DIR` | 存放 `stats.db`、`stash.db` 和 `rtk-outcomes.db` 的目录 | 可访问的任意绝对目录，但不能是文件系统根目录或包含父目录遍历 |
 | `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
@@ -338,7 +352,7 @@ SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路�
 |------|----------|----------|----------|--------------|
 | 本地统计 | `~/.tokenless/stats.db` | 压缩前后完整文本、标识和度量 | 默认保留 30 天记录与事件、7 天正文载荷（CLI 压缩、`tokenless rtk` 与 `TokenlessRuntime`/Python SDK 均按每 64 行采样清理）；可通过 `stats_retention_days` / `stats_text_retention_days` 覆盖（`0` 或 `null` 表示不限制），或手动执行 `tokenless stats prune` / `clear` / `compact` | `tokenless stats disable` |
 | Stash | `~/.tokenless/stash.db` | 截断时移除的原始字符串、截断数组中被丢弃的中间段、被缩减为采样集合的完整对象记录数组、深层子树、Schema 描述、build/log 间隙内容、被转写 HTML 页面的完整原文，以及 JSON 中每个被转写的 HTML 值 | TTL 1 小时、最多 10,000 个有效条目；过期行延迟清理，批量或大 WAL 清理后自动执行非阻塞 WAL checkpoint | CLI 使用 `--no-stash`；Agent 场景禁用 Adapter |
-| 配置 | `~/.tokenless/config.json` | 三个布尔开关及可选保留天数设置 | 持续保留 | 不适用 |
+| 配置 | `~/.tokenless/config.json` | 布尔开关、可选保留天数设置、`rtk_rollout` 及 `exclude_commands` | 持续保留 | 不适用 |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | 度量和标识，不含压缩原文 | 由 SLS/Logtail 设施管理 | `TOKENLESS_SLS_ENABLED=0` 或配置为 false |
 
 ### 本地统计的敏感性

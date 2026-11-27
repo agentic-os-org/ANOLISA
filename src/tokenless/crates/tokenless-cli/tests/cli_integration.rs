@@ -8053,3 +8053,206 @@ fn rtk_read_only_gain_does_not_prune_or_trim_stats() {
         assert_eq!(watermark, StatsRecorder::AUTO_RETENTION_INTERVAL + 1);
     }
 }
+
+#[test]
+fn compress_honors_rtk_rollout_and_dual_end_exclude_commands_env_overrides() {
+    let fixture = TempDataDir::new().unwrap();
+
+    // PreTool: flipping `vcs` to `posttool_native` keeps `git status` native
+    // across the rewrite-child process boundary, while leaving `gh pr list`
+    // (`cloud_net`) on RTK unless `cloud_net` is also switched or excluded.
+    let pre_tool_req = |command: &str| {
+        serde_json::json!({
+            "protocol_version": 2,
+            "operation": "pre_tool",
+            "attribution": {
+                "agent_id": "integration-agent",
+                "session_id": "rollout-env-session",
+                "tool_use_id": "call-pre"
+            },
+            "input": {
+                "tool_name": "Bash",
+                "arguments": { "command": command },
+                "command_field": "command",
+                "capabilities": {
+                    "replace_arguments": true,
+                    "block_and_suggest": false
+                }
+            }
+        })
+        .to_string()
+    };
+
+    let git_default_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_RTK_ROLLOUT", r#"{"vcs":"pretool_rtk"}"#)
+            .env("TOKENLESS_EXCLUDE_COMMANDS", "[]"),
+        &["compress"],
+        &pre_tool_req("git status"),
+    );
+    assert!(git_default_out.status.success());
+    let git_default: serde_json::Value = serde_json::from_slice(&git_default_out.stdout).unwrap();
+    assert_eq!(git_default["result"]["action"], "replace_arguments");
+    assert_eq!(git_default["result"]["output_optimization"], "rtk");
+
+    let git_native_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_RTK_ROLLOUT", r#"{"vcs":"posttool_native"}"#)
+            .env("TOKENLESS_EXCLUDE_COMMANDS", "[]"),
+        &["compress"],
+        &pre_tool_req("git status"),
+    );
+    assert!(git_native_out.status.success());
+    let git_native: serde_json::Value = serde_json::from_slice(&git_native_out.stdout).unwrap();
+    assert_eq!(git_native["result"]["action"], "passthrough");
+    assert_eq!(git_native["result"]["output_optimization"], "none");
+
+    let gh_under_vcs_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env(
+                "TOKENLESS_RTK_ROLLOUT",
+                r#"{"vcs":"posttool_native","cloud_net":"pretool_rtk"}"#,
+            )
+            .env("TOKENLESS_EXCLUDE_COMMANDS", "[]"),
+        &["compress"],
+        &pre_tool_req("gh pr list"),
+    );
+    assert!(gh_under_vcs_out.status.success());
+    let gh_under_vcs: serde_json::Value = serde_json::from_slice(&gh_under_vcs_out.stdout).unwrap();
+    assert_eq!(gh_under_vcs["result"]["action"], "replace_arguments");
+    assert_eq!(gh_under_vcs["result"]["output_optimization"], "rtk");
+
+    let gh_cloud_native_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env(
+                "TOKENLESS_RTK_ROLLOUT",
+                r#"{"cloud_net":"posttool_native"}"#,
+            )
+            .env("TOKENLESS_EXCLUDE_COMMANDS", "[]"),
+        &["compress"],
+        &pre_tool_req("gh pr list"),
+    );
+    assert!(gh_cloud_native_out.status.success());
+    let gh_cloud_native: serde_json::Value =
+        serde_json::from_slice(&gh_cloud_native_out.stdout).unwrap();
+    assert_eq!(gh_cloud_native["result"]["action"], "passthrough");
+
+    let git_excluded_out = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_RTK_ROLLOUT", r#"{"vcs":"pretool_rtk"}"#)
+            .env("TOKENLESS_EXCLUDE_COMMANDS", r#"["git status"]"#),
+        &["compress"],
+        &pre_tool_req("git status"),
+    );
+    assert!(git_excluded_out.status.success());
+    let git_excluded: serde_json::Value = serde_json::from_slice(&git_excluded_out.stdout).unwrap();
+    assert_eq!(git_excluded["result"]["action"], "passthrough");
+
+    // PostTool: `exclude_commands` also passes command output through verbatim
+    // on both success and diagnostic error paths.
+    let payload = serde_json::to_string_pretty(
+        &(0..30)
+            .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let post_req = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {
+            "agent_id": "integration-agent",
+            "session_id": "rollout-env-session",
+            "tool_use_id": "call-post"
+        },
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "Bash",
+            "command": "custom-cli --json",
+            "content": payload,
+            "status": "success",
+            "content_origin": "command_output",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "recovery": {"kind": "shell"},
+                "replace_with_text": true
+            }
+        }
+    });
+    let excluded_post = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_EXCLUDE_COMMANDS", r#"["custom-cli"]"#),
+        &["compress"],
+        &post_req.to_string(),
+    );
+    assert!(excluded_post.status.success());
+    let excluded_json: serde_json::Value = serde_json::from_slice(&excluded_post.stdout).unwrap();
+    assert_eq!(excluded_json["result"]["disposition"], "passthrough");
+    assert_eq!(excluded_json["result"]["output"], payload);
+
+    let cleared_post = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_EXCLUDE_COMMANDS", "[]"),
+        &["compress"],
+        &post_req.to_string(),
+    );
+    assert!(cleared_post.status.success());
+    let cleared_json: serde_json::Value = serde_json::from_slice(&cleared_post.stdout).unwrap();
+    assert_eq!(cleared_json["result"]["disposition"], "applied");
+    assert!(
+        cleared_json["result"]["output"].as_str().unwrap().len() < payload.len(),
+        "clearing exclude_commands must restore PostTool compression"
+    );
+
+    // Excluded PostTool command must pass through without opening Stash, even
+    // when the configured stash_db path cannot be opened (e.g. a directory).
+    let broken_stash = fixture.data_dir.join("stash-dir");
+    std::fs::create_dir_all(&broken_stash).unwrap();
+    let excluded_broken_stash = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0")
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_EXCLUDE_COMMANDS", r#"["custom-cli"]"#),
+        &["compress", "--stash-db", broken_stash.to_str().unwrap()],
+        &post_req.to_string(),
+    );
+    assert!(
+        excluded_broken_stash.status.success(),
+        "excluded PostTool must not fail opening stash: {}",
+        String::from_utf8_lossy(&excluded_broken_stash.stderr)
+    );
+    let broken_json: serde_json::Value =
+        serde_json::from_slice(&excluded_broken_stash.stdout).unwrap();
+    assert_eq!(broken_json["result"]["disposition"], "passthrough");
+    assert_eq!(broken_json["result"]["output"], payload);
+}

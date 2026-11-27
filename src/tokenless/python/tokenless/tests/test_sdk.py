@@ -26,6 +26,7 @@ from anolisa_tokenless import (
     BeforeModelRequest,
     ContentOrigin,
     ContentType,
+    DomainRolloutMode,
     OutputOptimization,
     PostToolCapabilities,
     PostToolReplacementCapability,
@@ -36,6 +37,7 @@ from anolisa_tokenless import (
     RecoveryMethod,
     ResultKind,
     RetrieveRequest,
+    RtkRolloutConfig,
     TokenlessConfig,
     TokenlessError,
     TokenlessSdk,
@@ -254,6 +256,8 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 "html_extraction_enabled",
                 "compression_enabled",
                 "browser_snapshot_enabled",
+                "rtk_rollout",
+                "exclude_commands",
             },
         )
 
@@ -1137,6 +1141,122 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(expired_record.after_text)
             self.assertIsNotNone(mid_record.before_text)
             self.assertIsNotNone(mid_record.after_text)
+
+    async def test_rollout_and_exclude_commands_consistent_across_pre_and_post_tool(
+        self,
+    ) -> None:
+        with self.assertRaises(TypeError):
+            TokenlessConfig(exclude_commands="pytest")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            RtkRolloutConfig(vcs="shadow_bypass")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            TokenlessConfig(rtk_rollout={"unknown": "pretool_rtk"})  # type: ignore[arg-type]
+
+        rollout = RtkRolloutConfig(
+            vcs=DomainRolloutMode.POSTTOOL_NATIVE,
+            cloud_net=DomainRolloutMode.POSTTOOL_NATIVE,
+        )
+        sdk = self.sdk(
+            rtk_enabled=False,
+            rtk_rollout=rollout,
+            exclude_commands=("custom-cli", "cargo xtask"),
+        )
+        sdk._rtk_launcher = Path("/tmp/stub-tokenless")
+        response_bytes = json.dumps(
+            {
+                "protocol_version": 2,
+                "operation": "pre_tool",
+                "result": {
+                    "arguments": {"command": "git status"},
+                    "action": "passthrough",
+                    "output_optimization": "none",
+                },
+            }
+        ).encode("utf-8")
+        with patch(
+            "anolisa_tokenless.sdk._run_compress", return_value=response_bytes
+        ) as run_compress:
+            await sdk.pre_tool(self.pre_tool_request("git status"))
+        self.assertEqual(
+            json.loads(run_compress.call_args.kwargs["rtk_rollout_json"]),
+            rollout.as_dict(),
+        )
+        self.assertEqual(
+            json.loads(run_compress.call_args.kwargs["exclude_commands_json"]),
+            ["custom-cli", "cargo xtask"],
+        )
+
+        payload = json.dumps(
+            [{"index": i, "payload": "x" * 40} for i in range(30)],
+            indent=2,
+        )
+        capabilities = PostToolCapabilities(
+            replace_output=True,
+            recovery=RecoveryMethod.tool("tokenless_retrieve"),
+            replace_with_text=True,
+        )
+        excluded = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="Bash",
+                content=payload,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.COMMAND_OUTPUT,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=capabilities,
+                attribution=Attribution("sdk-agent", "exclude-session", "call-1"),
+                command="timeout 30 custom-cli --json",
+            )
+        )
+        self.assertEqual(excluded.disposition.value, "passthrough")
+        self.assertEqual(excluded.output, payload)
+        self.assertEqual(excluded.applied_operations, ())
+
+        allowed = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="Bash",
+                content=payload,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.COMMAND_OUTPUT,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=capabilities,
+                attribution=Attribution("sdk-agent", "exclude-session", "call-2"),
+                command="other-cli --json",
+            )
+        )
+        self.assertEqual(allowed.disposition.value, "applied")
+        self.assertLess(len(allowed.output), len(payload))
+
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENLESS_RTK_ROLLOUT": json.dumps({"lint": "posttool_native"}),
+                "TOKENLESS_EXCLUDE_COMMANDS": json.dumps(["env-only-cli"]),
+            },
+        ):
+            env_config = TokenlessConfig(data_dir=Path(self.temporary_directory.name))
+        self.assertEqual(env_config.rtk_rollout.lint, DomainRolloutMode.POSTTOOL_NATIVE)
+        self.assertEqual(env_config.exclude_commands, ("env-only-cli",))
+
+        with patch(
+            "anolisa_tokenless.sdk._load_policy_config",
+            return_value=json.dumps(
+                {
+                    "rtk_rollout": {"lint": "posttool_native"},
+                    "exclude_commands": ["cached-cli"],
+                }
+            ),
+        ) as load_policy:
+            single_load = TokenlessConfig(data_dir=Path(self.temporary_directory.name))
+            explicit_config = TokenlessConfig(
+                data_dir=Path(self.temporary_directory.name),
+                rtk_rollout=rollout,
+                exclude_commands=(),
+            )
+        self.assertEqual(load_policy.call_count, 1)
+        self.assertEqual(single_load.exclude_commands, ("cached-cli",))
+        self.assertEqual(explicit_config.exclude_commands, ())
 
 
 if __name__ == "__main__":

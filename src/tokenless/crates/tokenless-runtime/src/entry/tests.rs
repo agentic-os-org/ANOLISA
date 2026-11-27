@@ -128,6 +128,8 @@ fn options() -> EntryOptions {
         stash_enabled: true,
         rtk_launcher: None,
         rtk_data_dir: Some(PathBuf::from("/tmp/tokenless-test")),
+        rtk_rollout: RtkRolloutConfig::default(),
+        exclude_commands: Vec::new(),
     }
 }
 
@@ -2395,4 +2397,846 @@ fn post_tool_tokenless_retrieve_shell_command_bypasses_and_skips_env_diagnosis()
     assert_eq!(err_outcome.response.disposition, Disposition::ToolError);
     assert_eq!(err_outcome.response.output, "failed to retrieve");
     assert!(err_outcome.response.additional_context.is_none());
+}
+
+#[test]
+fn pre_tool_rtk_rollout_switches_route_each_domain_by_host_capability() {
+    // Under FullRetrievable, toggling a domain to PretoolRtk re-enables RTK
+    // while toggling VCS, Lint, and CloudNet (including gh/glab) to
+    // PosttoolNative keeps them native.
+    let rollout = RtkRolloutConfig {
+        search: DomainRolloutMode::PretoolRtk,
+        vcs: DomainRolloutMode::PosttoolNative,
+        build_test: DomainRolloutMode::PretoolRtk,
+        lint: DomainRolloutMode::PosttoolNative,
+        cloud_net: DomainRolloutMode::PosttoolNative,
+    };
+
+    for (command, expect_rtk) in [
+        ("grep -rn needle src", true),
+        ("cargo test --workspace", true),
+        ("git diff HEAD~1", false),
+        ("diff -u a.txt b.txt", false),
+        ("eslint src/", false),
+        ("npx tsc --noEmit", false),
+        ("python3 -m mypy src/", false),
+        ("gh pr list", false),
+        ("glab mr list", false),
+        ("kubectl get pods", false),
+        ("docker ps", false),
+        ("head -20 README.md", false),
+    ] {
+        let request = bash_request(command);
+        let response = pre_tool_with_options_and_rewriter(
+            &request,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &rollout,
+            &[],
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            response.action == PreToolAction::ReplaceArguments,
+            expect_rtk,
+            "FullRetrievable: {command}"
+        );
+    }
+
+    // gh and glab belong to cloud_net, not vcs: enabling vcs alone must leave
+    // gh/glab on RTK while keeping git native.
+    let vcs_only = RtkRolloutConfig {
+        vcs: DomainRolloutMode::PosttoolNative,
+        ..RtkRolloutConfig::default()
+    };
+    for (command, expect_rtk) in [
+        ("git status", false),
+        ("gh pr list", true),
+        ("glab mr list", true),
+    ] {
+        let request = bash_request(command);
+        let response = pre_tool_with_options_and_rewriter(
+            &request,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &vcs_only,
+            &[],
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            response.action == PreToolAction::ReplaceArguments,
+            expect_rtk,
+            "vcs-only rollout: {command}"
+        );
+    }
+
+    // LosslessOnly still keeps Stash-dependent domains on RTK even when the
+    // domain switch is PosttoolNative, and honors rolling search back to RTK.
+    let mut lossless_req = bash_request("git status");
+    lossless_req.capabilities.post_tool_replacement = PostToolReplacementCapability::LosslessOnly;
+    let lossless_vcs = pre_tool_with_options_and_rewriter(
+        &lossless_req,
+        &Attribution::new("test"),
+        Some(Path::new("/opt/tokenless/tokenless")),
+        Some(Path::new("/tmp/tokenless-test")),
+        &rollout,
+        &[],
+        |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+    )
+    .unwrap();
+    assert_eq!(lossless_vcs.action, PreToolAction::ReplaceArguments);
+
+    let mut lossless_search = bash_request("grep -rn needle src");
+    lossless_search.capabilities.post_tool_replacement =
+        PostToolReplacementCapability::LosslessOnly;
+    let search_rolled_back = pre_tool_with_options_and_rewriter(
+        &lossless_search,
+        &Attribution::new("test"),
+        Some(Path::new("/opt/tokenless/tokenless")),
+        Some(Path::new("/tmp/tokenless-test")),
+        &rollout,
+        &[],
+        |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+    )
+    .unwrap();
+    assert_eq!(search_rolled_back.action, PreToolAction::ReplaceArguments);
+}
+
+#[test]
+fn exclude_commands_bypasses_both_pre_tool_and_post_tool() {
+    let exclusions = vec![
+        "   ".to_string(),
+        "custom-cli".to_string(),
+        "cargo xtask".to_string(),
+        "cat".to_string(),
+    ];
+
+    // PreTool: excluded commands stay native across every replacement
+    // capability, including None (H3) and wrapped/compound invocations.
+    for capability in [
+        PostToolReplacementCapability::FullRetrievable,
+        PostToolReplacementCapability::LosslessOnly,
+        PostToolReplacementCapability::None,
+    ] {
+        for command in [
+            "custom-cli --json",
+            "/usr/local/bin/custom-cli.exe --json",
+            "timeout 30 env FOO=1 cargo xtask check",
+            "echo start && custom-cli status",
+        ] {
+            let mut request = bash_request(command);
+            request.capabilities.post_tool_replacement = capability;
+            let response = pre_tool_with_options_and_rewriter(
+                &request,
+                &Attribution::new("test"),
+                Some(Path::new("/opt/tokenless/tokenless")),
+                Some(Path::new("/tmp/tokenless-test")),
+                &RtkRolloutConfig::default(),
+                &exclusions,
+                rtk_must_not_run,
+            )
+            .unwrap();
+            assert_eq!(
+                response.action,
+                PreToolAction::Passthrough,
+                "{capability:?}: {command}"
+            );
+        }
+    }
+
+    // Non-matching subcommand is not excluded by "cargo xtask".
+    let mut non_matching = bash_request("cargo metadata");
+    non_matching.capabilities.post_tool_replacement = PostToolReplacementCapability::None;
+    let rewritten = pre_tool_with_options_and_rewriter(
+        &non_matching,
+        &Attribution::new("test"),
+        Some(Path::new("/opt/tokenless/tokenless")),
+        Some(Path::new("/tmp/tokenless-test")),
+        &RtkRolloutConfig::default(),
+        &exclusions,
+        |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+    )
+    .unwrap();
+    assert_eq!(rewritten.action, PreToolAction::ReplaceArguments);
+
+    // PostTool: excluded commands pass through verbatim on success, error,
+    // FileRead refinement (`cat`), and original_command fallback, touching no stash.
+    let json_payload = serde_json::to_string_pretty(
+        &(0..30)
+            .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let mut opts = options();
+    opts.exclude_commands = exclusions;
+
+    let store: Arc<dyn StashStore> = Arc::new(ReadCountingStore::default());
+    for (command, original_command) in [
+        (Some("custom-cli --json"), None),
+        (Some("timeout 30 cargo xtask dump"), None),
+        (Some("cat output.json"), None),
+        (Some("wrapper-cmd"), Some("custom-cli --json")),
+    ] {
+        let req = PostToolRequest {
+            result_kind: ResultKind::Tool,
+            command: command.map(str::to_owned),
+            original_command: original_command.map(str::to_owned),
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                replace_with_text: true,
+            },
+            ..post_tool_request(&json_payload)
+        };
+        let outcome = post_tool_with_store(&req, &opts, Some(&store)).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+        assert_eq!(outcome.response.output, json_payload);
+        assert!(outcome.response.applied_operations.is_empty());
+        assert!(outcome.stash_writes.is_none());
+    }
+
+    // Error status excluded command skips error compression and returns ToolError.
+    let failing_build = (0..25)
+        .map(|i| format!("   Compiling crate-{i} v0.1.0 (/workspace/crate-{i})"))
+        .chain(["error[E0308]: mismatched types\n --> src/lib.rs:10:5".to_string()])
+        .collect::<Vec<_>>()
+        .join("\n");
+    let err_req = PostToolRequest {
+        result_kind: ResultKind::Tool,
+        status: ToolResultStatus::Error,
+        exit_code: Some(101),
+        command: Some("cargo xtask test".into()),
+        capabilities: PostToolCapabilities {
+            replace_output: true,
+            recovery: tokenless_protocol::RecoveryMethod::Shell,
+            replace_with_text: true,
+        },
+        ..post_tool_request(&failing_build)
+    };
+    let err_outcome = post_tool_with_store(&err_req, &opts, Some(&store)).unwrap();
+    assert_eq!(err_outcome.response.disposition, Disposition::ToolError);
+    assert_eq!(err_outcome.response.output, failing_build);
+    assert!(err_outcome.response.applied_operations.is_empty());
+
+    // Non-excluded command still compresses normally.
+    let normal_req = PostToolRequest {
+        result_kind: ResultKind::Tool,
+        command: Some("other-cli --json".into()),
+        capabilities: PostToolCapabilities {
+            replace_output: true,
+            recovery: tokenless_protocol::RecoveryMethod::Shell,
+            replace_with_text: true,
+        },
+        ..post_tool_request(&json_payload)
+    };
+    let normal_outcome = post_tool_with_store(&normal_req, &opts, Some(&store)).unwrap();
+    assert_eq!(normal_outcome.response.disposition, Disposition::Applied);
+    assert!(normal_outcome.response.output.len() < json_payload.len());
+
+    // API responses are not affected by shell command exclusions.
+    let api_req = PostToolRequest {
+        result_kind: ResultKind::Tool,
+        content_origin: ContentOrigin::ApiResponse,
+        command: Some("custom-cli".into()),
+        capabilities: PostToolCapabilities {
+            replace_output: true,
+            recovery: tokenless_protocol::RecoveryMethod::Shell,
+            replace_with_text: true,
+        },
+        ..post_tool_request(&json_payload)
+    };
+    let api_outcome = post_tool_with_store(&api_req, &opts, Some(&store)).unwrap();
+    assert_eq!(api_outcome.response.disposition, Disposition::Applied);
+}
+
+#[test]
+fn exclude_commands_handles_wrappers_attached_redirections_and_windows_paths() {
+    let payload = serde_json::to_string_pretty(
+        &(0..30)
+            .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let store: Arc<dyn StashStore> = Arc::new(ReadCountingStore::default());
+
+    // Wrapper-qualified exclusion: `uv run pytest` matches both PreTool and
+    // PostTool (even behind timeout/env) without excluding bare `pytest`.
+    let uv_exclusions = vec!["uv run pytest".to_string()];
+    let build_rtk = RtkRolloutConfig {
+        build_test: DomainRolloutMode::PretoolRtk,
+        ..RtkRolloutConfig::default()
+    };
+    for (command, expect_excluded) in [
+        ("uv run pytest -q", true),
+        ("FOO=1 timeout 30 uv run pytest tests/", true),
+        ("env -S 'uv run pytest -q'", true),
+        ("pytest -q", false),
+    ] {
+        let req = bash_request(command);
+        let pre = pre_tool_with_options_and_rewriter(
+            &req,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &build_rtk,
+            &uv_exclusions,
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            pre.action == PreToolAction::Passthrough,
+            expect_excluded,
+            "PreTool wrapper exclusion: {command}"
+        );
+
+        let mut opts = options();
+        opts.exclude_commands = uv_exclusions.clone();
+        let post = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            post.response.disposition == Disposition::Passthrough,
+            expect_excluded,
+            "PostTool wrapper exclusion: {command}"
+        );
+    }
+
+    // Attached shell redirections must not corrupt the executable name.
+    let mut jq_opts = options();
+    jq_opts.exclude_commands = vec!["jq".to_string()];
+    for command in [
+        "jq<report.json",
+        "jq <report.json",
+        "<report.json jq -r .",
+        "jq --raw-output>out.json",
+        "jq 2>&1 <report.json",
+    ] {
+        let post = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &jq_opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            post.response.disposition,
+            Disposition::Passthrough,
+            "redirection exclusion: {command}"
+        );
+        assert_eq!(post.response.output, payload, "{command}");
+    }
+
+    // Windows PowerShell paths keep backslashes (both quoted and unquoted).
+    let win_exclusions = vec!["custom-cli".to_string()];
+    let mut win_opts = options();
+    win_opts.exclude_commands = win_exclusions.clone();
+    for (tool_name, command) in [
+        ("PowerShell", r#"& "C:\Tools\custom-cli.exe" --json"#),
+        ("PowerShell", r#"& C:\Tools\custom-cli.exe --json"#),
+        (
+            "PowerShell",
+            r#""C:\Program Files\Tools\custom-cli.EXE" --json"#,
+        ),
+        ("Bash", r#"& "C:\Tools\custom-cli.exe" --json"#),
+    ] {
+        let pre_req = PreToolRequest {
+            tool_name: tool_name.to_string(),
+            arguments: json!({ "command": command }),
+            command_field: "command".to_string(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+                post_tool_replacement: PostToolReplacementCapability::None,
+            },
+        };
+        let pre = pre_tool_with_options_and_rewriter(
+            &pre_req,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &RtkRolloutConfig::default(),
+            &win_exclusions,
+            rtk_must_not_run,
+        )
+        .unwrap();
+        assert_eq!(
+            pre.action,
+            PreToolAction::Passthrough,
+            "PreTool Windows path ({tool_name}): {command}"
+        );
+
+        let post = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                tool_name: tool_name.to_string(),
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &win_opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            post.response.disposition,
+            Disposition::Passthrough,
+            "PostTool Windows path ({tool_name}): {command}"
+        );
+        assert_eq!(post.response.output, payload, "{command}");
+    }
+}
+
+#[test]
+fn lint_rollout_covers_npm_and_pnpm_linter_invocations() {
+    let lint_native = RtkRolloutConfig {
+        lint: DomainRolloutMode::PosttoolNative,
+        build_test: DomainRolloutMode::PretoolRtk,
+        ..RtkRolloutConfig::default()
+    };
+    for (command, expect_native) in [
+        ("pnpm exec eslint src/", true),
+        ("npm run lint", true),
+        ("npm run lint:fix", true),
+        ("pnpm dlx tsc --noEmit", true),
+        ("npm exec biome check .", true),
+        ("pnpm run prettier --check .", true),
+        ("npm rum lint", true),
+        ("npx -y eslint src/", true),
+        ("npm run build", false),
+        ("pnpm test", false),
+    ] {
+        let req = bash_request(command);
+        let pre = pre_tool_with_options_and_rewriter(
+            &req,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &lint_native,
+            &[],
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            pre.action == PreToolAction::Passthrough,
+            expect_native,
+            "lint rollout: {command}"
+        );
+    }
+}
+
+#[test]
+fn exclude_commands_handles_utf8_names_powershell_casing_command_double_dash_and_quoted_fd() {
+    let payload = serde_json::to_string_pretty(
+        &(0..30)
+            .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let store: Arc<dyn StashStore> = Arc::new(ReadCountingStore::default());
+
+    // Non-ASCII 6-byte command names (`base.len() - 4` falls mid-codepoint)
+    // must never panic, both as commands and as exclusion entries.
+    let mut unicode_opts = options();
+    unicode_opts.exclude_commands = vec!["工具".to_string(), "custom-cli".to_string()];
+    for (command, expect_excluded) in [
+        ("工具 --json", true),
+        ("测试 --json", false),
+        ("command -- custom-cli --json", true),
+    ] {
+        let post = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &unicode_opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            post.response.disposition == Disposition::Passthrough,
+            expect_excluded,
+            "unicode/command-- exclusion: {command}"
+        );
+    }
+
+    // PowerShell executable matching is ASCII case-insensitive while POSIX stays case-sensitive.
+    let mut ps_opts = options();
+    ps_opts.exclude_commands = vec!["custom-cli".to_string()];
+    let ps_post = post_tool_with_store(
+        &PostToolRequest {
+            result_kind: ResultKind::Tool,
+            tool_name: "PowerShell".to_string(),
+            command: Some(r#"& "C:\Tools\CUSTOM-CLI.exe" --json"#.into()),
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                replace_with_text: true,
+            },
+            ..post_tool_request(&payload)
+        },
+        &ps_opts,
+        Some(&store),
+    )
+    .unwrap();
+    assert_eq!(ps_post.response.disposition, Disposition::Passthrough);
+
+    let posix_upper = post_tool_with_store(
+        &PostToolRequest {
+            result_kind: ResultKind::Tool,
+            tool_name: "Bash".to_string(),
+            command: Some("CUSTOM-CLI --json".into()),
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                replace_with_text: true,
+            },
+            ..post_tool_request(&payload)
+        },
+        &ps_opts,
+        Some(&store),
+    )
+    .unwrap();
+    assert_eq!(posix_upper.response.disposition, Disposition::Applied);
+
+    // Quoted numeric arguments before redirections (`jq '1'>&2`) must remain arguments.
+    let mut jq_opts = options();
+    jq_opts.exclude_commands = vec!["jq 1".to_string()];
+    let quoted_fd = post_tool_with_store(
+        &PostToolRequest {
+            result_kind: ResultKind::Tool,
+            command: Some("jq '1'>&2".into()),
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                replace_with_text: true,
+            },
+            ..post_tool_request(&payload)
+        },
+        &jq_opts,
+        Some(&store),
+    )
+    .unwrap();
+    assert_eq!(quoted_fd.response.disposition, Disposition::Passthrough);
+    assert_eq!(quoted_fd.response.output, payload);
+
+    // PowerShell backtick line continuation must not break multi-word exclusions.
+    let mut git_opts = options();
+    git_opts.exclude_commands = vec!["git status".to_string()];
+    for command in ["git `\nstatus", "git `\r\n status", "git`\nstatus"] {
+        let ps_cont = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                tool_name: "PowerShell".to_string(),
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &git_opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            ps_cont.response.disposition,
+            Disposition::Passthrough,
+            "PowerShell continuation: {command:?}"
+        );
+    }
+
+    // Windows executable paths route through `rtk_rollout` domains (whole compound native).
+    let vcs_native = RtkRolloutConfig {
+        vcs: DomainRolloutMode::PosttoolNative,
+        cloud_net: DomainRolloutMode::PretoolRtk,
+        ..RtkRolloutConfig::default()
+    };
+    let win_vcs = PreToolRequest {
+        tool_name: "PowerShell".to_string(),
+        arguments: json!({ "command": r#"C:\Tools\git.exe status; gh pr list"# }),
+        command_field: "command".to_string(),
+        capabilities: PreToolCapabilities {
+            replace_arguments: true,
+            block_and_suggest: false,
+            post_tool_replacement: PostToolReplacementCapability::FullRetrievable,
+        },
+    };
+    let win_vcs_resp = pre_tool_with_options_and_rewriter(
+        &win_vcs,
+        &Attribution::new("test"),
+        Some(Path::new("/opt/tokenless/tokenless")),
+        Some(Path::new("/tmp/tokenless-test")),
+        &vcs_native,
+        &[],
+        rtk_must_not_run,
+    )
+    .unwrap();
+    assert_eq!(win_vcs_resp.action, PreToolAction::Passthrough);
+
+    // Value-bearing npx flags (`--package jest`) must not misclassify the runner.
+    let npx_pkg = bash_request("npx --package jest node --version && git status");
+    let npx_pkg_resp = pre_tool_with_options_and_rewriter(
+        &npx_pkg,
+        &Attribution::new("test"),
+        Some(Path::new("/opt/tokenless/tokenless")),
+        Some(Path::new("/tmp/tokenless-test")),
+        &RtkRolloutConfig::default(),
+        &[],
+        |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+    )
+    .unwrap();
+    assert_eq!(npx_pkg_resp.action, PreToolAction::ReplaceArguments);
+}
+
+#[test]
+fn exclude_commands_and_rollout_cover_npx_inner_runners_and_windows_cmd_bat_ps1() {
+    let payload = serde_json::to_string_pretty(
+        &(0..30)
+            .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let store: Arc<dyn StashStore> = Arc::new(ReadCountingStore::default());
+
+    // `npx` / `pnpx` inner runners honor exclusions on both PreTool and PostTool,
+    // while value-bearing flags such as `--package eslint` never false-match.
+    let mut eslint_opts = options();
+    eslint_opts.exclude_commands = vec!["eslint".to_string()];
+    for (tool_name, command, expect_excluded) in [
+        ("Bash", "npx eslint src --format json", true),
+        ("Bash", "npx -y eslint src --format json", true),
+        ("Bash", "npx --yes -- eslint src --format json", true),
+        (
+            "Bash",
+            "npx --package=eslint eslint src --format json",
+            true,
+        ),
+        (
+            "Bash",
+            "npx -p @scope/pkg -p eslint -- eslint src --format json",
+            true,
+        ),
+        ("Bash", "pnpx eslint src --format json", true),
+        ("Bash", "timeout 30 npx -y eslint src --format json", true),
+        (
+            "PowerShell",
+            r#"& "C:\Program Files\nodejs\npx.cmd" -y eslint.cmd src --format json"#,
+            true,
+        ),
+        ("Bash", "npx --package eslint node script.js", false),
+        ("Bash", "npx --package=eslint node script.js", false),
+        ("Bash", "npx -p eslint", false),
+    ] {
+        let pre_req = PreToolRequest {
+            tool_name: tool_name.to_string(),
+            arguments: json!({ "command": command }),
+            command_field: "command".to_string(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+                post_tool_replacement: PostToolReplacementCapability::FullRetrievable,
+            },
+        };
+        let pre_resp = pre_tool_with_options_and_rewriter(
+            &pre_req,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &RtkRolloutConfig::default(),
+            &eslint_opts.exclude_commands,
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            pre_resp.action == PreToolAction::Passthrough,
+            expect_excluded,
+            "PreTool npx exclusion ({tool_name}): {command}"
+        );
+
+        let post_resp = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                tool_name: tool_name.to_string(),
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &eslint_opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            post_resp.response.disposition == Disposition::Passthrough,
+            expect_excluded,
+            "PostTool npx exclusion ({tool_name}): {command}"
+        );
+    }
+
+    // Distinct package and runner names (e.g. `npx --package=npm -- node`)
+    // resolve to the runner on both PreTool and PostTool without matching the
+    // package name itself.
+    let mut node_opts = options();
+    node_opts.exclude_commands = vec!["node".to_string()];
+    for (command, expect_excluded) in [
+        ("npx -- node -e 'console.log(1)'", true),
+        ("npx --package=npm -- node -e 'console.log(1)'", true),
+        ("npx -p npm --yes node -e 'console.log(1)'", true),
+        ("npx --package npm -q -- node -e 'console.log(1)'", true),
+        ("npx -p=npm node -e 'console.log(1)'", true),
+        ("npx --package=node npm --version", false),
+        ("npx --package", false),
+    ] {
+        let pre_req = bash_request(command);
+        let pre_resp = pre_tool_with_options_and_rewriter(
+            &pre_req,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &RtkRolloutConfig::default(),
+            &node_opts.exclude_commands,
+            |cmd| rtk::RewriteOutcome::Allow(format!("rtk {cmd}")),
+        )
+        .unwrap();
+        assert_eq!(
+            pre_resp.action == PreToolAction::Passthrough,
+            expect_excluded,
+            "PreTool npx --package exclusion: {command}"
+        );
+
+        let post_resp = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &node_opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            post_resp.response.disposition == Disposition::Passthrough,
+            expect_excluded,
+            "PostTool npx --package exclusion: {command}"
+        );
+    }
+
+    // Windows `.exe`, `.cmd`, `.bat`, and `.ps1` launcher extensions match both
+    // `exclude_commands` and `rtk_rollout` domain classification.
+    let mut win_opts = options();
+    win_opts.exclude_commands = vec!["custom-cli".to_string()];
+    for (tool_name, command) in [
+        ("PowerShell", r#"& C:\Tools\custom-cli.exe --json"#),
+        ("PowerShell", r#"& C:\Tools\custom-cli.cmd --json"#),
+        ("PowerShell", r#"& C:\Tools\custom-cli.bat --json"#),
+        ("PowerShell", r#"& C:\Tools\custom-cli.ps1 --json"#),
+        ("PowerShell", r#"& "C:\Tools\CUSTOM-CLI.CMD" --json"#),
+        ("Bash", "custom-cli.cmd --json"),
+        ("Bash", "C:/Tools/custom-cli.bat --json"),
+    ] {
+        let post_resp = post_tool_with_store(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                tool_name: tool_name.to_string(),
+                command: Some(command.into()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                ..post_tool_request(&payload)
+            },
+            &win_opts,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(
+            post_resp.response.disposition,
+            Disposition::Passthrough,
+            "Windows launcher exclusion ({tool_name}): {command}"
+        );
+    }
+
+    // Bare 4-byte dotfile names such as `.cmd` are not stripped to empty.
+    assert_eq!(super::normalized_exclude_executable(".cmd"), ".cmd");
+
+    // Windows `.cmd` / `.bat` shims route to the matching `rtk_rollout` domain.
+    let lint_native = RtkRolloutConfig {
+        lint: DomainRolloutMode::PosttoolNative,
+        ..RtkRolloutConfig::default()
+    };
+    for (tool_name, command) in [
+        ("PowerShell", r#"& C:\Tools\jest.cmd --ci"#),
+        ("Bash", "jest.cmd --ci"),
+        ("PowerShell", r#"& C:\Tools\eslint.bat src"#),
+        ("Bash", "npx.cmd -y eslint.cmd src"),
+    ] {
+        let req = PreToolRequest {
+            tool_name: tool_name.to_string(),
+            arguments: json!({ "command": command }),
+            command_field: "command".to_string(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+                post_tool_replacement: PostToolReplacementCapability::FullRetrievable,
+            },
+        };
+        let resp = pre_tool_with_options_and_rewriter(
+            &req,
+            &Attribution::new("test"),
+            Some(Path::new("/opt/tokenless/tokenless")),
+            Some(Path::new("/tmp/tokenless-test")),
+            &lint_native,
+            &[],
+            rtk_must_not_run,
+        )
+        .unwrap();
+        assert_eq!(
+            resp.action,
+            PreToolAction::Passthrough,
+            "Windows shim domain routing ({tool_name}): {command}"
+        );
+    }
 }

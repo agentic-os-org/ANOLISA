@@ -864,6 +864,8 @@ fn runtime_entry_options() -> EntryOptions {
         stash_enabled: true,
         rtk_launcher: None,
         rtk_data_dir: None,
+        rtk_rollout: RtkRolloutConfig::default(),
+        exclude_commands: config.exclude_commands,
     }
 }
 
@@ -1401,4 +1403,79 @@ fn runtime_honors_explicitly_disabled_retention_policy() {
             StatsRecorder::AUTO_RETENTION_INTERVAL as usize
         );
     }
+}
+
+#[test]
+fn runtime_post_tool_honors_exclude_commands() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = TokenlessRuntime::new(RuntimeConfig {
+        data_dir: Some(directory.path().to_path_buf()),
+        stats_enabled: false,
+        exclude_commands: vec!["custom-cli".to_string(), "cargo xtask".to_string()],
+        ..RuntimeConfig::default()
+    })
+    .unwrap();
+    let payload = serde_json::to_string_pretty(
+        &(0..30)
+            .map(|i| serde_json::json!({"index": i, "payload": "x".repeat(40)}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let attribution = ProtocolAttribution {
+        agent_id: "runtime-test".to_string(),
+        session_id: Some("exclude-session".to_string()),
+        tool_use_id: Some("call-1".to_string()),
+    };
+    let excluded = runtime
+        .post_tool(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                tool_name: "Bash".to_string(),
+                content: payload.clone(),
+                status: ToolResultStatus::Success,
+                content_origin: ContentOrigin::CommandOutput,
+                output_optimization: OutputOptimization::None,
+                command: Some("timeout 10 custom-cli --json".to_string()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                exit_code: None,
+                stderr: None,
+                original_command: None,
+                cwd: None,
+            },
+            &attribution,
+        )
+        .unwrap();
+    assert_eq!(excluded.disposition, Disposition::Passthrough);
+    assert_eq!(excluded.output, payload);
+    assert!(excluded.applied_operations.is_empty());
+
+    let compressed = runtime
+        .post_tool(
+            &PostToolRequest {
+                result_kind: ResultKind::Tool,
+                tool_name: "Bash".to_string(),
+                content: payload.clone(),
+                status: ToolResultStatus::Success,
+                content_origin: ContentOrigin::CommandOutput,
+                output_optimization: OutputOptimization::None,
+                command: Some("other-cli --json".to_string()),
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                    replace_with_text: true,
+                },
+                exit_code: None,
+                stderr: None,
+                original_command: None,
+                cwd: None,
+            },
+            &attribution,
+        )
+        .unwrap();
+    assert_eq!(compressed.disposition, Disposition::Applied);
+    assert!(compressed.output.len() < payload.len());
 }

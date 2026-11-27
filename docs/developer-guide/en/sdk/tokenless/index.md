@@ -338,14 +338,23 @@ The lifecycle SDK reads these environment defaults when constructing `TokenlessC
 | `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
 | `mixed_content_enabled` | `TOKENLESS_MIXED_CONTENT_ENABLED` | `False` |
 | `browser_snapshot_enabled` | `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | `True` |
+| `rtk_rollout` *(unreleased — source `main` / next release after `v0.9.7`)* | `~/.tokenless/config.json` / `TOKENLESS_RTK_ROLLOUT` | `RtkRolloutConfig()` (`search`/`build_test`: `posttool_native`; `vcs`/`lint`/`cloud_net`: `pretool_rtk`) |
+| `exclude_commands` *(unreleased — source `main` / next release after `v0.9.7`)* | `~/.tokenless/config.json` / `TOKENLESS_EXCLUDE_COMMANDS` | `()` |
 
-Explicit constructor arguments override the environment. Unset or empty values use the default;
-`1`, `true`, and `yes` enable the flag case-insensitively, and other values disable it.
-`compression_enabled=False` retains original output while recording eligible compression
-candidates (dry-run); it does not disable RTK. `mixed_content_enabled` enables the optional
-mixed-region route; when false, that route produces no candidates, including in dry-run mode.
-AgentScope and QwenPaw use these same defaults.
-The direct `TokenlessRuntime` API retains its explicit constructor configuration.
+Explicit constructor arguments override file and environment defaults. For Boolean environment
+variables, unset or empty values use the default; `1`, `true`, and `yes` enable the flag
+case-insensitively, and other values disable it. `rtk_rollout` (`RtkRolloutConfig` /
+`DomainRolloutMode`) and `exclude_commands` (command names or word prefixes excluded from both
+`pre_tool` RTK rewriting and `post_tool` command-output compression) are unreleased options
+available from a source build on `main` (not present in the `v0.9.3` wheel example above or
+releases up through `v0.9.7`): `TokenlessSdk` forwards both to the `pre_tool` child process and
+passes `exclude_commands` to the in-process `TokenlessRuntime`. `compression_enabled=False`
+retains original output while recording eligible compression candidates (dry-run); it does not
+disable RTK. `mixed_content_enabled` enables the optional mixed-region route; when false, that
+route produces no candidates, including in dry-run mode. AgentScope and QwenPaw use these same
+defaults. The direct `TokenlessRuntime` API retains its explicit constructor configuration
+(accepting `exclude_commands` for `post_tool`; `rtk_rollout` applies only to `TokenlessSdk` and
+the CLI `PreTool` path).
 
 ### Direct Runtime examples
 

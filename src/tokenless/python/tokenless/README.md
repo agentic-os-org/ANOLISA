@@ -70,7 +70,10 @@ optional `If needed` instructions.
 `original_command`, `cwd`) default to `None` (omitted on the wire when default). Passing
 `exit_code` on `ToolResultStatus.ERROR` opts into Level E1/E2 error-log compression; upgrade
 Core before or together with callers that populate non-default v2 fields, as Core rejects
-unknown request fields.
+unknown request fields. `TokenlessConfig.rtk_rollout` (`RtkRolloutConfig` / `DomainRolloutMode`)
+and `TokenlessConfig.exclude_commands` inherit `~/.tokenless/config.json` and
+`TOKENLESS_RTK_ROLLOUT` / `TOKENLESS_EXCLUDE_COMMANDS` defaults, applying explicit overrides
+consistently across `pre_tool` and in-process `post_tool`.
 
 The public `TokenlessStats` client provides typed, read-only status, summary, recent-record,
 record-detail, structured-diff, and session-comparison queries over the Runtime's `stats.db`.

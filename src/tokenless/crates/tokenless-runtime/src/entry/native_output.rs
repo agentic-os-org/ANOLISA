@@ -4,7 +4,9 @@
 
 use std::borrow::Cow;
 
-use super::{command_basename, is_environment_assignment};
+use super::{
+    command_basename, is_environment_assignment, normalized_exclude_executable, npx_runner_index,
+};
 
 struct ProcessWrapper {
     name: &'static str,
@@ -69,6 +71,10 @@ pub(super) struct UnwrappedCommand<'a> {
 }
 
 impl<'a> UnwrappedCommand<'a> {
+    pub(super) fn raw_executable(&self) -> &str {
+        &self.words[self.index]
+    }
+
     pub(super) fn executable(&self) -> &str {
         command_basename(&self.words[self.index])
     }
@@ -90,9 +96,131 @@ enum EnvStep<'a> {
     Expand { raw: &'a str, tail_start: usize },
 }
 
+fn is_npx_wrapper(word: &str) -> bool {
+    let exe = normalized_exclude_executable(word);
+    exe.eq_ignore_ascii_case("npx") || exe.eq_ignore_ascii_case("pnpx")
+}
+
 /// Identifies native search executables through the same transparent wrappers.
 pub(super) fn is_search(words: &[String]) -> bool {
     unwrap_transparent_prefix(words).is_some_and(|cmd| matches!(cmd.executable(), "grep" | "rg"))
+}
+
+/// Invokes `predicate` at each command position reached while stripping
+/// transparent wrappers (including wrapper-qualified forms such as
+/// `uv run pytest` and the final unwrapped command), stopping on the first
+/// match. Leading `VAR=val` assignments are skipped before each check.
+pub(super) fn any_unwrapped_command(
+    words: &[String],
+    mut predicate: impl FnMut(&str, &[String]) -> bool,
+) -> bool {
+    let mut current = Cow::Borrowed(words);
+    let mut index = 0;
+    let mut split_depth = 0;
+    while let Some(word) = current.get(index) {
+        if is_environment_assignment(word) {
+            index += 1;
+            continue;
+        }
+        let rest = &current[(index + 1).min(current.len())..];
+        if predicate(word, rest) {
+            return true;
+        }
+        if matches!(
+            command_basename(word),
+            "noglob" | "command" | "builtin" | "exec" | "nocorrect"
+        ) {
+            let accepts_end_of_options =
+                matches!(command_basename(word), "command" | "builtin" | "exec");
+            index += 1;
+            if accepts_end_of_options && current.get(index).is_some_and(|arg| arg == "--") {
+                index += 1;
+            }
+        } else if command_basename(word) == "env" {
+            index += 1;
+            while index < current.len() {
+                let step = {
+                    let word = current[index].as_str();
+                    if is_environment_assignment(word) {
+                        EnvStep::Advance(1)
+                    } else if word == "--" {
+                        index += 1;
+                        break;
+                    } else if word == "--split-string" {
+                        let Some(raw) = current.get(index + 1) else {
+                            return false;
+                        };
+                        EnvStep::Expand {
+                            raw: raw.as_str(),
+                            tail_start: index + 2,
+                        }
+                    } else if let Some(raw) = word.strip_prefix("--split-string=") {
+                        EnvStep::Expand {
+                            raw,
+                            tail_start: index + 1,
+                        }
+                    } else if word.starts_with("--") {
+                        EnvStep::Advance(1 + usize::from(matches!(word, "--unset" | "--chdir")))
+                    } else if let Some(cluster) = word.strip_prefix('-').filter(|r| !r.is_empty()) {
+                        match parse_env_short_cluster(cluster) {
+                            EnvShortCluster::FlagOnly => EnvStep::Advance(1),
+                            EnvShortCluster::ConsumesNextWord => EnvStep::Advance(2),
+                            EnvShortCluster::SplitInline(raw) => EnvStep::Expand {
+                                raw,
+                                tail_start: index + 1,
+                            },
+                            EnvShortCluster::SplitNextWord => {
+                                let Some(raw) = current.get(index + 1) else {
+                                    return false;
+                                };
+                                EnvStep::Expand {
+                                    raw: raw.as_str(),
+                                    tail_start: index + 2,
+                                }
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                };
+                match step {
+                    EnvStep::Advance(delta) => index += delta,
+                    EnvStep::Expand { raw, tail_start } => {
+                        if split_depth >= MAX_ENV_SPLIT_DEPTH {
+                            return false;
+                        }
+                        let Some(mut expanded) = split_env_s_words(raw) else {
+                            return false;
+                        };
+                        expanded.extend_from_slice(&current[tail_start..]);
+                        current = Cow::Owned(expanded);
+                        index = 0;
+                        split_depth += 1;
+                    }
+                }
+            }
+        } else if command_basename(word) == "uv"
+            && current.get(index + 1).is_some_and(|arg| arg == "run")
+        {
+            index += 2;
+        } else if is_npx_wrapper(word) {
+            let Some(offset) = npx_runner_index(rest) else {
+                return false;
+            };
+            index += 1 + offset;
+        } else if let Some(wrapper) = PROCESS_WRAPPERS
+            .iter()
+            .find(|wrapper| wrapper.name == command_basename(word))
+        {
+            let Some(inner) = wrapper_inner_index(wrapper, &current[index..]) else {
+                return false;
+            };
+            index += inner;
+        } else {
+            return false;
+        }
+    }
+    false
 }
 
 /// Strips transparent wrappers and returns the resolved executable and trailing arguments.
@@ -102,12 +230,14 @@ pub(super) fn unwrap_transparent_prefix(words: &[String]) -> Option<UnwrappedCom
     let mut split_depth = 0;
     while let Some(word) = current.get(index) {
         if is_environment_assignment(word)
-            || matches!(
-                command_basename(word),
-                "noglob" | "command" | "builtin" | "exec" | "nocorrect"
-            )
+            || matches!(command_basename(word), "noglob" | "nocorrect")
         {
             index += 1;
+        } else if matches!(command_basename(word), "command" | "builtin" | "exec") {
+            index += 1;
+            if current.get(index).is_some_and(|arg| arg == "--") {
+                index += 1;
+            }
         } else if command_basename(word) == "env" {
             index += 1;
             while index < current.len() {
