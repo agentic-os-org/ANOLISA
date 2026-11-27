@@ -11,6 +11,9 @@
 //! # Timing model
 //!
 //! - An agent step's `timestamp` marks the **end** of its LLM call.
+//! - Grouped agent steps may record later activity in `extra.end_timestamp`.
+//!   It extends the inference window for tool-less turns and bounds the next
+//!   turn's inferred start after recorded tool completions.
 //! - Producers may record the request **start** time in `extra.start_timestamp`
 //!   (ISO 8601). AgentSight's exporter always does.
 //! - Model inference time of a step = `end − start`. When `start_timestamp` is
@@ -246,7 +249,7 @@ impl AtifTrajectory {
         self.steps
             .iter()
             .filter(|step| step.is_copied_context != Some(true))
-            .flat_map(|s| [s.start_ts(), s.end_ts()])
+            .flat_map(|s| [s.start_ts(), s.end_ts().or_else(|| s.extra_end_ts())])
             .flatten()
             .min()
     }
@@ -257,12 +260,15 @@ impl AtifTrajectory {
             .iter()
             .filter(|step| step.is_copied_context != Some(true))
             .flat_map(|s| {
-                [s.start_ts(), s.end_ts()].into_iter().flatten().chain(
-                    s.calls()
-                        .iter()
-                        .flat_map(|call| [s.tool_start_ts(call), s.tool_result_ts(call)])
-                        .flatten(),
-                )
+                [s.start_ts(), s.activity_end_ts()]
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        s.calls()
+                            .iter()
+                            .flat_map(|call| [s.tool_start_ts(call), s.tool_result_ts(call)])
+                            .flatten(),
+                    )
             })
             .max()
     }
@@ -304,6 +310,22 @@ impl AtifStep {
     /// Step timestamp (agent steps: LLM call end).
     pub fn end_ts(&self) -> Option<DateTime<Utc>> {
         parse_ts(self.timestamp.as_deref()?)
+    }
+
+    /// Last recorded content in a grouped agent step.
+    pub(crate) fn extra_end_ts(&self) -> Option<DateTime<Utc>> {
+        if !self.is_agent() {
+            return None;
+        }
+        let end = parse_ts(self.extra.as_ref()?.get("end_timestamp")?.as_str()?)?;
+        self.end_ts()
+            .is_none_or(|start| end >= start)
+            .then_some(end)
+    }
+
+    /// Latest step content, independent of tool results.
+    pub(crate) fn activity_end_ts(&self) -> Option<DateTime<Utc>> {
+        self.extra_end_ts().or_else(|| self.end_ts())
     }
 
     /// LLM request start time from `extra.start_timestamp`, if recorded.
