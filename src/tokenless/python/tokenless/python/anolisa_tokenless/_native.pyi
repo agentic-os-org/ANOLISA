@@ -1,6 +1,9 @@
+from collections.abc import Sequence
 import os
 
 class TokenlessError(Exception): ...
+
+def _load_policy_config() -> str: ...
 
 class _StatsQuery:
     def __init__(self, data_dir: str | os.PathLike[str] | None = None) -> None: ...
@@ -60,6 +63,7 @@ class TokenlessRuntime:
         browser_snapshot_enabled: bool = True,
         stats_enabled: bool = True,
         sls_enabled: bool = False,
+        exclude_commands: Sequence[str] | None = None,
     ) -> None: ...
     def _before_model_json(
         self,

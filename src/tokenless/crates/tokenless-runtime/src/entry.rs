@@ -16,7 +16,7 @@ use tokenless_protocol::{
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::rtk_outcome::OutcomeStore;
-use tokenless_stats::{OperationType, StatsRecorder};
+use tokenless_stats::{DomainRolloutMode, OperationType, RtkRolloutConfig, StatsRecorder};
 
 use crate::post_tool::{self, PostToolPipeline, PostToolPipelineConfig};
 use crate::{
@@ -52,6 +52,11 @@ pub struct EntryOptions {
     pub rtk_launcher: Option<PathBuf>,
     /// Resolved state directory propagated to RTK commands.
     pub rtk_data_dir: Option<PathBuf>,
+    /// Per-domain PreTool RTK vs. PostTool native rollout switches.
+    pub rtk_rollout: RtkRolloutConfig,
+    /// Command names or word prefixes excluded from both PreTool RTK rewriting
+    /// and PostTool output compression.
+    pub exclude_commands: Vec<String>,
 }
 
 /// Runtime-only facts used for statistics recording.
@@ -115,11 +120,13 @@ pub fn dispatch_with_store(
                 )
             }
             Request::PreTool(request) => (
-                Response::PreTool(pre_tool_with_rewriter(
+                Response::PreTool(pre_tool_with_options_and_rewriter(
                     request,
                     &envelope.attribution,
                     options.rtk_launcher.as_deref(),
                     options.rtk_data_dir.as_deref(),
+                    &options.rtk_rollout,
+                    &options.exclude_commands,
                     |command| rtk_rewrite(options.rtk_launcher.as_deref(), command),
                 )?),
                 None,
@@ -349,11 +356,32 @@ fn warn_launcher_gone(path: &Path) {
     });
 }
 
+#[cfg(test)]
 fn pre_tool_with_rewriter(
     request: &PreToolRequest,
     attribution: &Attribution,
     rtk_launcher: Option<&Path>,
     data_dir: Option<&Path>,
+    rewrite: impl FnOnce(&str) -> rtk::RewriteOutcome,
+) -> Result<PreToolResponse, RuntimeError> {
+    pre_tool_with_options_and_rewriter(
+        request,
+        attribution,
+        rtk_launcher,
+        data_dir,
+        &RtkRolloutConfig::default(),
+        &[],
+        rewrite,
+    )
+}
+
+fn pre_tool_with_options_and_rewriter(
+    request: &PreToolRequest,
+    attribution: &Attribution,
+    rtk_launcher: Option<&Path>,
+    data_dir: Option<&Path>,
+    rtk_rollout: &RtkRolloutConfig,
+    exclude_commands: &[String],
     rewrite: impl FnOnce(&str) -> rtk::RewriteOutcome,
 ) -> Result<PreToolResponse, RuntimeError> {
     let Some(arguments) = request.arguments.as_object() else {
@@ -368,8 +396,14 @@ fn pre_tool_with_rewriter(
     if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
         return Ok(pre_tool_passthrough(request));
     }
-    // Preserve native execution according to the host's PostTool replacement capability.
-    if keeps_command_native_for(command, request.capabilities.post_tool_replacement) {
+    // Preserve native execution according to exclusions, host replacement capability, and rollout.
+    if keeps_command_native_for_tool(
+        command,
+        &request.tool_name,
+        request.capabilities.post_tool_replacement,
+        rtk_rollout,
+        exclude_commands,
+    ) {
         return Ok(pre_tool_passthrough(request));
     }
     let rtk_launcher = rtk_launcher.ok_or(RuntimeError::RtkLauncherUnavailable)?;
@@ -456,13 +490,85 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
     }
 }
 
-#[cfg(test)]
-fn keeps_command_native(command: &str) -> bool {
-    keeps_command_native_for(command, PostToolReplacementCapability::FullRetrievable)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellSyntax {
+    Posix,
+    PowerShell,
 }
 
-fn keeps_command_native_for(command: &str, capability: PostToolReplacementCapability) -> bool {
-    command_has_segment(command, |words| segment_keeps_native_for(words, capability))
+fn shell_syntax_for_tool(tool_name: &str) -> ShellSyntax {
+    if tool_name.eq_ignore_ascii_case("PowerShell") || tool_name.eq_ignore_ascii_case("pwsh") {
+        ShellSyntax::PowerShell
+    } else {
+        ShellSyntax::Posix
+    }
+}
+
+#[cfg(test)]
+fn keeps_command_native(command: &str) -> bool {
+    keeps_command_native_for_tool(
+        command,
+        "Bash",
+        PostToolReplacementCapability::FullRetrievable,
+        &RtkRolloutConfig::default(),
+        &[],
+    )
+}
+
+fn keeps_command_native_for_tool(
+    command: &str,
+    tool_name: &str,
+    capability: PostToolReplacementCapability,
+    rtk_rollout: &RtkRolloutConfig,
+    exclude_commands: &[String],
+) -> bool {
+    let syntax = shell_syntax_for_tool(tool_name);
+    command_has_segment_with_syntax(command, syntax, |words| {
+        segment_keeps_native_for(words, syntax, capability, rtk_rollout, exclude_commands)
+    })
+}
+
+fn command_is_excluded(command: &str, tool_name: &str, exclude_commands: &[String]) -> bool {
+    if exclude_commands.is_empty() {
+        return false;
+    }
+    let syntax = shell_syntax_for_tool(tool_name);
+    command_has_segment_with_syntax(command, syntax, |words| {
+        segment_is_excluded(words, syntax, exclude_commands)
+    })
+}
+
+fn segment_is_excluded(words: &[String], syntax: ShellSyntax, exclude_commands: &[String]) -> bool {
+    if exclude_commands.is_empty() {
+        return false;
+    }
+    native_output::any_unwrapped_command(words, |executable, args| {
+        command_matches_exclude_list(executable, args, syntax, exclude_commands)
+    })
+}
+
+/// Returns whether a PostTool request matches `exclude_commands` and should
+/// pass through without touching Stash or running compressors.
+#[must_use]
+pub fn post_tool_command_is_excluded(
+    request: &PostToolRequest,
+    exclude_commands: &[String],
+) -> bool {
+    if exclude_commands.is_empty()
+        || !matches!(
+            request.content_origin,
+            ContentOrigin::CommandOutput | ContentOrigin::FileRead
+        )
+    {
+        return false;
+    }
+    request
+        .command
+        .as_deref()
+        .is_some_and(|command| command_is_excluded(command, &request.tool_name, exclude_commands))
+        || request.original_command.as_deref().is_some_and(|command| {
+            command_is_excluded(command, &request.tool_name, exclude_commands)
+        })
 }
 
 /// Uses the same shell segments and transparent wrappers as PreTool ownership.
@@ -496,24 +602,104 @@ fn is_tokenless_retrieve_command(command: &str) -> bool {
     })
 }
 
-fn command_has_segment(command: &str, mut matches_segment: impl FnMut(&[String]) -> bool) -> bool {
+fn command_has_segment(command: &str, matches_segment: impl FnMut(&[String]) -> bool) -> bool {
+    command_has_segment_with_syntax(command, ShellSyntax::Posix, matches_segment)
+}
+
+fn command_has_segment_with_syntax(
+    command: &str,
+    syntax: ShellSyntax,
+    mut matches_segment: impl FnMut(&[String]) -> bool,
+) -> bool {
     let mut words = Vec::new();
     let mut word = String::new();
     // Empty quoted words still consume wrapper arguments.
     let mut word_started = false;
+    let mut word_quoted_or_escaped = false;
     let mut quote = None;
     let mut escaped = false;
+    let mut expecting_redir_target = false;
+    let mut chars = command.chars().peekable();
 
-    for character in command.chars() {
+    let finish_word = |words: &mut Vec<String>,
+                       word: &mut String,
+                       word_started: &mut bool,
+                       word_quoted_or_escaped: &mut bool,
+                       expecting_redir_target: &mut bool| {
+        if *word_started {
+            let finished = std::mem::take(word);
+            *word_started = false;
+            *word_quoted_or_escaped = false;
+            if *expecting_redir_target {
+                *expecting_redir_target = false;
+            } else {
+                words.push(finished);
+            }
+        }
+    };
+
+    while let Some(character) = chars.next() {
         if escaped {
-            if character != '\n' {
-                word_started = true;
-                word.push(character);
+            match (syntax, quote) {
+                (ShellSyntax::Posix, Some('"')) => {
+                    if character != '\n' {
+                        word_started = true;
+                        word_quoted_or_escaped = true;
+                        // POSIX §2.2.3: inside double quotes, backslash escapes only
+                        // `$`, `` ` ``, `"`, `\`, and newline; keep literal `\` elsewhere
+                        // (such as Windows paths inside double quotes).
+                        if !matches!(character, '"' | '\\' | '$' | '`') {
+                            word.push('\\');
+                        }
+                        word.push(character);
+                    }
+                }
+                (ShellSyntax::PowerShell, _) => {
+                    if character == '\r' {
+                        if chars.peek() == Some(&'\n') {
+                            chars.next();
+                        }
+                        if quote.is_none() {
+                            finish_word(
+                                &mut words,
+                                &mut word,
+                                &mut word_started,
+                                &mut word_quoted_or_escaped,
+                                &mut expecting_redir_target,
+                            );
+                        }
+                    } else if character == '\n' {
+                        if quote.is_none() {
+                            finish_word(
+                                &mut words,
+                                &mut word,
+                                &mut word_started,
+                                &mut word_quoted_or_escaped,
+                                &mut expecting_redir_target,
+                            );
+                        }
+                    } else {
+                        word_started = true;
+                        word_quoted_or_escaped = true;
+                        word.push(character);
+                    }
+                }
+                (ShellSyntax::Posix, _) => {
+                    if character != '\n' {
+                        word_started = true;
+                        word_quoted_or_escaped = true;
+                        word.push(character);
+                    }
+                }
             }
             escaped = false;
             continue;
         }
-        if character == '\\' && quote != Some('\'') {
+        if syntax == ShellSyntax::Posix && character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if syntax == ShellSyntax::PowerShell && character == '`' && quote != Some('\'') {
             escaped = true;
             continue;
         }
@@ -527,23 +713,80 @@ fn command_has_segment(command: &str, mut matches_segment: impl FnMut(&[String])
         }
         if matches!(character, '\'' | '"') {
             word_started = true;
+            word_quoted_or_escaped = true;
             quote = Some(character);
         } else if character.is_whitespace() {
-            if word_started {
-                words.push(std::mem::take(&mut word));
-                word_started = false;
-            }
-            if character == '\n' && matches_segment(&words) {
-                return true;
-            }
+            finish_word(
+                &mut words,
+                &mut word,
+                &mut word_started,
+                &mut word_quoted_or_escaped,
+                &mut expecting_redir_target,
+            );
             if character == '\n' {
+                expecting_redir_target = false;
+                if matches_segment(&words) {
+                    return true;
+                }
                 words.clear();
             }
-        } else if matches!(character, '&' | '|' | ';' | '(' | ')') {
-            if word_started {
-                words.push(std::mem::take(&mut word));
+        } else if matches!(character, '<' | '>') {
+            // An unquoted, unescaped pure-digit token immediately before `<` or `>`
+            // (e.g. `2>err.log`) is a file-descriptor prefix, not a command word.
+            if word_started
+                && !word_quoted_or_escaped
+                && !expecting_redir_target
+                && !word.is_empty()
+                && word.bytes().all(|b| b.is_ascii_digit())
+            {
+                word.clear();
                 word_started = false;
+                word_quoted_or_escaped = false;
+            } else {
+                finish_word(
+                    &mut words,
+                    &mut word,
+                    &mut word_started,
+                    &mut word_quoted_or_escaped,
+                    &mut expecting_redir_target,
+                );
             }
+            if character == '<' && chars.peek() == Some(&'<') {
+                chars.next();
+                if matches!(chars.peek(), Some('<' | '-')) {
+                    chars.next();
+                }
+            } else if (character == '>' && matches!(chars.peek(), Some('>' | '|')))
+                || (character == '<' && chars.peek() == Some(&'>'))
+            {
+                chars.next();
+            }
+            if chars.peek() == Some(&'&') {
+                chars.next();
+            }
+            expecting_redir_target = true;
+        } else if character == '&' && chars.peek() == Some(&'>') {
+            finish_word(
+                &mut words,
+                &mut word,
+                &mut word_started,
+                &mut word_quoted_or_escaped,
+                &mut expecting_redir_target,
+            );
+            chars.next();
+            if chars.peek() == Some(&'>') {
+                chars.next();
+            }
+            expecting_redir_target = true;
+        } else if matches!(character, '&' | '|' | ';' | '(' | ')') {
+            finish_word(
+                &mut words,
+                &mut word,
+                &mut word_started,
+                &mut word_quoted_or_escaped,
+                &mut expecting_redir_target,
+            );
+            expecting_redir_target = false;
             if matches_segment(&words) {
                 return true;
             }
@@ -553,9 +796,22 @@ fn command_has_segment(command: &str, mut matches_segment: impl FnMut(&[String])
             word.push(character);
         }
     }
-    if word_started {
-        words.push(word);
+    if escaped {
+        word_started = true;
+        word_quoted_or_escaped = true;
+        word.push(if syntax == ShellSyntax::PowerShell {
+            '`'
+        } else {
+            '\\'
+        });
     }
+    finish_word(
+        &mut words,
+        &mut word,
+        &mut word_started,
+        &mut word_quoted_or_escaped,
+        &mut expecting_redir_target,
+    );
     matches_segment(&words)
 }
 
@@ -564,6 +820,9 @@ enum CommandDomain {
     SourcePreview,
     Search,
     BuildTest,
+    Vcs,
+    Lint,
+    CloudNet,
     Other,
 }
 
@@ -587,30 +846,38 @@ fn classify_command_domain(executable: &str, arguments: &[String]) -> CommandDom
             }
         }
         "pytest" => CommandDomain::BuildTest,
-        executable if is_python_executable(executable) => {
-            if matches!(
-                arguments,
-                [module, runner, ..] if module == "-m" && runner == "pytest"
-            ) {
+        executable if is_python_executable(executable) => match arguments {
+            [module, runner, ..] if module == "-m" && runner == "pytest" => {
                 CommandDomain::BuildTest
-            } else {
-                CommandDomain::Other
             }
-        }
+            [module, runner, ..]
+                if module == "-m"
+                    && matches!(runner.as_str(), "ruff" | "pylint" | "mypy" | "black") =>
+            {
+                CommandDomain::Lint
+            }
+            _ => CommandDomain::Other,
+        },
         "npm" | "pnpm" => {
             if package_command_is_build_log_owned(arguments) {
                 CommandDomain::BuildTest
+            } else if package_command_is_lint_owned(arguments) {
+                CommandDomain::Lint
             } else {
                 CommandDomain::Other
             }
         }
-        "npx" | "pnpx" => {
-            if arguments.first().is_some_and(|runner| runner == "jest") {
-                CommandDomain::BuildTest
-            } else {
-                CommandDomain::Other
-            }
-        }
+        "npx" | "pnpx" => match first_npx_runner(arguments) {
+            Some(runner) => match normalized_exclude_executable(runner)
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "jest" => CommandDomain::BuildTest,
+                name if is_js_linter_name(name) => CommandDomain::Lint,
+                _ => CommandDomain::Other,
+            },
+            None => CommandDomain::Other,
+        },
         "jest" => CommandDomain::BuildTest,
         "go" => {
             if matches!(
@@ -623,25 +890,177 @@ fn classify_command_domain(executable: &str, arguments: &[String]) -> CommandDom
             }
         }
         "make" | "gmake" => CommandDomain::BuildTest,
+        "git" | "diff" | "gt" | "yadm" => CommandDomain::Vcs,
+        "eslint" | "biome" | "ruff" | "pylint" | "mypy" | "golangci-lint" | "tsc" | "prettier"
+        | "black" | "rubocop" | "phpstan" | "sqlfluff" | "oxlint" => CommandDomain::Lint,
+        "gh" | "glab" | "docker" | "kubectl" | "oc" | "aws" | "curl" | "wget" | "psql" | "helm"
+        | "terraform" => CommandDomain::CloudNet,
         _ => CommandDomain::Other,
     }
 }
 
-fn segment_keeps_native_for(words: &[String], capability: PostToolReplacementCapability) -> bool {
+pub(super) fn normalized_exclude_executable(command: &str) -> &str {
+    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let bytes = base.as_bytes();
+    // Comparing raw bytes avoids indexing into a multi-byte UTF-8 character;
+    // when a 4-byte ASCII Windows launcher suffix matches, `bytes.len() - 4`
+    // is guaranteed to sit on a UTF-8 character boundary. Require `len > 4` so
+    // bare dotfiles such as `.cmd` are not stripped to an empty string.
+    if bytes.len() > 4 {
+        let suffix = &bytes[bytes.len() - 4..];
+        if suffix.eq_ignore_ascii_case(b".exe")
+            || suffix.eq_ignore_ascii_case(b".cmd")
+            || suffix.eq_ignore_ascii_case(b".bat")
+            || suffix.eq_ignore_ascii_case(b".ps1")
+        {
+            return &base[..base.len() - 4];
+        }
+    }
+    base
+}
+
+fn command_matches_exclude_list(
+    executable: &str,
+    arguments: &[String],
+    syntax: ShellSyntax,
+    exclude_commands: &[String],
+) -> bool {
+    let executable = normalized_exclude_executable(executable);
+    exclude_commands.iter().any(|entry| {
+        let mut parts = entry.split_whitespace();
+        let Some(first) = parts.next() else {
+            return false;
+        };
+        let pattern_exe = normalized_exclude_executable(first);
+        let matches_exe = match syntax {
+            ShellSyntax::PowerShell => pattern_exe.eq_ignore_ascii_case(executable),
+            ShellSyntax::Posix => pattern_exe == executable,
+        };
+        if !matches_exe {
+            return false;
+        }
+        parts
+            .enumerate()
+            .all(|(index, pattern)| arguments.get(index).is_some_and(|arg| arg == pattern))
+    })
+}
+
+fn segment_keeps_native_for(
+    words: &[String],
+    syntax: ShellSyntax,
+    capability: PostToolReplacementCapability,
+    rtk_rollout: &RtkRolloutConfig,
+    exclude_commands: &[String],
+) -> bool {
+    if segment_is_excluded(words, syntax, exclude_commands) {
+        return true;
+    }
     let Some(unwrapped) = native_output::unwrap_transparent_prefix(words) else {
         return false;
     };
-    let domain = classify_command_domain(unwrapped.executable(), unwrapped.args());
+    let raw_executable = unwrapped.raw_executable();
+    let normalized_exe = normalized_exclude_executable(raw_executable);
+    let domain = if syntax == ShellSyntax::PowerShell
+        || raw_executable.contains('\\')
+        || normalized_exe.len() != unwrapped.executable().len()
+    {
+        let normalized = normalized_exe.to_ascii_lowercase();
+        classify_command_domain(&normalized, unwrapped.args())
+    } else {
+        classify_command_domain(unwrapped.executable(), unwrapped.args())
+    };
     match capability {
         PostToolReplacementCapability::None => false,
-        PostToolReplacementCapability::LosslessOnly => {
-            matches!(domain, CommandDomain::SourcePreview | CommandDomain::Search)
-        }
-        PostToolReplacementCapability::FullRetrievable => matches!(
-            domain,
-            CommandDomain::SourcePreview | CommandDomain::Search | CommandDomain::BuildTest
-        ),
+        PostToolReplacementCapability::LosslessOnly => match domain {
+            CommandDomain::SourcePreview => true,
+            CommandDomain::Search => rtk_rollout.search == DomainRolloutMode::PosttoolNative,
+            CommandDomain::BuildTest
+            | CommandDomain::Vcs
+            | CommandDomain::Lint
+            | CommandDomain::CloudNet
+            | CommandDomain::Other => false,
+        },
+        PostToolReplacementCapability::FullRetrievable => match domain {
+            CommandDomain::SourcePreview => true,
+            CommandDomain::Search => rtk_rollout.search == DomainRolloutMode::PosttoolNative,
+            CommandDomain::BuildTest => rtk_rollout.build_test == DomainRolloutMode::PosttoolNative,
+            CommandDomain::Vcs => rtk_rollout.vcs == DomainRolloutMode::PosttoolNative,
+            CommandDomain::Lint => rtk_rollout.lint == DomainRolloutMode::PosttoolNative,
+            CommandDomain::CloudNet => rtk_rollout.cloud_net == DomainRolloutMode::PosttoolNative,
+            CommandDomain::Other => false,
+        },
     }
+}
+
+fn is_js_linter_name(name: &str) -> bool {
+    matches!(
+        name,
+        "eslint" | "biome" | "tsc" | "prettier" | "oxlint" | "lint"
+    )
+}
+
+/// Returns the index of the inner runner within `npx` / `pnpx` arguments,
+/// consuming known value-less flags and `--package` / `-p` package selectors
+/// so options such as `npx --package jest node` resolve to `node` without
+/// mistaking the package name for the runner.
+pub(super) fn npx_runner_index(arguments: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(arg) = arguments.get(index) {
+        if arg == "--" {
+            return (index + 1 < arguments.len()).then_some(index + 1);
+        }
+        if matches!(
+            arg.as_str(),
+            "-y" | "--yes" | "-q" | "--quiet" | "--no" | "--no-install"
+        ) {
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-p" | "--package") {
+            if index + 1 >= arguments.len() {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--package=") || arg.starts_with("-p=") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn first_npx_runner(arguments: &[String]) -> Option<&str> {
+    npx_runner_index(arguments).map(|index| arguments[index].as_str())
+}
+
+fn package_command_is_lint_owned(arguments: &[String]) -> bool {
+    let Some(action) = arguments.first().map(String::as_str) else {
+        return false;
+    };
+    if is_js_linter_name(action) {
+        return true;
+    }
+    if matches!(action, "exec" | "x" | "dlx") {
+        return arguments
+            .iter()
+            .skip(1)
+            .find(|word| !word.starts_with('-'))
+            .is_some_and(|runner| is_js_linter_name(runner));
+    }
+    if !matches!(action, "run" | "run-script" | "rum" | "urn") {
+        return false;
+    }
+    arguments
+        .iter()
+        .skip(1)
+        .find(|word| !word.starts_with('-'))
+        .is_some_and(|script| is_js_linter_name(script) || script.starts_with("lint:"))
 }
 
 fn package_command_is_build_log_owned(arguments: &[String]) -> bool {
@@ -1076,6 +1495,7 @@ pub(crate) fn post_tool_with_store(
                 .command
                 .as_deref()
                 .is_some_and(is_tokenless_retrieve_command))
+        || post_tool_command_is_excluded(request, &options.exclude_commands)
         || matches!(
             request.status,
             ToolResultStatus::Interrupted | ToolResultStatus::Denied

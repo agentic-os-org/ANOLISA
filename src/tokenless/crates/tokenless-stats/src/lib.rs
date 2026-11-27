@@ -33,7 +33,7 @@ pub use query::{
 
 pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_bytes};
 
-pub use config::TokenlessConfig;
+pub use config::{DomainRolloutMode, RtkRolloutConfig, TokenlessConfig};
 
 pub use diff::{
     DiffRecords, DiffReport, DiffSort, format_diff_report, record_report, session_report,

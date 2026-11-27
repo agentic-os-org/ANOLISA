@@ -158,10 +158,12 @@ requires full native input at middleware entry and lossless JSON candidate deliv
 checks transport behavior, not model answer quality or billing savings.
 
 The Python lifecycle configuration reads the global, search, HTML, and Diff environment switches
-at construction time. Explicit `TokenlessConfig` arguments win over environment defaults, and
-the resolved flags are passed to the in-process Runtime. This also covers QwenPaw and AgentScope;
-the direct Runtime constructor remains explicit. Diff is enabled by default, and disabling global
-compression selects dry-run without disabling PreTool RTK.
+as well as `~/.tokenless/config.json` / environment `rtk_rollout` and `exclude_commands` policy
+at construction time. Explicit `TokenlessConfig` arguments win over file/environment defaults:
+resolved flags and `exclude_commands` are passed to the in-process Runtime, and `rtk_rollout` /
+`exclude_commands` are forwarded to the `pre_tool` child process so CLI and SDK stay aligned.
+This also covers QwenPaw and AgentScope; the direct Runtime constructor remains explicit. Diff is
+enabled by default, and disabling global compression selects dry-run without disabling PreTool RTK.
 
 ## Build-log layout and progress
 

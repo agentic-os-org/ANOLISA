@@ -17,7 +17,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from anolisa_tokenless._native import TokenlessRuntime
+from anolisa_tokenless._native import TokenlessRuntime, _load_policy_config
 from anolisa_tokenless.stats import TokenlessStats
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +44,61 @@ class PostToolReplacementCapability(StrEnum):
     FULL_RETRIEVABLE = "full_retrievable"
     LOSSLESS_ONLY = "lossless_only"
     NONE = "none"
+
+
+class DomainRolloutMode(StrEnum):
+    """Per-domain routing switch between PreTool RTK and PostTool native execution."""
+
+    PRETOOL_RTK = "pretool_rtk"
+    POSTTOOL_NATIVE = "posttool_native"
+
+
+_RTK_ROLLOUT_DOMAINS = ("search", "vcs", "build_test", "lint", "cloud_net")
+
+
+@dataclass(frozen=True)
+class RtkRolloutConfig:
+    """Domain-level switches between PreTool RTK and PostTool native compression."""
+
+    search: DomainRolloutMode = DomainRolloutMode.POSTTOOL_NATIVE
+    vcs: DomainRolloutMode = DomainRolloutMode.PRETOOL_RTK
+    build_test: DomainRolloutMode = DomainRolloutMode.POSTTOOL_NATIVE
+    lint: DomainRolloutMode = DomainRolloutMode.PRETOOL_RTK
+    cloud_net: DomainRolloutMode = DomainRolloutMode.PRETOOL_RTK
+
+    def __post_init__(self) -> None:
+        for domain in _RTK_ROLLOUT_DOMAINS:
+            value = getattr(self, domain)
+            if not isinstance(value, DomainRolloutMode):
+                object.__setattr__(self, domain, DomainRolloutMode(value))
+
+    def as_dict(self) -> dict[str, str]:
+        """Serializes the five rollout domains using canonical snake_case wire values."""
+        return {domain: getattr(self, domain).value for domain in _RTK_ROLLOUT_DOMAINS}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RtkRolloutConfig:
+        """Constructs rollout switches from a partial or complete domain mapping."""
+        unknown = sorted((repr(k) for k in data if k not in _RTK_ROLLOUT_DOMAINS))
+        if unknown:
+            raise ValueError(f"unknown rtk_rollout domain(s): {', '.join(unknown)}")
+        defaults = cls()
+        return cls(
+            **{
+                domain: DomainRolloutMode(data.get(domain, getattr(defaults, domain)))
+                for domain in _RTK_ROLLOUT_DOMAINS
+            }
+        )
+
+
+_UNSET: Any = object()
+
+
+def _load_default_policy() -> tuple[RtkRolloutConfig, tuple[str, ...]]:
+    decoded = json.loads(_load_policy_config())
+    rollout = RtkRolloutConfig.from_dict(decoded.get("rtk_rollout") or {})
+    excluded = tuple(str(item) for item in (decoded.get("exclude_commands") or ()))
+    return rollout, excluded
 
 
 @dataclass(frozen=True)
@@ -217,6 +272,8 @@ class TokenlessConfig:
     browser_snapshot_enabled: bool = field(
         default_factory=lambda: _env_flag("TOKENLESS_BROWSER_SNAPSHOT_ENABLED", True)
     )
+    rtk_rollout: RtkRolloutConfig = _UNSET
+    exclude_commands: tuple[str, ...] = _UNSET
 
     def __post_init__(self) -> None:
         try:
@@ -228,6 +285,22 @@ class TokenlessConfig:
             if not data_dir.is_absolute():
                 raise ValueError("data_dir must be an absolute path")
             object.__setattr__(self, "data_dir", os.fspath(data_dir))
+        if self.rtk_rollout is _UNSET or self.exclude_commands is _UNSET:
+            default_rollout, default_excludes = _load_default_policy()
+            if self.rtk_rollout is _UNSET:
+                object.__setattr__(self, "rtk_rollout", default_rollout)
+            if self.exclude_commands is _UNSET:
+                object.__setattr__(self, "exclude_commands", default_excludes)
+        if isinstance(self.rtk_rollout, dict):
+            object.__setattr__(self, "rtk_rollout", RtkRolloutConfig.from_dict(self.rtk_rollout))
+        elif not isinstance(self.rtk_rollout, RtkRolloutConfig):
+            raise TypeError("rtk_rollout must be an RtkRolloutConfig or dict")
+        if isinstance(self.exclude_commands, (str, bytes)):
+            raise TypeError("exclude_commands must be a sequence of strings, not str or bytes")
+        normalized_excludes = tuple(self.exclude_commands)
+        if not all(isinstance(item, str) for item in normalized_excludes):
+            raise TypeError("exclude_commands entries must be strings")
+        object.__setattr__(self, "exclude_commands", normalized_excludes)
 
 
 @dataclass(frozen=True)
@@ -402,6 +475,7 @@ class TokenlessSdk:
             mixed_content_enabled=self.config.mixed_content_enabled,
             html_extraction_enabled=self.config.html_extraction_enabled,
             browser_snapshot_enabled=self.config.browser_snapshot_enabled,
+            exclude_commands=list(self.config.exclude_commands),
         )
         self._rtk_launcher = self._resolve_launcher() if self.config.rtk_enabled else None
         self._rewrite_failure_reported = False
@@ -469,7 +543,12 @@ class TokenlessSdk:
         ).encode("utf-8")
         try:
             output = await asyncio.to_thread(
-                _run_compress, self._rtk_launcher, envelope, self.runtime.data_dir
+                _run_compress,
+                self._rtk_launcher,
+                envelope,
+                self.runtime.data_dir,
+                rtk_rollout_json=_json_dumps(self.config.rtk_rollout.as_dict()),
+                exclude_commands_json=_json_dumps(list(self.config.exclude_commands)),
             )
             return _pre_tool_response(output)
         except _RewriteUnavailable as failure:
@@ -567,7 +646,14 @@ class _RewriteUnavailable(Exception):
     """PreTool produced no usable result, so the command runs unchanged."""
 
 
-def _run_compress(launcher: Path, envelope: bytes, data_dir: str) -> bytes:
+def _run_compress(
+    launcher: Path,
+    envelope: bytes,
+    data_dir: str,
+    *,
+    rtk_rollout_json: str | None = None,
+    exclude_commands_json: str | None = None,
+) -> bytes:
     """Returns the stdout of one `tokenless compress`, bounded by the PreTool deadline."""
     isolation: dict[str, Any]
     if sys.platform == "win32":
@@ -575,13 +661,18 @@ def _run_compress(launcher: Path, envelope: bytes, data_dir: str) -> bytes:
     else:
         # A new session is a new process group, which a timeout kills as a whole.
         isolation = {"start_new_session": True}
+    child_env = {**os.environ, "TOKENLESS_DATA_DIR": data_dir}
+    if rtk_rollout_json is not None:
+        child_env["TOKENLESS_RTK_ROLLOUT"] = rtk_rollout_json
+    if exclude_commands_json is not None:
+        child_env["TOKENLESS_EXCLUDE_COMMANDS"] = exclude_commands_json
     try:
         process = subprocess.Popen(
             [os.fspath(launcher), "compress"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "TOKENLESS_DATA_DIR": data_dir},
+            env=child_env,
             **isolation,
         )
     except OSError as error:

@@ -126,10 +126,12 @@ python3 tests/test-openclaw-gateway.py --image <fixed-image> --host-output-polic
 原生输入进入 middleware，并无损交付 JSON 候选。此测试验证传输行为，不验证模型
 回答质量或计费节省。
 
-Python 生命周期配置在构造时读取总开关、搜索、HTML 和 Diff 环境开关。显式
-`TokenlessConfig` 参数优先于环境默认值，解析后的开关传入进程内 Runtime，因此也覆盖
-QwenPaw 和 AgentScope；直接 Runtime 构造仍采用显式配置。Diff 默认开启，关闭压缩
-总开关只选择 dry-run，不会关闭 PreTool RTK。
+Python 生命周期配置在构造时读取总开关、搜索、HTML 和 Diff 环境开关，以及
+`~/.tokenless/config.json` 与环境变量中的 `rtk_rollout` 和 `exclude_commands` 策略。显式
+`TokenlessConfig` 参数优先于文件/环境默认值：解析后的开关与 `exclude_commands` 传入进程内
+Runtime，同时 `rtk_rollout` 与 `exclude_commands` 透传给 `pre_tool` 子进程，保证 CLI 与
+SDK 行为一致，也覆盖 QwenPaw 和 AgentScope；直接 Runtime 构造仍采用显式配置。Diff 默认开启，
+关闭压缩总开关只选择 dry-run，不会关闭 PreTool RTK。
 
 ## BuildLog 布局与进度
 

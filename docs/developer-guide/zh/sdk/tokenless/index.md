@@ -314,12 +314,19 @@ config = TokenlessConfig(
 | `diff_compression_enabled` | `TOKENLESS_DIFF_COMPRESSION_ENABLED` | `True` |
 | `mixed_content_enabled` | `TOKENLESS_MIXED_CONTENT_ENABLED` | `False` |
 | `browser_snapshot_enabled` | `TOKENLESS_BROWSER_SNAPSHOT_ENABLED` | `True` |
+| `rtk_rollout` *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | `~/.tokenless/config.json` / `TOKENLESS_RTK_ROLLOUT` | `RtkRolloutConfig()`（`search`/`build_test`：`posttool_native`；`vcs`/`lint`/`cloud_net`：`pretool_rtk`） |
+| `exclude_commands` *（未发布 — 仅源码 `main` / `v0.9.7` 之后版本）* | `~/.tokenless/config.json` / `TOKENLESS_EXCLUDE_COMMANDS` | `()` |
 
-显式构造参数优先于环境变量。未设置或空值采用默认值；`1`、`true`、`yes` 忽略大小写后
-启用，其他值关闭。`compression_enabled=False` 保留原始输出并记录符合条件的压缩候选
-（dry-run），不会关闭 RTK。`mixed_content_enabled` 启用可选的混合区域路由；设为 false
-时，该路由不生成候选，dry-run 模式下也一样。AgentScope 和 QwenPaw 继承相同默认值。
-直接调用 `TokenlessRuntime` 时仍使用其显式构造配置。
+显式构造参数优先于文件与环境变量默认值。布尔环境变量未设置或为空时采用默认值；`1`、`true`、
+`yes` 忽略大小写后启用，其他值关闭。`rtk_rollout`（`RtkRolloutConfig` / `DomainRolloutMode`）
+与 `exclude_commands`（同时跳过 `pre_tool` RTK 改写与 `post_tool` 命令输出压缩的命令名或词前缀）
+为未发布选项，仅存在于源码 `main` 构建中（上文 `v0.9.3` wheel 示例及截至 `v0.9.7` 的已发布版本不包含）：
+`TokenlessSdk` 将两者透传至 `pre_tool` 子进程，并将 `exclude_commands` 传入进程内 `TokenlessRuntime`。
+`compression_enabled=False` 保留原始输出并记录符合条件的压缩候选（dry-run），不会关闭 RTK。
+`mixed_content_enabled` 启用可选的混合区域路由；设为 false 时，该路由不生成候选，dry-run 模式下也一样。
+AgentScope 和 QwenPaw 继承相同默认值。直接调用 `TokenlessRuntime` 时仍使用其显式构造配置
+（接受用于 `post_tool` 的 `exclude_commands` 关键字参数；`rtk_rollout` 仅作用于 `TokenlessSdk` 与
+CLI `PreTool` 路径）。
 
 ### Runtime 直接调用示例
 

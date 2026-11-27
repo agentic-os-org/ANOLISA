@@ -3,8 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyValueError};
+use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyString};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokenless_protocol::{
@@ -14,9 +15,9 @@ use tokenless_runtime::{
     Attribution, CompressOptions, CompressResult, RuntimeConfig, TokenlessRuntime as NativeRuntime,
 };
 use tokenless_stats::{
-    DiffSort, StatsRecord, StatsRecorder, ensure_state_dir, format_compare_json,
-    format_summary_json, get_home_dir, record_report, resolve_data_dir, session_report,
-    tool_use_report, validate_data_dir, validate_database_path,
+    DiffSort, StatsRecord, StatsRecorder, TokenlessConfig as StatsConfig, ensure_state_dir,
+    format_compare_json, format_summary_json, get_home_dir, record_report, resolve_data_dir,
+    session_report, tool_use_report, validate_data_dir, validate_database_path,
 };
 
 create_exception!(_native, TokenlessError, PyException);
@@ -272,6 +273,29 @@ impl PyStatsQuery {
     }
 }
 
+fn parse_exclude_commands_arg(value: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
+    let Some(obj) = value else {
+        return Ok(Vec::new());
+    };
+    if obj.is_instance_of::<PyString>() || obj.is_instance_of::<PyBytes>() {
+        return Err(PyTypeError::new_err(
+            "exclude_commands must be a sequence of strings, not str or bytes",
+        ));
+    }
+    obj.extract::<Vec<String>>()
+}
+
+/// Load `rtk_rollout` and `exclude_commands` using the same file and environment precedence as the CLI.
+#[pyfunction]
+fn _load_policy_config(py: Python<'_>) -> PyResult<String> {
+    let config = py.allow_threads(StatsConfig::load_with_policy);
+    serde_json::to_string(&serde_json::json!({
+        "rtk_rollout": config.rtk_rollout,
+        "exclude_commands": config.exclude_commands,
+    }))
+    .map_err(|error| TokenlessError::new_err(error.to_string()))
+}
+
 #[pymethods]
 impl PyTokenlessRuntime {
     #[new]
@@ -289,7 +313,8 @@ impl PyTokenlessRuntime {
         html_extraction_enabled=true,
         browser_snapshot_enabled=true,
         stats_enabled=true,
-        sls_enabled=false
+        sls_enabled=false,
+        exclude_commands=None
     ))]
     fn new(
         data_dir: Option<PathBuf>,
@@ -301,7 +326,9 @@ impl PyTokenlessRuntime {
         browser_snapshot_enabled: bool,
         stats_enabled: bool,
         sls_enabled: bool,
+        exclude_commands: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        let exclude_commands = parse_exclude_commands_arg(exclude_commands)?;
         let inner = NativeRuntime::new(RuntimeConfig {
             data_dir,
             stats_enabled,
@@ -312,6 +339,7 @@ impl PyTokenlessRuntime {
             mixed_content_enabled,
             html_extraction_enabled,
             browser_snapshot_enabled,
+            exclude_commands,
         })
         .map_err(to_python_error)?;
         Ok(Self { inner })
@@ -606,6 +634,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTokenlessRuntime>()?;
     module.add_class::<PyCompressionResult>()?;
     module.add_class::<PyStatsQuery>()?;
+    module.add_function(wrap_pyfunction!(_load_policy_config, module)?)?;
     module.add("TokenlessError", module.py().get_type::<TokenlessError>())?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

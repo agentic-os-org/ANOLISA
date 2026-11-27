@@ -14,7 +14,7 @@ Environment variable > ~/.tokenless/config.json > default
 
 An empty environment variable is treated as unset. For Boolean environment variables, `1`, `true`, and `yes` are true, case-insensitively; any other non-empty value is false. Prefer explicit `true` or `false` values for readability. For retention day environment variables (`TOKENLESS_STATS_RETENTION_DAYS`, `TOKENLESS_STATS_TEXT_RETENTION_DAYS`), a positive integer sets the retention window in days, `0` disables retention (overriding `config.json`), and empty or non-integer values fall back to `config.json` or the default.
 
-There is one current implementation exception: when all five settings (`TOKENLESS_STATS_ENABLED`, `TOKENLESS_SLS_ENABLED`, `TOKENLESS_COMPRESSION_ENABLED`, `TOKENLESS_STATS_RETENTION_DAYS`, and `TOKENLESS_STATS_TEXT_RETENTION_DAYS`) are supplied as valid non-empty environment overrides, the config file is skipped completely because every setting is already determined. Otherwise, Tokenless reads `~/.tokenless/config.json` to fill any unset option.
+There is one implementation exception: on non-lifecycle commands (`compress-schema`, `compress-toon`, `stats status`, `before_model`, `retrieve`, and `TokenlessRuntime::new`), when all five base settings (`TOKENLESS_STATS_ENABLED`, `TOKENLESS_SLS_ENABLED`, `TOKENLESS_COMPRESSION_ENABLED`, `TOKENLESS_STATS_RETENTION_DAYS`, and `TOKENLESS_STATS_TEXT_RETENTION_DAYS`) are supplied as valid non-empty environment overrides, the config file is skipped because every setting used by the operation is already determined. For `PreTool`, `tokenless` skips `~/.tokenless/config.json` only when all five base variables, a complete five-domain `TOKENLESS_RTK_ROLLOUT`, and a valid `TOKENLESS_EXCLUDE_COMMANDS` are supplied via environment variables; for `PostTool`, it skips `~/.tokenless/config.json` once the five base variables and a valid `TOKENLESS_EXCLUDE_COMMANDS` are supplied (without requiring `TOKENLESS_RTK_ROLLOUT`). Otherwise, Tokenless reads `~/.tokenless/config.json` to fill any unset option.
 
 ## Configuration file
 
@@ -32,11 +32,19 @@ Complete example:
   "sls_enabled": true,
   "compression_enabled": true,
   "stats_retention_days": 30,
-  "stats_text_retention_days": 7
+  "stats_text_retention_days": 7,
+  "rtk_rollout": {
+    "search": "posttool_native",
+    "vcs": "pretool_rtk",
+    "build_test": "posttool_native",
+    "lint": "pretool_rtk",
+    "cloud_net": "pretool_rtk"
+  },
+  "exclude_commands": []
 }
 ```
 
-A missing, unreadable, or invalid JSON file is silently replaced by the built-in defaults (`true` for toggles, `30` days for `stats_retention_days`, and `7` days for `stats_text_retention_days`) in memory. Validate a manually edited file with:
+A missing or unreadable file uses the built-in defaults (`true` for toggles, `30` days for `stats_retention_days`, `7` days for `stats_text_retention_days`, default `rtk_rollout`, and `[]` for `exclude_commands`) in memory. Invalid JSON syntax or non-object files warn to `stderr` and fall back to defaults; an invalid individual field (such as a mistyped `rtk_rollout` mode, invalid retention window, or non-array `exclude_commands`) warns and resets only that field while preserving valid settings such as `stats_enabled: false`, `sls_enabled: false`, and `stats_retention_days: 0`. Validate a manually edited file with:
 
 ```bash
 jq . ~/.tokenless/config.json
@@ -49,6 +57,10 @@ jq . ~/.tokenless/config.json
 | `compression_enabled` | `true` | Returns compressed output when true; false runs dry-run and returns the original |
 | `stats_retention_days` | `30` | Positive days enable sampled cleanup (every 64 rows across CLI compression, `tokenless rtk`, and `TokenlessRuntime` / Python SDK) deleting expired `stats` rows, their `compression_artifacts`, and expired `retrieve_events`; set `0` or `null` to disable (unlimited) |
 | `stats_text_retention_days` | `7` | Positive days enable sampled cleanup clearing stored before/after text payloads on older `stats` rows while preserving numeric metrics and summaries; set `0` or `null` to disable (unlimited) |
+| `rtk_rollout` *(unreleased — source `main` / next release after `v0.9.7`)* | `search` & `build_test`: `posttool_native`; `vcs`, `lint`, `cloud_net`: `pretool_rtk` | Per-domain switch (`pretool_rtk` or `posttool_native`) controlling whether eligible hosts disable PreTool RTK rewriting for a command domain so raw output reaches PostTool, or keep PreTool RTK rewriting. Setting `posttool_native` only disables the PreTool rewrite; whether PostTool compresses the resulting output depends on existing native PostTool support for that format (outputs without a matching native compressor, such as plain `git status`, pass through unchanged instead of keeping RTK's rewrite reduction). `vcs` covers `git`/`diff`/`gt`/`yadm`; `cloud_net` covers `gh`/`glab`/`docker`/`kubectl`/`oc`/`aws`/`curl`/`wget`/`psql`/`helm`/`terraform`. Hosts without PostTool replacement (`none`) still keep RTK rewriting unless excluded via `exclude_commands`; `lossless_only` hosts only apply `posttool_native` to `search`. Released binaries up through `tokenless/v0.9.7` ignore this field. |
+| `exclude_commands` *(unreleased — source `main` / next release after `v0.9.7`)* | `[]` | Command names or word prefixes (e.g. `"custom-cli"`, `"cargo xtask"`, `"uv run pytest"`) skipped on **both** PreTool RTK rewriting and PostTool command-output compression (passing through unchanged on both success and error outputs). Matches transparent wrappers (including `env`, `timeout`, `uv run`, `npx`/`pnpx`) and Windows `.exe`/`.cmd`/`.bat`/`.ps1` launcher extensions. Released binaries up through `tokenless/v0.9.7` ignore this field. |
+
+`rtk_rollout` and `exclude_commands` (unreleased; available on source `main` and ignored by releases up through `v0.9.7`) can also be overridden via `TOKENLESS_RTK_ROLLOUT` (partial or full JSON object) and `TOKENLESS_EXCLUDE_COMMANDS` (JSON array of strings, including `[]` to clear file exclusions). Python `TokenlessConfig` inherits the same file and environment defaults (`rtk_rollout`, `exclude_commands`) and forwards explicit arguments to `pre_tool` and in-process `post_tool`; direct Rust `RuntimeConfig` and native `TokenlessRuntime` constructors remain explicit and accept `exclude_commands` for in-process `post_tool` (`rtk_rollout` only applies where `PreTool` runs).
 
 When Tokenless writes the configuration, it restricts the mode to `0600`. Confirm the mode after creating it manually:
 
@@ -361,6 +373,8 @@ Local region compression and reconstruction have been verified on finite samples
 | `TOKENLESS_COMPRESSION_ENABLED` | Override active compression | False is dry-run, not a full stop |
 | `TOKENLESS_STATS_RETENTION_DAYS` | Override row retention window in days for `stats.db` | Positive integer sets days; `0` disables (`config.json` overridden); invalid/empty falls back |
 | `TOKENLESS_STATS_TEXT_RETENTION_DAYS` | Override text-payload retention window in days for `stats.db` | Positive integer sets days; `0` disables (`config.json` overridden); invalid/empty falls back |
+| `TOKENLESS_RTK_ROLLOUT` | Override per-domain `rtk_rollout` routing (`pretool_rtk` / `posttool_native`) *(unreleased — source `main` / next release after `v0.9.7`)* | JSON object patching one or more of `search`, `vcs`, `build_test`, `lint`, `cloud_net`; invalid entries warn to `stderr` and are ignored |
+| `TOKENLESS_EXCLUDE_COMMANDS` | Override dual-end `exclude_commands` list *(unreleased — source `main` / next release after `v0.9.7`)* | JSON array of command names or word prefixes (`[]` clears file entries); invalid JSON warns to `stderr` and is ignored |
 | `TOKENLESS_DATA_DIR` | Directory containing `stats.db`, `stash.db` and `rtk-outcomes.db` | Any accessible absolute directory except filesystem root; no parent traversal |
 | `TOKENLESS_STATS_DB` | Override the statistics database | Must be under the real user home or selected data directory |
 | `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
@@ -419,7 +433,7 @@ them from source control or backups as required by your data policy.
 |------|--------------|-----------------|-----------|---------------|
 | Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | Default 30 days for rows/events and 7 days for stored text payloads (sampled cleanup every 64 rows across CLI compression, `tokenless rtk`, and `TokenlessRuntime` / Python SDK); override via `stats_retention_days` / `stats_text_retention_days` (`0` or `null` for unlimited) or manual `tokenless stats prune` / `clear` / `compact` | `tokenless stats disable` |
 | Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, complete object record arrays reduced to a sampled subset, deep subtrees, schema descriptions removed by truncation, build/log gaps, the complete original of rendered HTML pages, and each HTML value rendered inside JSON | One-hour TTL and 10,000 live entries; expired rows are purged lazily with non-blocking WAL checkpointing after batch or large-WAL purges | CLI: `--no-stash`; agent: disable the adapter |
-| Configuration | `~/.tokenless/config.json` | Three Boolean toggles and optional retention day settings | Persistent | Not applicable |
+| Configuration | `~/.tokenless/config.json` | Boolean toggles, optional retention day settings, `rtk_rollout`, and `exclude_commands` | Persistent | Not applicable |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | Metrics and identifiers, no compressed source text | Managed by SLS/Logtail infrastructure | `TOKENLESS_SLS_ENABLED=0` or config false |
 
 ### Sensitivity of local statistics

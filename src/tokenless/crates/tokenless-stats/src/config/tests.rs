@@ -217,6 +217,7 @@ fn test_all_envs_set_skips_file_read() {
             compression_enabled: Some("false"),
             stats_retention_days: Some("30"),
             stats_text_retention_days: Some("7"),
+            ..ConfigEnvOverrides::default()
         },
         Some(&path),
         |_p| {
@@ -544,6 +545,8 @@ struct ConfigPathEnvGuard {
     prev_compression: Option<std::ffi::OsString>,
     prev_retention: Option<std::ffi::OsString>,
     prev_text_retention: Option<std::ffi::OsString>,
+    prev_rollout: Option<std::ffi::OsString>,
+    prev_exclude: Option<std::ffi::OsString>,
 }
 
 impl ConfigPathEnvGuard {
@@ -560,12 +563,16 @@ impl ConfigPathEnvGuard {
         let prev_compression = std::env::var_os("TOKENLESS_COMPRESSION_ENABLED");
         let prev_retention = std::env::var_os("TOKENLESS_STATS_RETENTION_DAYS");
         let prev_text_retention = std::env::var_os("TOKENLESS_STATS_TEXT_RETENTION_DAYS");
+        let prev_rollout = std::env::var_os("TOKENLESS_RTK_ROLLOUT");
+        let prev_exclude = std::env::var_os("TOKENLESS_EXCLUDE_COMMANDS");
         unsafe {
             std::env::set_var("TOKENLESS_STATS_ENABLED", stats_env);
             std::env::set_var("TOKENLESS_SLS_ENABLED", sls_env);
             std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", compression_env);
             std::env::remove_var("TOKENLESS_STATS_RETENTION_DAYS");
             std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS");
+            std::env::remove_var("TOKENLESS_RTK_ROLLOUT");
+            std::env::remove_var("TOKENLESS_EXCLUDE_COMMANDS");
         }
         Self {
             _lock: lock,
@@ -574,6 +581,8 @@ impl ConfigPathEnvGuard {
             prev_compression,
             prev_retention,
             prev_text_retention,
+            prev_rollout,
+            prev_exclude,
         }
     }
 }
@@ -601,6 +610,14 @@ impl Drop for ConfigPathEnvGuard {
             match &self.prev_text_retention {
                 Some(v) => std::env::set_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS", v),
                 None => std::env::remove_var("TOKENLESS_STATS_TEXT_RETENTION_DAYS"),
+            }
+            match &self.prev_rollout {
+                Some(v) => std::env::set_var("TOKENLESS_RTK_ROLLOUT", v),
+                None => std::env::remove_var("TOKENLESS_RTK_ROLLOUT"),
+            }
+            match &self.prev_exclude {
+                Some(v) => std::env::set_var("TOKENLESS_EXCLUDE_COMMANDS", v),
+                None => std::env::remove_var("TOKENLESS_EXCLUDE_COMMANDS"),
             }
         }
     }
@@ -666,4 +683,276 @@ fn stats_disable_persist_keeps_file_compression_and_sls() {
     assert!(persist.is_stats_enabled());
     assert!(!persist.is_sls_enabled());
     assert!(!persist.is_compression_enabled());
+}
+
+#[test]
+fn rollout_and_exclude_commands_partial_deserialize_round_trip_and_persist_through_load_from_file()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let raw = r#"{
+        "stats_enabled": false,
+        "rtk_rollout": {
+            "search": "pretool_rtk",
+            "vcs": "posttool_native",
+            "cloud_net": "posttool_native"
+        },
+        "exclude_commands": ["custom-cli", "cargo xtask"]
+    }"#;
+    std::fs::write(&path, raw).unwrap();
+
+    let loaded = TokenlessConfig::load_with_envs_and_path(Some("1"), None, None, Some(&path));
+    assert!(loaded.is_stats_enabled());
+    assert_eq!(loaded.rtk_rollout.search, DomainRolloutMode::PretoolRtk);
+    assert_eq!(loaded.rtk_rollout.vcs, DomainRolloutMode::PosttoolNative);
+    assert_eq!(
+        loaded.rtk_rollout.build_test,
+        DomainRolloutMode::PosttoolNative
+    );
+    assert_eq!(loaded.rtk_rollout.lint, DomainRolloutMode::PretoolRtk);
+    assert_eq!(
+        loaded.rtk_rollout.cloud_net,
+        DomainRolloutMode::PosttoolNative
+    );
+    assert_eq!(loaded.exclude_commands, vec!["custom-cli", "cargo xtask"]);
+
+    let round_tripped: TokenlessConfig =
+        serde_json::from_str(&serde_json::to_string(&loaded).unwrap()).unwrap();
+    assert_eq!(round_tripped.rtk_rollout, loaded.rtk_rollout);
+    assert_eq!(round_tripped.exclude_commands, loaded.exclude_commands);
+
+    let _guard = ConfigPathEnvGuard::new(path, "1", "0", "0");
+    let from_file = TokenlessConfig::load_from_file();
+    assert!(!from_file.is_stats_enabled());
+    assert_eq!(from_file.rtk_rollout, loaded.rtk_rollout);
+    assert_eq!(from_file.exclude_commands, loaded.exclude_commands);
+}
+
+#[test]
+fn load_with_policy_keeps_file_rollout_and_exclusions_when_all_bool_envs_are_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "stats_enabled": false,
+            "sls_enabled": false,
+            "compression_enabled": false,
+            "rtk_rollout": {"vcs": "posttool_native", "lint": "posttool_native"},
+            "exclude_commands": ["custom-cli"]
+        }"#,
+    )
+    .unwrap();
+    let _guard = ConfigPathEnvGuard::new(path, "1", "1", "1");
+
+    let loaded = TokenlessConfig::load_with_policy();
+    assert!(loaded.is_stats_enabled());
+    assert!(loaded.is_sls_enabled());
+    assert!(loaded.is_compression_enabled());
+    assert_eq!(loaded.rtk_rollout.vcs, DomainRolloutMode::PosttoolNative);
+    assert_eq!(loaded.rtk_rollout.lint, DomainRolloutMode::PosttoolNative);
+    assert_eq!(loaded.exclude_commands, vec!["custom-cli"]);
+}
+
+#[test]
+fn rollout_and_exclude_env_overrides_patch_and_fail_open_on_invalid_json() {
+    let base = TokenlessConfig {
+        rtk_rollout: RtkRolloutConfig {
+            vcs: DomainRolloutMode::PosttoolNative,
+            ..RtkRolloutConfig::default()
+        },
+        exclude_commands: vec!["from-file".to_string()],
+        ..TokenlessConfig::default()
+    };
+
+    let patched = base.clone().apply_env_overrides(ConfigEnvOverrides {
+        rtk_rollout: Some(r#"{"lint":"posttool_native","search":"pretool_rtk"}"#),
+        exclude_commands: Some(r#"["from-env","cargo xtask"]"#),
+        ..ConfigEnvOverrides::default()
+    });
+    assert_eq!(patched.rtk_rollout.search, DomainRolloutMode::PretoolRtk);
+    assert_eq!(patched.rtk_rollout.vcs, DomainRolloutMode::PosttoolNative);
+    assert_eq!(patched.rtk_rollout.lint, DomainRolloutMode::PosttoolNative);
+    assert_eq!(patched.exclude_commands, vec!["from-env", "cargo xtask"]);
+
+    let cleared = base.clone().apply_env_overrides(ConfigEnvOverrides {
+        exclude_commands: Some("[]"),
+        ..ConfigEnvOverrides::default()
+    });
+    assert!(cleared.exclude_commands.is_empty());
+
+    let malformed = base.clone().apply_env_overrides(ConfigEnvOverrides {
+        rtk_rollout: Some(r#"{"vcs":"shadow_bypass"}"#),
+        exclude_commands: Some("not-json"),
+        ..ConfigEnvOverrides::default()
+    });
+    assert_eq!(malformed.rtk_rollout.vcs, DomainRolloutMode::PosttoolNative);
+    assert_eq!(malformed.exclude_commands, vec!["from-file"]);
+}
+
+#[test]
+fn invalid_rollout_mode_is_rejected_by_serde() {
+    let parsed = serde_json::from_str::<DomainRolloutMode>(r#""shadow_bypass""#);
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn invalid_policy_field_in_config_json_preserves_recording_opt_outs_and_other_valid_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "stats_enabled": false,
+            "sls_enabled": false,
+            "compression_enabled": false,
+            "stats_retention_days": 90,
+            "stats_text_retention_days": 0,
+            "rtk_rollout": {
+                "search": "post_tool_native",
+                "vcs": "posttool_native",
+                "unknown_domain": "pretool_rtk"
+            },
+            "exclude_commands": "not-an-array"
+        }"#,
+    )
+    .unwrap();
+
+    let loaded = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
+    assert!(!loaded.is_stats_enabled());
+    assert!(!loaded.is_sls_enabled());
+    assert!(!loaded.is_compression_enabled());
+    assert_eq!(loaded.stats_retention_days(), Some(90));
+    assert_eq!(loaded.stats_text_retention_days(), None);
+    // Valid sibling domain survives; only the typoed domain and invalid
+    // exclude_commands fall back to defaults.
+    assert_eq!(loaded.rtk_rollout.search, DomainRolloutMode::PosttoolNative);
+    assert_eq!(loaded.rtk_rollout.vcs, DomainRolloutMode::PosttoolNative);
+    assert!(loaded.exclude_commands.is_empty());
+}
+
+#[test]
+fn load_with_policy_skips_file_read_when_all_policy_envs_are_complete_and_reads_on_partial() {
+    let path = std::path::PathBuf::from("/nonexistent/path/config.json");
+    let read_attempted = std::cell::Cell::new(false);
+    let complete_rollout = r#"{"search":"pretool_rtk","vcs":"posttool_native","build_test":"pretool_rtk","lint":"posttool_native","cloud_net":"posttool_native"}"#;
+    let fast = TokenlessConfig::load_with_policy_and_file_reader(
+        ConfigEnvOverrides {
+            stats_enabled: Some("false"),
+            sls_enabled: Some("false"),
+            compression_enabled: Some("true"),
+            stats_retention_days: Some("14"),
+            stats_text_retention_days: Some("0"),
+            rtk_rollout: Some(complete_rollout),
+            exclude_commands: Some(r#"["custom-cli"]"#),
+        },
+        Some(&path),
+        |_p| {
+            read_attempted.set(true);
+            Ok(r#"{"stats_enabled":true,"sls_enabled":true}"#.to_string())
+        },
+    );
+    assert!(
+        !read_attempted.get(),
+        "complete env policy must skip config.json read"
+    );
+    assert!(!fast.is_stats_enabled());
+    assert!(!fast.is_sls_enabled());
+    assert!(fast.is_compression_enabled());
+    assert_eq!(fast.stats_retention_days(), Some(14));
+    assert_eq!(fast.stats_text_retention_days(), None);
+    assert_eq!(fast.rtk_rollout.search, DomainRolloutMode::PretoolRtk);
+    assert_eq!(fast.rtk_rollout.vcs, DomainRolloutMode::PosttoolNative);
+    assert_eq!(fast.rtk_rollout.build_test, DomainRolloutMode::PretoolRtk);
+    assert_eq!(fast.rtk_rollout.lint, DomainRolloutMode::PosttoolNative);
+    assert_eq!(
+        fast.rtk_rollout.cloud_net,
+        DomainRolloutMode::PosttoolNative
+    );
+    assert_eq!(fast.exclude_commands, vec!["custom-cli"]);
+
+    // Partial rollout env must still read config.json so remaining domains come from disk.
+    let partial_read = std::cell::Cell::new(false);
+    let partial = TokenlessConfig::load_with_policy_and_file_reader(
+        ConfigEnvOverrides {
+            stats_enabled: Some("true"),
+            sls_enabled: Some("true"),
+            compression_enabled: Some("true"),
+            stats_retention_days: Some("30"),
+            stats_text_retention_days: Some("7"),
+            rtk_rollout: Some(r#"{"lint":"posttool_native"}"#),
+            exclude_commands: Some(r#"["env-cli"]"#),
+        },
+        Some(&path),
+        |_p| {
+            partial_read.set(true);
+            Ok(r#"{"rtk_rollout":{"vcs":"posttool_native"}}"#.to_string())
+        },
+    );
+    assert!(
+        partial_read.get(),
+        "partial rollout env must still read config.json"
+    );
+    assert_eq!(partial.rtk_rollout.vcs, DomainRolloutMode::PosttoolNative);
+    assert_eq!(partial.rtk_rollout.lint, DomainRolloutMode::PosttoolNative);
+    assert_eq!(partial.exclude_commands, vec!["env-cli"]);
+}
+
+#[test]
+fn load_for_post_tool_skips_file_read_without_rollout_env() {
+    let path = std::path::PathBuf::from("/nonexistent/path/config.json");
+    let read_attempted = std::cell::Cell::new(false);
+    let fast = TokenlessConfig::load_for_post_tool_and_file_reader(
+        ConfigEnvOverrides {
+            stats_enabled: Some("false"),
+            sls_enabled: Some("false"),
+            compression_enabled: Some("true"),
+            stats_retention_days: Some("0"),
+            stats_text_retention_days: Some("3"),
+            rtk_rollout: None,
+            exclude_commands: Some(r#"["custom-cli"]"#),
+        },
+        Some(&path),
+        |_p| {
+            read_attempted.set(true);
+            Ok(r#"{"exclude_commands":["from-file"]}"#.to_string())
+        },
+    );
+    assert!(
+        !read_attempted.get(),
+        "PostTool fast path must not require TOKENLESS_RTK_ROLLOUT"
+    );
+    assert!(!fast.is_stats_enabled());
+    assert!(!fast.is_sls_enabled());
+    assert!(fast.is_compression_enabled());
+    assert_eq!(fast.stats_retention_days(), None);
+    assert_eq!(fast.stats_text_retention_days(), Some(3));
+    assert_eq!(fast.exclude_commands, vec!["custom-cli"]);
+
+    // Missing retention env must still read config.json so file-configured
+    // retention opt-outs remain effective on PostTool calls.
+    let retention_read = std::cell::Cell::new(false);
+    let with_file_retention = TokenlessConfig::load_for_post_tool_and_file_reader(
+        ConfigEnvOverrides {
+            stats_enabled: Some("true"),
+            sls_enabled: Some("true"),
+            compression_enabled: Some("true"),
+            stats_retention_days: None,
+            stats_text_retention_days: None,
+            rtk_rollout: None,
+            exclude_commands: Some(r#"["custom-cli"]"#),
+        },
+        Some(&path),
+        |_p| {
+            retention_read.set(true);
+            Ok(r#"{"stats_retention_days":0,"stats_text_retention_days":null}"#.to_string())
+        },
+    );
+    assert!(
+        retention_read.get(),
+        "PostTool must read config.json when retention envs are unset"
+    );
+    assert_eq!(with_file_retention.stats_retention_days(), None);
+    assert_eq!(with_file_retention.stats_text_retention_days(), None);
+    assert_eq!(with_file_retention.exclude_commands, vec!["custom-cli"]);
 }

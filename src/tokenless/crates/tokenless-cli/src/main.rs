@@ -803,7 +803,11 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // recovery is available. The pipeline substitutes an in-memory
             // store for candidate generation, so the persistent store receives
             // no Stash entries while the original result is emitted.
-            let config = TokenlessConfig::load();
+            let config = match &request.request {
+                Request::PreTool(_) => TokenlessConfig::load_with_policy(),
+                Request::PostTool(_) => TokenlessConfig::load_for_post_tool(),
+                Request::BeforeModel(_) | Request::Retrieve(_) => TokenlessConfig::load(),
+            };
             let database_paths = DatabasePathResolver::default();
             let compression_on = config.is_compression_enabled();
             let needs_stash = match &request.request {
@@ -814,7 +818,13 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                             tokenless_protocol::RecoveryMethod::Tool { .. }
                         )
                 }
-                Request::PostTool(value) => value.capabilities.recovery.is_available(),
+                Request::PostTool(value) => {
+                    value.capabilities.recovery.is_available()
+                        && !tokenless_runtime::post_tool_command_is_excluded(
+                            value,
+                            &config.exclude_commands,
+                        )
+                }
                 Request::Retrieve(_) => true,
                 Request::PreTool(_) => false,
             };
@@ -886,6 +896,8 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     stash_enabled: true,
                     rtk_launcher,
                     rtk_data_dir,
+                    rtk_rollout: config.rtk_rollout.clone(),
+                    exclude_commands: config.exclude_commands.clone(),
                 },
                 stash.as_ref(),
                 recorder.as_ref(),

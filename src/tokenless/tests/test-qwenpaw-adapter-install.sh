@@ -306,6 +306,10 @@ class TokenlessRuntime:
 
 class _StatsQuery:
     pass
+
+
+def _load_policy_config() -> str:
+    return "{}"
 NATIVE
     [ "${3:-0}" = "1" ] || return 0
     "$PYTHON3" - "$1/anolisa_tokenless/sdk.py" <<'PY'

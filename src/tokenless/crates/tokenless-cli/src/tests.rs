@@ -1480,6 +1480,7 @@ fn stats_persist_snapshot_enable_keeps_file_compression_and_sls() {
         compression_enabled: true,
         stats_retention_days: Some(30),
         stats_text_retention_days: Some(7),
+        ..TokenlessConfig::default()
     };
     let persisted = stats_persist_snapshot(file, true);
     assert!(persisted.stats_enabled);
