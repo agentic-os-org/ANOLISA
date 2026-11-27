@@ -67,6 +67,41 @@ class ReleaseCatalogCliTest(unittest.TestCase):
                 list(destination.rglob("SKILL.md")), [destination / manifest]
             )
 
+    def test_stage_excludes_python_bytecode_caches(self) -> None:
+        scripts = self.source / "devops/released/scripts"
+        pycache = scripts / "__pycache__"
+        pycache.mkdir(parents=True)
+        (scripts / "helper.py").write_text("print('ok')\n", encoding="utf-8")
+        (pycache / "helper.cpython-311.pyc").write_bytes(b"compiled")
+        (scripts / "legacy.pyc").write_bytes(b"compiled-pyc")
+        (scripts / "legacy.pyo").write_bytes(b"compiled-pyo")
+
+        for layout, prefix in (("source", "devops/released"), ("flat", "released")):
+            destination = self.source / ("staged-" + layout)
+            result = self.run_catalog(
+                "stage", str(self.source), str(destination), "--layout", layout
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            staged_files = {
+                path.relative_to(destination).as_posix()
+                for path in destination.rglob("*")
+            }
+            self.assertIn(prefix + "/scripts/helper.py", staged_files)
+            self.assertFalse(
+                any(
+                    "__pycache__" in item or item.endswith((".pyc", ".pyo"))
+                    for item in staged_files
+                ),
+                f"Python bytecode caches leaked into {layout} stage: {staged_files}",
+            )
+
+        (scripts / "linked.pyc").symlink_to(scripts / "helper.py")
+        bad = self.run_catalog(
+            "stage", str(self.source), str(self.source / "bad"), "--layout", "flat"
+        )
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("symlink", bad.stderr)
+
     def test_missing_action_reports_usage(self) -> None:
         result = self.run_catalog()
         self.assertEqual(result.returncode, 2)

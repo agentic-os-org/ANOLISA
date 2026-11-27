@@ -145,6 +145,8 @@ install: check-layout check-python
 			echo "error: duplicate skill directory name: $$skill_name" >&2; restore; \
 		fi; \
 		cp -pr "$$skill_dir" "$$stage/$$skill_name" || restore; \
+		find "$$stage/$$skill_name" -name __pycache__ -prune -exec rm -rf {} + || restore; \
+		find "$$stage/$$skill_name" -type f \( -name '*.pyc' -o -name '*.pyo' \) -exec rm -f {} + || restore; \
 		printf '%s\n' "$$skill_name" >> "$$stage/.names"; \
 	done < "$$stage/.sources"; \
 	printf '# skills_dir=%s\n' "$(SKILLS_DIR)" > "$(DESTDIR)$(MANIFEST).new" || restore; \
