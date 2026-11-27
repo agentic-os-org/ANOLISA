@@ -636,9 +636,17 @@ impl SslSniff {
                 };
                 if !reattach {
                     log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
-                    // Still record the pid→file association so detach_process
-                    // can track all pids referencing this file.
-                    attached_files.push(file);
+                    // Record the pid->file association only for attached or
+                    // scanning/queued-retry files so detach_process refcounting
+                    // and scan admission see every mapping pid without erasing
+                    // negatively-cached entries on process exit.
+                    record_already_traced_owner(
+                        &mut attached_files,
+                        file,
+                        self.attachments.contains_key(&file),
+                        self.scans.is_pending(file),
+                        self.scan_retry_after.contains_key(&file),
+                    );
                     continue;
                 }
                 // Build the replacement BEFORE dropping the old links: if the
@@ -2485,6 +2493,26 @@ fn forget_owners_after_failed_result(
 ) {
     if !has_attachment {
         forget_file_associations(pid_inodes, pending, file);
+    }
+}
+
+/// Record a `pid -> file` ownership entry when skipping an already-traced
+/// file without re-attaching.
+///
+/// Attached files need refcounted exit cleanup, and files with a queued scan
+/// or scan retry need admission tracking when that scan finishes. Negatively
+/// cached entries (`Untraceable`, `NoMarkers`, `NoOffsets`) hold neither links
+/// nor pending scans; attaching them to later pids causes `detach_process` to
+/// evict them from `traced_files` when those pids exit.
+fn record_already_traced_owner(
+    attached_files: &mut Vec<FileKey>,
+    file: FileKey,
+    has_attachment: bool,
+    has_pending_scan: bool,
+    has_queued_retry: bool,
+) {
+    if has_attachment || has_pending_scan || has_queued_retry {
+        attached_files.push(file);
     }
 }
 
@@ -4661,6 +4689,71 @@ mod tests {
             parse_reattach_ttl(Some("not-a-number")),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_BPF and CAP_PERFMON on an isolated test host"]
+    fn negative_cache_survives_reattach_sweep_and_detach() {
+        let guard = LEARNED_PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let learned_dir = tempfile::tempdir().unwrap();
+        let mut sniffer = sniffer_with_isolated_learned_cache(&guard, &learned_dir);
+
+        let fixture_dir = tempfile::tempdir().unwrap();
+        let fake_ssl = fixture_dir.path().join("libpython3.11-untraceable.so");
+        fs::write(&fake_ssl, vec![0u8; 4096]).unwrap();
+        let file = fs::File::open(&fake_ssl).unwrap();
+        use std::os::fd::AsRawFd;
+        // SAFETY: maps one valid page read-only and unmaps before returning.
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(addr, libc::MAP_FAILED, "mmap untraceable libssl fixture");
+        drop(file);
+
+        let key = fixture_file_key(&fake_ssl);
+        let pid = std::process::id() as i32;
+
+        sniffer.attach_process(pid).unwrap();
+        assert!(sniffer.traced_files.contains(&key));
+        assert!(!sniffer.attachments.contains_key(&key));
+
+        // Simulate a second process (or rescan sweep) discovering the same
+        // negatively-cached library before it exits.
+        sniffer.attach_process(pid).unwrap();
+        sniffer.detach_process(pid as u32);
+
+        // SAFETY: `addr` was returned by the matching 4096-byte `mmap` above.
+        unsafe {
+            libc::munmap(addr, 4096);
+        }
+
+        assert!(
+            sniffer.traced_files.contains(&key),
+            "detaching a later process must not erase negative cache for {key:?}"
+        );
+    }
+
+    #[test]
+    fn already_traced_owner_tracks_only_attached_or_pending_files() {
+        let negative_cached = (1, 100);
+        let attached = (1, 101);
+        let pending_scan = (1, 102);
+        let queued_retry = (1, 103);
+
+        let mut owners = Vec::new();
+        record_already_traced_owner(&mut owners, negative_cached, false, false, false);
+        record_already_traced_owner(&mut owners, attached, true, false, false);
+        record_already_traced_owner(&mut owners, pending_scan, false, true, false);
+        record_already_traced_owner(&mut owners, queued_retry, false, false, true);
+
+        assert_eq!(owners, vec![attached, pending_scan, queued_retry]);
     }
 }
 
