@@ -90,6 +90,21 @@ def load_task_yaml(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _service_audit_url(svc: dict, port_offset: int = 0) -> str:
+    """Derive a service's audit endpoint URL from its reset_endpoint."""
+    reset_ep = svc.get("reset_endpoint")
+    if not isinstance(reset_ep, str) or not reset_ep:
+        return ""
+    audit_url = reset_ep.rsplit("/reset", 1)[0] + "/audit"
+    if port_offset:
+        audit_url = re.sub(
+            r"localhost:(\d+)",
+            lambda m: f"localhost:{int(m.group(1)) + port_offset}",
+            audit_url,
+        )
+    return audit_url
+
+
 def fetch_audit_data(task: dict, port_offset: int = 0) -> dict[str, dict]:
     """Fetch audit data from all mock services declared in task.yaml.
 
@@ -98,25 +113,19 @@ def fetch_audit_data(task: dict, port_offset: int = 0) -> dict[str, dict]:
     the converter hits the correct audit endpoint.
     """
     audit_data = {}
-    services = task.get("services", [])
+    services = task.get("services") or []
 
     for svc in services:
-        reset_ep = svc.get("reset_endpoint")
-        if not reset_ep:
+        if not isinstance(svc, dict):
             continue
-        # Derive audit URL: replace /reset with /audit
-        audit_url = reset_ep.rsplit("/reset", 1)[0] + "/audit"
-        # Apply port offset for batch mode (port 9100 → 9100 + offset)
-        if port_offset:
-            audit_url = re.sub(
-                r"localhost:(\d+)",
-                lambda m: f"localhost:{int(m.group(1)) + port_offset}",
-                audit_url,
-            )
+        svc_name = svc.get("name")
+        audit_url = _service_audit_url(svc, port_offset=port_offset)
+        if not svc_name or not audit_url:
+            continue
         try:
             resp = httpx.get(audit_url, timeout=10)
             resp.raise_for_status()
-            audit_data[svc["name"]] = resp.json()
+            audit_data[svc_name] = resp.json()
         except Exception as e:
             print(f"[converter] WARN: Failed to fetch audit from {audit_url}: {e}", file=sys.stderr)
 
@@ -553,20 +562,21 @@ def convert_session_to_trace(
         audit_data = preloaded_audit_data
     else:
         audit_data = fetch_audit_data(task, port_offset=mock_port_offset)
+    service_audit_urls: dict[str, str] = {}
+    for svc in task.get("services") or []:
+        if not isinstance(svc, dict):
+            continue
+        svc_name = svc.get("name")
+        if svc_name and not service_audit_urls.get(svc_name):
+            service_audit_urls[svc_name] = _service_audit_url(
+                svc, port_offset=mock_port_offset
+            )
     for svc_name, svc_audit in audit_data.items():
-        audit_url = ""
-        for svc in task.get("services", []):
-            reset_ep = svc.get("reset_endpoint", "")
-            if reset_ep:
-                audit_url = reset_ep.rsplit("/reset", 1)[0] + "/audit"
-                if svc["name"] == svc_name:
-                    break
-
         output_events.append({
             "type": "audit_snapshot",
             "trace_id": trace_id,
             "service_name": svc_name,
-            "audit_url": audit_url,
+            "audit_url": service_audit_urls.get(svc_name, ""),
             "audit_data": svc_audit,
             "timestamp": now_iso(),
         })
