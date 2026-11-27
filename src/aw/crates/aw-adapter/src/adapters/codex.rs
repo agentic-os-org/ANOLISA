@@ -189,12 +189,6 @@ impl PreparedLaunch for Prepared {
         {
             return Err("Codex AW chains accept boolean Hooks or Providers; keep native Hooks in Codex configuration".into());
         }
-        if steps
-            .iter()
-            .any(|step| step.execution.replaces_result() && step.on_error != "withhold_result")
-        {
-            return Err("Codex result replacement requires on_error: withhold_result".into());
-        }
         routes(&self.input, steps)?;
         Ok(())
     }

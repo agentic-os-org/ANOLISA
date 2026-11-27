@@ -159,6 +159,7 @@ fn invoke(
                     }
                     std::io::stderr().write_all(&reply.stderr)?;
                     if event == "tool.after"
+                        && step.on_error == "withhold_result"
                         && route.replacement_step.as_deref() == Some(step.id.as_str())
                         && normalized["tool"].get("result_projection").is_none()
                     {

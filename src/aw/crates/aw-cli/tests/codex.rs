@@ -172,25 +172,58 @@ fn submission_denial_prevents_tool_execution_and_releases_event() {
 
 #[test]
 fn native_replacement_returns_feedback_to_codex() {
-    for (mode, reason, failure_action) in [
-        ("replace", "AW_REDACTED_RESULT", None),
-        ("replace-mcp", "AW_REDACTED_RESULT", None),
+    for (on_error, mode, expected_reply, failure_action) in [
         (
+            "withhold_result",
+            "replace",
+            json!({"continue":false,"reason":"AW_REDACTED_RESULT"}),
+            None,
+        ),
+        (
+            "withhold_result",
+            "replace-mcp",
+            json!({"continue":false,"reason":"AW_REDACTED_RESULT"}),
+            None,
+        ),
+        (
+            "withhold_result",
             "replace-mcp-failure",
-            "AW result withheld",
+            json!({"continue":false,"reason":"AW result withheld"}),
             Some("withhold_result"),
         ),
         (
+            "withhold_result",
             "replace-failure",
-            "AW result withheld",
+            json!({"continue":false,"reason":"AW result withheld"}),
             Some("withhold_result"),
         ),
+        (
+            "withhold_result",
+            "replace-media",
+            json!({"continue":false,"reason":"AW result withheld"}),
+            None,
+        ),
+        (
+            "report",
+            "replace",
+            json!({"continue":false,"reason":"AW_REDACTED_RESULT"}),
+            None,
+        ),
+        (
+            "report",
+            "replace-mcp",
+            json!({"continue":false,"reason":"AW_REDACTED_RESULT"}),
+            None,
+        ),
+        ("report", "replace-mcp-failure", json!({}), Some("report")),
+        ("report", "replace-failure", json!({}), Some("report")),
+        ("report", "replace-media", json!({}), None),
     ] {
         let f = Fixture::new();
         let mut doc = setup(&f);
         doc["spec"]["events"]["tool.after"]["steps"][0]["effects"] =
             json!(["observe", "replace_result"]);
-        doc["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!("withhold_result");
+        doc["spec"]["events"]["tool.after"]["steps"][0]["on_error"] = json!(on_error);
         f.save(&doc);
         let service = Service::start(&f, &doc);
         install(&f);
@@ -200,19 +233,19 @@ fn native_replacement_returns_feedback_to_codex() {
         let output = f.run(launch);
         assert!(
             output.status.success(),
-            "{}",
+            "{on_error}/{mode}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         let reply: Value =
             serde_json::from_str(result["results"][2]["stdout"].as_str().unwrap()).unwrap();
-        assert_eq!(reply, json!({"continue":false,"reason":reason}));
+        assert_eq!(reply, expected_reply, "{on_error}/{mode}");
         assert_eq!(
             fs::read_to_string(f.root.join("policy-calls")).unwrap(),
             "scan_prompt\nscan\nretry\nrecord\n"
         );
         service.released(&f);
-        if mode.starts_with("replace-mcp") {
+        if mode.starts_with("replace-mcp") || mode == "replace-media" {
             assert_eq!(result["response"]["isError"], false);
             assert_after_audit(&f, &result["response"], "success", failure_action);
         } else {
@@ -243,7 +276,6 @@ fn untrusted_disabled_and_unsupported_launches_never_start_tools() {
         "modified",
         "disabled",
         "version",
-        "replace",
         "native",
         "args",
         "args-login",
@@ -259,9 +291,6 @@ fn untrusted_disabled_and_unsupported_launches_never_start_tools() {
     ] {
         let f = Fixture::new();
         let mut doc = setup(&f);
-        if case == "replace" {
-            doc["spec"]["events"]["tool.after"]["steps"][0]["effects"] = json!(["replace_result"]);
-        }
         if case == "native" {
             doc["spec"]["providers"]["policy"]["protocol"] = json!("native-hook/v1alpha1");
             doc["spec"]["events"] = json!({"tool.before":{"enabled":true,"steps":[{"id":"native","provider":"policy","native":{},"on_error":"block"}]}});

@@ -62,9 +62,9 @@ Codex 可能在 AW 检查原始输入后执行其他 Hook 改写的参数。若�
 已有 PreToolUse Hook 可改写实际执行参数；AW 的检查仅对应原始输入。
 PostToolUse 记录完成事件。Codex 0.163.0 和 0.166.0 已验收示例中最后的
 `scan_tool_output` 步骤：检测到输出 PII 时返回 `replace_result`，替换普通模型请求中的文本。
-该步骤配置 `on_error: withhold_result`；
-Provider 失败或 Hook 结果缺少受支持的文本投影时，AW 返回固定 withheld 文本。已绑定的
-PostToolUse Hook 在回调准备失败时也会交付 withheld；超过 1 MiB 的 Hook 输入会在进入
+该步骤默认示例配置 `on_error: withhold_result`，在 Provider 失败或 Hook 结果缺少受支持的
+文本投影时返回固定 withheld 文本；也可按需配置 `on_error: report`，仅记录失败审计并放行原结果。
+已绑定的 PostToolUse Hook 在回调准备失败时仍会交付 withheld；超过 1 MiB 的 Hook 输入会在进入
 Provider 扫描前触发这一处理。
 启用替换时，启动准入拒绝 Code Mode 和其他 PostToolUse Hook。示例已设置
 `pii.output_mode: replace_result`；sec-core 对命中的 PII 交付固定 withheld 文本，
