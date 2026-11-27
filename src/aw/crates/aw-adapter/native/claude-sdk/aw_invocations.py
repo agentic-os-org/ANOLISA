@@ -142,6 +142,17 @@ class Invocations:
         entry.phase = phase
         return entry
 
+    def rejection_reason(self, call_id: str, name: str) -> str | None:
+        entry = self.active.get(call_id)
+        if entry is None or entry.phase != "rejected":
+            return None
+        self.check()
+        ticket = dispatch.get()
+        if (ticket is None or ticket.call_id != call_id or not ticket.entered
+                or ticket.execution != self.execution or entry.name != name):
+            raise CallbackFailure("AW rejected a mismatched tool callback")
+        return "Tool input exceeds the supported JSON depth or contains invalid Unicode"
+
     async def finish(self, entry: Invocation) -> None:
         if self.active.get(entry.call_id) is not entry:
             raise CallbackFailure("AW invocation already retired")
@@ -260,14 +271,14 @@ class Invocations:
                                 self.changed.clear()
                                 await self.changed.wait()
                         self.check()
-                        if entry.native_denied and block.get("is_error") is not True:
+                        if (entry.native_denied or entry.phase == "rejected") and block.get("is_error") is not True:
                             raise CallbackFailure("AW denied invocation returned a success result")
                         # CLI validation can fail before any Hook, and native
                         # permissions can deny after PreTool without a failure
                         # Hook. Only explicit errors may close those phases;
                         # a failed AW callback is still fenced by check() above.
                         native_error = block.get("is_error") is True and entry.phase in {
-                            "issued", "allowed"
+                            "issued", "allowed", "rejected"
                         }
                         if native_error:
                             await self.finish(entry)

@@ -90,6 +90,12 @@ class ResidentBridge(Bridge):
                 tool_use_id is not None and payload.get("tool_use_id") != tool_use_id
             ):
                 raise CallbackFailure("task identity or lifecycle failure")
+            if reason := self.invocations.rejection_reason(tool_use_id, payload["tool_name"]):
+                if event == "tool.before":
+                    return _deny(reason)
+                if payload.get("hook_event_name") == "PostToolUseFailure":
+                    return {}
+                raise CallbackFailure("AW rejected invocation reported completion")
             # Managed handlers own both AW phases; preserve caller/native Hooks
             # while avoiding a second invocation with incomplete MCP error data.
             if payload.get("tool_name") in self.mcp_names:
