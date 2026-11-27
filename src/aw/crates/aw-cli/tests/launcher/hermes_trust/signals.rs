@@ -88,28 +88,7 @@ else:
             for file in [&python, &hermes, &git] {
                 fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
             }
-            let plugin = profile.join("plugins/aw-native-hooks");
-            fs::create_dir_all(&plugin).unwrap();
-            for directory in [profile.join("plugins"), plugin.clone()] {
-                fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../aw-adapter/native/hermes");
-            for name in [
-                "plugin.yaml",
-                "__init__.py",
-                "aw_gateway.py",
-                "aw_gateway_attach.py",
-                "aw_gateway_lifecycle.py",
-                "aw_identity.py",
-                "aw_result.py",
-                "aw_sdk_attach.py",
-                "aw_skill.py",
-            ] {
-                fs::copy(source.join(name), plugin.join(name)).unwrap();
-                fs::set_permissions(plugin.join(name), fs::Permissions::from_mode(0o600)).unwrap();
-            }
-            fs::write(plugin.join(".aw-owned"), "aw-hermes-plugin/v1alpha1\n").unwrap();
+            super::copy_hermes_plugin(&profile, 0o755);
             let installing = !probe.starts_with("run-");
             let original = if installing {
                 r#"{"plugins":{"enabled":[],"disabled":["aw-native-hooks"]},"unknown":"keep"}"#
@@ -117,9 +96,11 @@ else:
                 r#"{"plugins":{"enabled":["aw-native-hooks"]},"unknown":"keep"}"#
             };
             fs::write(profile.join("config.yaml"), original).unwrap();
-            for file in [plugin.join(".aw-owned"), profile.join("config.yaml")] {
-                fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
-            }
+            fs::set_permissions(
+                profile.join("config.yaml"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
             let mut document = fixture.document();
             document["spec"]["agents"] =
                 json!({"hermes":{"adapter":"hermes","argv":[hermes,"chat"]}});

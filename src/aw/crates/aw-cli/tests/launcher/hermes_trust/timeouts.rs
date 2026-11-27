@@ -87,29 +87,7 @@ elif 'config' in sys.argv and '--get' in sys.argv:
         fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
-    let plugin = profile.join("plugins/aw-native-hooks");
-    fs::create_dir_all(&plugin).unwrap();
-    for directory in [profile.join("plugins"), plugin.clone()] {
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let bundled =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aw-adapter/native/hermes");
-    for name in [
-        "plugin.yaml",
-        "__init__.py",
-        "aw_gateway.py",
-        "aw_gateway_attach.py",
-        "aw_gateway_lifecycle.py",
-        "aw_identity.py",
-        "aw_result.py",
-        "aw_sdk_attach.py",
-        "aw_skill.py",
-    ] {
-        fs::copy(bundled.join(name), plugin.join(name)).unwrap();
-        fs::set_permissions(plugin.join(name), fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    fs::write(plugin.join(".aw-owned"), "aw-hermes-plugin/v1alpha1\n").unwrap();
-    fs::set_permissions(plugin.join(".aw-owned"), fs::Permissions::from_mode(0o600)).unwrap();
+    super::copy_hermes_plugin(&profile, 0o700);
     fs::write(
         profile.join("config.yaml"),
         "plugins: {enabled: [aw-native-hooks]}\nunknown: keep\n",
