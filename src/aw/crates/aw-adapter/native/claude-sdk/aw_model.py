@@ -17,13 +17,15 @@ if __package__:
     from aw_sdk.aw_http_hosts import allows_http
     from .aw_claude import CallbackFailure
     from .aw_model_stream import (
-        MAX_FRAME, MessageStream, event_name, relay_log, rewrite_message, sse_fields, sse_frames,
+        MAX_FRAME, MessageStream, event_name, json_error_label, relay_log, rewrite_message,
+        sse_fields, sse_frames,
     )
 else:
     from aw_http_hosts import allows_http
     from aw_claude import CallbackFailure
     from aw_model_stream import (
-        MAX_FRAME, MessageStream, event_name, relay_log, rewrite_message, sse_fields, sse_frames,
+        MAX_FRAME, MessageStream, event_name, json_error_label, relay_log, rewrite_message,
+        sse_fields, sse_frames,
     )
 
 MAX_REQUEST = 32 * 1024 * 1024
@@ -43,15 +45,6 @@ HOP_HEADERS = {
     "te",
     "trailer",
     "upgrade",
-}
-
-# Some Python decoders include the offending character in escape errors.
-_JSON_ERRORS = {
-    "Expecting value", "Extra data", "Expecting property name enclosed in double quotes",
-    "Expecting ':' delimiter", "Expecting ',' delimiter", "Unterminated string starting at",
-    r"Invalid \escape", r"Invalid \uXXXX escape", "Invalid control character at",
-    "Illegal trailing comma before end of object", "Illegal trailing comma before end of array",
-    "Unexpected UTF-8 BOM (decode using utf-8-sig)",
 }
 
 
@@ -188,8 +181,7 @@ class ModelRelay:
             if isinstance(error, json.JSONDecodeError) and details["stage"] in {
                 "request_json", "response_json", "sse_frame", "tool_input_json"
             }:
-                details.update(json_err=error.msg if error.msg in _JSON_ERRORS else "Invalid JSON",
-                               json_pos=error.pos)
+                details.update(json_err=json_error_label(error), json_pos=error.pos)
             relay_log(f"failed: {type(error).__name__}", details)
             # Partial responses cannot be turned into an error response. Close
             # the stream and latch the client before any later model request.

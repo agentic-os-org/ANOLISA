@@ -23,6 +23,19 @@ _EVENTS = (
     "message_delta", "message_stop", "ping", "error",
 )
 
+# Some Python decoders include the offending character in escape errors.
+_JSON_ERRORS = {
+    "Expecting value", "Extra data", "Expecting property name enclosed in double quotes",
+    "Expecting ':' delimiter", "Expecting ',' delimiter", "Unterminated string starting at",
+    r"Invalid \escape", r"Invalid \uXXXX escape", "Invalid control character at",
+    "Illegal trailing comma before end of object", "Illegal trailing comma before end of array",
+    "Unexpected UTF-8 BOM (decode using utf-8-sig)",
+}
+
+
+def json_error_label(error: json.JSONDecodeError) -> str:
+    return error.msg if error.msg in _JSON_ERRORS else "Invalid JSON"
+
 
 def relay_log(label: str, fields: dict) -> None:
     print(f"AW managed model response {label}", *(f"{key}={value}" for key, value in fields.items()),
@@ -95,17 +108,17 @@ class MessageStream:
         self.stopped = False
         self.next_index = 0
 
-    def warn_once(self, reason: str, **counts: int) -> None:
+    def warn_once(self, reason: str, **fields: int | str) -> None:
         if reason not in self.warned:
             self.warned.add(reason)
-            relay_log("warning:", {"reason": reason, **counts})
+            relay_log("warning:", {"reason": reason, **fields})
 
     async def event(self, value: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         kind = value.get("type")
         if self.stopped:
             raise CallbackFailure("AW model stream continued after its terminal event")
         if kind == "message_start":
-            if self.started or value.get("message", {}).get("content") != []:
+            if self.started or value.get("message", {}).get("content", []) != []:
                 raise CallbackFailure("AW model stream has an unsupported message start")
             self.started = True
         elif kind == "content_block_start":
@@ -113,11 +126,11 @@ class MessageStream:
             if (
                 not self.started
                 or type(index) is not int
-                or index != self.next_index
+                or index < self.next_index
                 or self.blocks
             ):
                 raise CallbackFailure("AW model block identity is invalid")
-            self.next_index += 1
+            self.next_index = index + 1
             if block.get("type") not in {"text", "thinking", "redacted_thinking", "tool_use"}:
                 raise CallbackFailure("AW model response block type is unsupported")
             entry = None
@@ -146,13 +159,27 @@ class MessageStream:
                 raise CallbackFailure("AW model block was already completed")
             entry, partial, initial = self.blocks.pop(value["index"])
             if entry is not None:
-                self.details.update(stage="tool_input_json", partial_bytes=len(partial.encode()))
+                partial_bytes = len(partial.encode())
+                self.details.update(stage="tool_input_json", partial_bytes=partial_bytes)
                 has_json = bool(partial.strip(" \t\r\n"))
                 if has_json:
-                    arguments = json.loads(partial)
+                    try:
+                        arguments = json.loads(partial)
+                    except json.JSONDecodeError as error:
+                        self.warn_once(
+                            "invalid_tool_input",
+                            partial_bytes=partial_bytes,
+                            json_err=json_error_label(error),
+                            json_pos=error.pos,
+                        )
+                        arguments = {}
+                    else:
+                        if not isinstance(arguments, dict):
+                            self.warn_once("non_object_tool_input", partial_bytes=partial_bytes)
+                            arguments = {}
                 else:
                     if partial:
-                        self.warn_once("blank_tool_input", partial_bytes=self.details["partial_bytes"])
+                        self.warn_once("blank_tool_input", partial_bytes=partial_bytes)
                     arguments = initial
                 self.details["stage"] = "stream_event"
                 await self.invocations.register(entry, arguments)
@@ -167,6 +194,15 @@ class MessageStream:
             if not self.started or self.blocks:
                 raise CallbackFailure("AW model stream ended with incomplete tool inputs")
             self.stopped = True
+        elif kind == "error":
+            for entry, _, _ in self.blocks.values():
+                if entry is not None:
+                    if entry.phase != "producing" or entry.sequence != 0:
+                        raise CallbackFailure("AW model stream error cannot drop a registered tool")
+                    self.invocations.active.pop(entry.call_id, None)
+            self.blocks.clear()
+            self.stopped = True
+            self.warn_once("upstream_stream_error")
         elif kind not in {"message_delta", "ping"}:
             raise CallbackFailure("AW model stream event is unsupported or failed")
         return (value,)

@@ -52,12 +52,21 @@ Pi uses its public model stream and the produced tool object. Claude uses a priv
 loopback Anthropic Messages relay and the native SDK transport dispatch context.
 MCP `_meta.claudecode/toolUseId` links the native frame to that same identity before
 the SDK removes metadata from its public handler arguments.
-The relay accepts CRLF, LF and CR line endings in SSE streams and skips comments
-and blank data. It discards a trailing `[DONE]` only after `message_stop`.
-The relay warns once per request for each of these cases: a discarded marker,
-blank data, or accumulated whitespace-only deltas that use the initial tool input.
-Failures report the decoding or protocol stage and structural metadata in stderr.
-Message text, tool input and credentials stay out of these diagnostics.
+The relay accepts CRLF, LF and CR line endings in SSE streams, skips comments
+and blank data, allows omitted `message_start.message.content` and strictly
+increasing non-contiguous content block indices while still rejecting pre-populated
+content or reopened blocks, and discards a trailing `[DONE]` only after a terminal
+`message_stop` or `error` event. Matching native Claude CLI recovery, malformed or
+non-object accumulated tool input JSON registers `{}` so CLI validation errors
+retire through the `is_error: true` path (and parameterless tools still match
+`PreToolUse` with `{}`), and mid-stream SSE `error` events drop any open
+unregistered tool block, mark the stream stopped, and forward the error without
+aborting the session. The relay warns once per request for each compatibility or
+recovery case: a discarded marker, blank data, accumulated whitespace-only deltas
+using the initial tool input, invalid or non-object tool input JSON, or an
+upstream stream error. Failures report the decoding or protocol stage and
+structural metadata in stderr. Message text, tool input and credentials stay out
+of these diagnostics.
 Qoder uses completed model tool blocks from the Worker's private partial
 output and verifies each Hook against its native control-dispatch context. For
 child tools, a private stream-start frame reserves the native ID under an active,
@@ -138,8 +147,8 @@ The CLI connects directly to the relay. AW adds its exact loopback host and port
 the CLI proxy exclusions and checks the effective bypass before submitting a prompt.
 The relay uses the original proxy settings for its upstream connection.
 Redirects, SOCKS proxies, Bedrock/Vertex/Foundry transports, unsupported
-response blocks and malformed/partial tool streams fail visibly; no direct fallback
-bypasses identity registration. Supported blocks are text, thinking,
+response blocks, corrupt SSE frames and truncated streams fail visibly; no direct
+fallback bypasses identity registration. Supported blocks are text, thinking,
 redacted_thinking and client tool_use, in JSON or SSE Messages responses.
 An unauthenticated connect/close or malformed header is discarded without changing
 session state. An authenticated downstream disconnect cancels and joins its

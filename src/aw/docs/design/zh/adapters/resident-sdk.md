@@ -43,10 +43,14 @@ AW 保留原始工具载荷；此比较规则保持 AW 元数据的独立整数�
 Pi 使用公开模型 stream 及其产生的工具对象。Claude 使用私有 loopback Anthropic Messages
 转发层和原生 SDK 传输的回调调度上下文。MCP `_meta.claudecode/toolUseId` 在 SDK 移除
 handler 参数中的元数据前，将原生帧关联到同一个身份。
-转发层支持 SSE 流中的 CRLF、LF 和 CR 行尾，跳过注释和空白数据，仅在收到
-`message_stop` 后丢弃尾随的 `[DONE]`。丢弃尾随标记、跳过空白数据或因工具输入增量全为空白而
-回退到初始输入时，stderr 对每种情况每个请求最多告警一次。失败时记录解码或协议处理阶段及结构信息，
-不记录消息正文、工具输入和凭据。
+转发层支持 SSE 流中的 CRLF、LF 和 CR 行尾，跳过注释和空白数据，允许省略
+`message_start.message.content` 及严格递增的非连续内容块索引（仍拒绝预填充内容和重开块），
+并仅在收到终态 `message_stop` 或 `error` 事件后丢弃尾随的 `[DONE]`。与原生 Claude CLI
+恢复行为一致，损坏或非对象的累积工具输入 JSON 登记 `{}`，使 CLI 参数校验错误沿 `is_error: true`
+路径回收（无必填参数的工具仍以 `{}` 匹配 `PreToolUse`）；流中 SSE `error` 事件会清理尚未登记的
+打开工具块、标记流终止并原样转发错误，而不会中止会话。丢弃尾随标记、跳过空白数据、空白增量回退到
+初始输入、非法或非对象工具输入 JSON 及上游流错误时，stderr 对每种情况每个请求最多告警一次。
+失败时记录解码或协议处理阶段及结构信息，不记录消息正文、工具输入和凭据。
 Qoder 使用 Worker 私有 partial 输出中的完整模型工具块，并按原生 control 调度上下文
 核验每个 Hook。子工具的私有 stream-start 帧在活动且已授权的父 Agent 下预留原生 ID。
 PreTool 或权限回调可能早于完整 assistant 帧到达；回调在原生取消边界内等待该帧及其登记
@@ -100,7 +104,7 @@ HTTPS 使用系统信任及 SSL_CERT_FILE/SSL_CERT_DIR，支持 HTTP(S)
 代理与 NO_PROXY，包含按端口匹配的 NO_PROXY=host:port 规则与 IPv6 主机。
 AW 将本次回环地址和端口加入 Claude CLI 的代理排除列表，在提交提示前核对直连规则。
 转发层沿用原有代理配置访问上游模型。
-重定向、SOCKS、Bedrock/Vertex/Foundry、未知响应块和非法/中断工具流
+重定向、SOCKS、Bedrock/Vertex/Foundry、未知响应块、损坏的 SSE 帧和截断流
 明确失败，没有绕过登记的直连后备路径。支持 JSON/SSE Messages 的 text、thinking、
 redacted_thinking 和客户端 tool_use。
 未认证的连接关闭或非法 header 被直接丢弃，保持会话状态。已认证下游断开时取消并等待
