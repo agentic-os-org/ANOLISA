@@ -224,17 +224,27 @@ def verify_runtime(path: Path, version: str, executable: str) -> NativeTarget:
 
         # The SDK imports `anolisa_tokenless._native`, so a renamed module
         # (e.g. `_native_extra.abi3.so`) cannot satisfy that import even though
-        # it carries native bytes. Match the exact basename, not a prefix.
-        native_names = (
+        # it carries native bytes. Count every `_native*` candidate first so
+        # an extra CPython-tagged module (e.g. `_native.cpython-312-aarch64-linux-gnu.so`)
+        # cannot shadow the checked one: FileFinder prefers the specific tag,
+        # which would import unchecked bytes. Then require the sole candidate
+        # to use an exact importable basename.
+        native_suffix = ".pyd" if target.os_name == "windows" else ".so"
+        native_candidates = [
+            name
+            for name in archive.namelist()
+            if name.startswith("anolisa_tokenless/_native") and name.endswith(native_suffix)
+        ]
+        if len(native_candidates) != 1:
+            fail(f"{path.name} must contain exactly one native extension, found {native_candidates}")
+        allowed_native_names = (
             ("anolisa_tokenless/_native.pyd",)
             if target.os_name == "windows"
             else ("anolisa_tokenless/_native.abi3.so", "anolisa_tokenless/_native.so")
         )
-        native_members = [
-            name for name in archive.namelist() if name in native_names
-        ]
-        if len(native_members) != 1:
-            fail(f"{path.name} must contain exactly one native extension with the _native module name")
+        if native_candidates[0] not in allowed_native_names:
+            fail(f"{path.name} has an unexpected native extension name: {native_candidates[0]}")
+        native_members = native_candidates
         if target.os_name == "windows":
             executable += ".exe"
         # _bin is also a Python package; any other file there is a stale binary.

@@ -60,6 +60,7 @@ def create_runtime(
     binary_architecture: str | None = None,
     executables: tuple[str, ...] | None = None,
     extension: str | None = None,
+    extra_extensions: tuple[str, ...] = (),
 ) -> Path:
     platform = platform or PLATFORMS[(os_name, architecture)]
     path = directory / f"anolisa_tokenless-{version}-cp311-abi3-{platform}.whl"
@@ -85,6 +86,8 @@ def create_runtime(
         )
         extension = extension or ("_native.pyd" if os_name == "windows" else "_native.abi3.so")
         add_member(archive, f"anolisa_tokenless/{extension}", payload, 0o100755)
+        for extra_extension in extra_extensions:
+            add_member(archive, f"anolisa_tokenless/{extra_extension}", payload, 0o100755)
         add_member(archive, "anolisa_tokenless/_bin/__init__.py", b"")
         if executables is None:
             executables = ("tokenless.exe",) if os_name == "windows" else ("tokenless",)
@@ -127,6 +130,7 @@ def run_verifier(
     *arguments: str,
     version: str = VERSION,
     expect_success: bool = True,
+    expect_error: str | None = None,
 ) -> None:
     result = subprocess.run(
         [
@@ -147,6 +151,10 @@ def run_verifier(
         raise AssertionError(
             f"verifier returned {result.returncode}, expected success={expect_success}:\n"
             f"{result.stdout}"
+        )
+    if expect_error is not None and expect_error not in result.stdout:
+        raise AssertionError(
+            f"verifier did not report {expect_error!r}:\n{result.stdout}"
         )
 
 
@@ -173,11 +181,47 @@ def main() -> int:
             bad_name.mkdir()
             wrong_suffix = "_native_extra.pyd" if os_name == "windows" else "_native_extra.abi3.so"
             create_runtime(bad_name, os_name, architecture, extension=wrong_suffix)
+            # Linux x86_64 also requires the AgentScope wheel; without it the
+            # verifier exits on wheel count before reaching the native check.
+            if (os_name, architecture) == ("linux", "x86_64"):
+                create_agentscope(bad_name)
             run_verifier(
                 bad_name,
                 "--layout", "flat", "--os", os_name, "--arch", architecture,
                 expect_success=False,
+                expect_error="has an unexpected native extension name",
             )
+
+        # A CPython-tagged module can shadow the checked ABI3 extension on that
+        # interpreter; FileFinder prefers it, so a second native candidate must
+        # not clear the gate even though one allowed module is present.
+        shadowed = root / "native-shadow"
+        shadowed.mkdir()
+        create_runtime(
+            shadowed, "linux", "aarch64",
+            extra_extensions=("_native.cpython-312-aarch64-linux-gnu.so",),
+        )
+        run_verifier(
+            shadowed,
+            "--layout", "flat", "--os", "linux", "--arch", "aarch64",
+            expect_success=False,
+            expect_error="must contain exactly one native extension",
+        )
+
+        # Two allowed basenames in one wheel are still rejected: the SDK
+        # imports a single `anolisa_tokenless._native` module.
+        two_native = root / "two-native"
+        two_native.mkdir()
+        create_runtime(
+            two_native, "linux", "aarch64",
+            extra_extensions=("_native.so",),
+        )
+        run_verifier(
+            two_native,
+            "--layout", "flat", "--os", "linux", "--arch", "aarch64",
+            expect_success=False,
+            expect_error="must contain exactly one native extension",
+        )
 
         # A generic `_native.so` remains a valid stable-ABI extension on POSIX.
         generic = root / "generic-so"
