@@ -15,6 +15,7 @@ use super::{
     render_pending_upgrade_notice, render_startup_banner, run_bootstrap_path_probe,
     startup_suggestion_mode, write_startup_suggestions, BootstrapPathProbeError,
     BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode, BOOTSTRAP_PATH_PROBE_TIMEOUT,
+    LOGIN_PROBE_IO,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -1300,10 +1301,15 @@ fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
     assert_eq!(zsh_non_login.len(), 1);
     assert_eq!(zsh_non_login[0].flags, "-ic");
     assert_eq!(zsh_non_login[0].io, BootstrapPathProbeIo::Pipes);
+    // Login startup probes must run under the supervised helper (Pty) so a
+    // profile-started daemon cannot escape the probe as an unmanaged orphan;
+    // the non-login `-lic` Bash probe already established that contract.
+    // The supervisor is Linux-only, so other platforms keep the pipes probe
+    // instead of a supervised probe that can never succeed there.
     let (_, zsh_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, true, true).unwrap();
     assert_eq!(zsh_login.len(), 1);
     assert_eq!(zsh_login[0].flags, "-lic");
-    assert_eq!(zsh_login[0].io, BootstrapPathProbeIo::Pipes);
+    assert_eq!(zsh_login[0].io, LOGIN_PROBE_IO);
 }
 
 #[test]
@@ -1379,6 +1385,28 @@ fn startup_auth_hint_uses_the_probe_without_overriding_disabled_ai() {
     let model = super::welcome::welcome_model(&state, Some(("bash", "/tmp")));
     assert!(!model.capability.contains("/auth"));
     assert!(model.capability.contains("AI is disabled"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn login_probe_supplies_persistent_terminal_eof_to_repeated_profile_reads() {
+    let home = tempfile::tempdir().unwrap();
+    // More reads than the former fixed queue of eight VEOF bytes must all
+    // observe EOF immediately. This distinguishes a probe-lifetime EOF source
+    // from a finite prefix that eventually leaves a profile blocked.
+    std::fs::write(
+        home.path().join(".bash_profile"),
+        "i=0\nwhile [ \"$i\" -lt 12 ]; do\n  if read probe_answer; then exit 91; fi\n  i=$((i + 1))\ndone\n",
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let path = probe_bash_path(home.path(), "-lic", LOGIN_PROBE_IO).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "repeated terminal reads must not wait for the 5s probe timeout"
+    );
+    assert!(path.contains("/usr/bin"), "{path}");
 }
 
 #[test]
