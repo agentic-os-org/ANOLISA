@@ -177,6 +177,16 @@ and AgentScope 1.x still requires `install()` before use. Earlier successful
 compression calls can leave unreferenced Stash entries, but no partial recovery
 markers are exposed to the model.
 
+### Non-mapping or malformed tool-call inputs
+
+When a tool call reaches the adapter with `input` missing, non-mapping (1.x), or
+not decoding to a JSON object (2.x), Tokenless fails open: it skips PreTool
+rewriting, forwards the copied call payload untouched to the host `Toolkit`
+without retaining per-call state, and applies lossless-only PostTool handling
+(`OutputOptimization.NONE`, `command=None`) to any returned `ToolResponse`.
+Validation, argument repair, or error raising on non-mapping inputs remains the
+host framework's responsibility.
+
 ## Validate the integration
 
 Run the installed-wheel and supported-version matrix tests from a source checkout:

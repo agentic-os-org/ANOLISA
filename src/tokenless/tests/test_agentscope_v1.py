@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib
 import inspect
 import json
@@ -546,6 +547,70 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         result = await hook(self.agent, {"tool_call": original})
         self.assertIsNot(result["tool_call"], original)
         self.assertEqual(original["input"], {"value": 1})
+
+    async def test_non_mapping_tool_input_fails_open(self) -> None:
+        self.integration.config = replace(self.integration.config, rtk_enabled=True)
+
+        async def shell(command: str):
+            del command
+            return _Response([])
+
+        self.toolkit.register_tool_function(shell)
+        pre_tool = mock.AsyncMock()
+        observed = []
+
+        async def post_tool(request):
+            observed.append(request)
+            return _post_response("short")
+
+        self.integration.sdk.pre_tool = pre_tool
+        self.integration.sdk.post_tool = post_tool
+        hook = self.agent.hooks[("pre_acting", "tokenless")]
+        malformed_inputs = (
+            ("raw-string", True, "{'command': 'echo hi'}"),
+            ("list", True, ["echo", "hi"]),
+            ("integer", True, 123),
+            ("none", True, None),
+            ("empty-string", True, ""),
+            ("missing", False, None),
+        )
+        for label, has_input, raw_input in malformed_inputs:
+            for tool_name in ("shell", "large_result"):
+                call_id = f"call-{tool_name}-{label}"
+                with self.subTest(tool=tool_name, kind=label):
+                    observed.clear()
+                    original = {"name": tool_name, "id": call_id}
+                    if has_input:
+                        original["input"] = copy.deepcopy(raw_input)
+                    original_snapshot = copy.deepcopy(original)
+                    forwarded = (await hook(self.agent, {"tool_call": original}))["tool_call"]
+                    self.assertIsNot(forwarded, original)
+                    self.assertEqual(original, original_snapshot)
+                    if not has_input:
+                        self.assertNotIn("input", original)
+                    self.assertEqual("input" in forwarded, has_input)
+                    if has_input:
+                        self.assertEqual(forwarded["input"], raw_input)
+                    self.assertNotIn(call_id, self.toolkit.output_optimizations)
+                    pre_tool.assert_not_awaited()
+
+                    registered = self.toolkit.tools[tool_name]
+                    chunk = _Response([{"type": "text", "text": "stream"}], is_last=False)
+                    self.assertIs(await registered.postprocess_func(forwarded, chunk), chunk)
+                    self.assertNotIn(call_id, self.toolkit.output_optimizations)
+
+                    final = _Response([{"type": "text", "text": "long " * 100}])
+                    transformed = await registered.postprocess_func(forwarded, final)
+                    self.assertEqual(transformed.content[0]["text"], "short")
+                    self.assertEqual(final.content[0]["text"], "long " * 100)
+                    self.assertEqual(len(observed), 1)
+                    self.assertEqual(observed[0].attribution.tool_use_id, call_id)
+                    self.assertEqual(
+                        observed[0].output_optimization,
+                        core.OutputOptimization.NONE,
+                    )
+                    self.assertIsNone(observed[0].command)
+                    self.assertNotIn(call_id, self.toolkit.output_optimizations)
 
     async def test_retrieve_bypasses_pre_acting_contracts(self) -> None:
         original = {

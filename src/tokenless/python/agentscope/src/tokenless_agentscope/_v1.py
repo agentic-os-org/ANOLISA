@@ -210,7 +210,14 @@ class TokenlessAgentScope:
             return kwargs
         tool_call = copy.deepcopy(kwargs["tool_call"])
         contract = self.contract_for(tool_call["name"])
-        arguments = dict(tool_call.get("input") or {})
+        raw_input = tool_call.get("input")
+        if not isinstance(raw_input, Mapping):
+            # Fail open: Tokenless must never be the component that raises on a
+            # malformed tool_call. Forward the payload untouched and keep lossless
+            # post-tool handling; what the host does with a non-mapping input is
+            # the host's contract, not ours.
+            return {**kwargs, "tool_call": tool_call}
+        arguments = dict(raw_input)
         optimization = OutputOptimization.NONE
         if contract.command_field is not None and self.config.rtk_enabled:
             transformed = await self.sdk.pre_tool(
@@ -246,8 +253,9 @@ class TokenlessAgentScope:
         status = self._status(response)
         optimization = toolkit.output_optimizations.pop(tool_call["id"], OutputOptimization.NONE)
         command = None
-        if contract.command_field is not None:
-            command = (tool_call.get("input") or {}).get(contract.command_field)
+        raw_input = tool_call.get("input")
+        if contract.command_field is not None and isinstance(raw_input, Mapping):
+            command = raw_input.get(contract.command_field)
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
         for index, block in enumerate(response.content):

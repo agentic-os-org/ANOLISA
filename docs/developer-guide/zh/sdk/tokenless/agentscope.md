@@ -162,6 +162,13 @@ Block、Metadata 和最终结果状态均保持不变；后续 Block 失败时�
 信号仍向外传播，AgentScope 1.x 仍要求先执行 `install()`。此前成功的压缩调用可能
 留下未被引用的 Stash 条目，但不会向模型暴露部分恢复 Marker。
 
+### 非映射或畸形工具调用入参
+
+当流入适配器的工具调用缺少 `input`、其值在 1.x 中不是 `Mapping` 或在 2.x 中无法解码为 JSON
+对象时，Tokenless 采用 fail-open 策略：跳过 PreTool 参数改写，将复制后的调用原样转发给宿主
+`Toolkit`，不保留逐调用状态，并对后续到达的 `ToolResponse` 仅执行无损 PostTool 处理
+（`OutputOptimization.NONE`、`command=None`）。非映射入参的校验、修复或抛错语义均由宿主框架自身契约决定。
+
 ## 验证集成
 
 在源码 checkout 中运行 installed-wheel 与支持版本矩阵测试：
