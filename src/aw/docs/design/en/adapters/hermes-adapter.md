@@ -131,8 +131,8 @@ error or cancellation.
 These overrides apply to AW inspection only; native Git commands retain their
 normal environment and behavior.
 `git status --porcelain --untracked-files=no` must then be empty. These checks are
-bounded and cancellable and permit untracked environment/build files; they are
-not a package integrity audit.
+bounded to 30 seconds per Git probe and cancellable and permit untracked
+environment/build files; they are not a package integrity audit.
 
 The version probe runs the checked script with its verified interpreter and `-P`,
 excluding implicit imports from the script directory even when it is sticky and
@@ -148,13 +148,13 @@ Its reported installation directory must match the already checked metadata sour
 a changing `origin/main` banner is not used as the version.
 
 The metadata discovery probe uses the existing bounded data runner with a 4 MiB
-JSON output limit, a 5-second deadline and cancellation; version strings retain
+JSON output limit, a 30-second deadline and cancellation; version strings retain
 their 4 KiB limit. Source and site paths are still checked before native imports.
 
 The dotenv probe carries selected environment names and values as byte arrays,
 using Python filesystem encoding and Rust OsString to retain Linux environment
 bytes, including non-UTF-8 PATH components. The JSON uses the existing 4 MiB data-output budget with a
-5-second deadline, cancellation and bounded stderr; version output remains capped
+30-second deadline, cancellation and bounded stderr; version output remains capped
 at 4 KiB. Both inherited and profile-defined PATH values above 4 KiB are covered
 through the shared preflight and actual install/chat entrypoints. The limit applies
 to serialized JSON, including byte-array overhead; environments exceeding that

@@ -6,6 +6,8 @@ mod checkout;
 mod signals;
 #[path = "hermes_trust/startup_cleanup.rs"]
 mod startup_cleanup;
+#[path = "hermes_trust/timeouts.rs"]
+mod timeouts;
 
 use super::*;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
