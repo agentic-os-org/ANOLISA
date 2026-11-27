@@ -320,6 +320,28 @@ function integrationDocument() {
     schema_version: 'ATIF/1.0',
     session_id: 'sess-integration',
     steps: fixtureSteps(),
+    subagent_trajectories: [
+      {
+        schema_version: 'ATIF/1.0',
+        trajectory_id: 'sub-stored',
+        session_id: 'sess-integration:subagent:sub-stored',
+        agent: { name: 'subagent-stored', version: '1' },
+        steps: [
+          step(0, 'user', { message: 'subtask question' }),
+          step(1, 'agent', { final_metrics: undefined }),
+        ],
+      },
+      {
+        schema_version: 'ATIF/1.0',
+        trajectory_id: 'sub-inline',
+        session_id: 'sess-integration',
+        agent: { name: 'subagent-inline', version: '1' },
+        steps: [
+          step(0, 'user', { message: 'inline task' }),
+          step(1, 'agent', {}),
+        ],
+      },
+    ],
   };
 }
 
@@ -391,7 +413,12 @@ function loadViewer(searchParamsInit, driver, apiStubs) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-async function renderLoadedViewer({ highlightCallId } = {}) {
+async function renderLoadedViewer({
+  highlightCallId,
+  queryType = 'session',
+  queryId = 'sess-integration',
+  nodeId,
+} = {}) {
   const deferreds = [];
   const defer = () => {
     const d = {};
@@ -401,20 +428,20 @@ async function renderLoadedViewer({ highlightCallId } = {}) {
   };
   const apiStubs = {
     fetchAtifBySession: () => defer(),
-    fetchAtifByConversation: () => Promise.reject(new Error('not used')),
+    fetchAtifByConversation: () => defer(),
     fetchTrajectoryAtif: () => Promise.reject(Object.assign(new Error('gone'), { status: 404 })),
     fetchSessionSavings: () => Promise.resolve({ items: [] }),
   };
   const driver = createHooksDriver();
-  const search = highlightCallId
-    ? `type=session&id=sess-integration&highlight_call_id=${highlightCallId}`
-    : 'type=session&id=sess-integration';
-  const Page = loadViewer(search, driver, apiStubs);
+  const params = new URLSearchParams({ type: queryType, id: queryId });
+  if (highlightCallId) params.set('highlight_call_id', highlightCallId);
+  if (nodeId) params.set('node', nodeId);
+  const Page = loadViewer(params.toString(), driver, apiStubs);
 
   driver.render(Page);                    // mount render; records the auto-load effect
   const autoLoad = driver._pendingEffect; // eslint-disable-line no-underscore-dangle
   const loadPromise = autoLoad();         // mount auto-load fires handleLoad
-  assert.equal(deferreds.length, 1, 'handleLoad must fetch the session document');
+  assert.equal(deferreds.length, 1, 'handleLoad must fetch the trajectory document');
   deferreds[0].resolve(integrationDocument());
   await loadPromise;
   await settle();
@@ -462,4 +489,39 @@ test('integration: a highlighted tool call selects the owning round', async () =
     new Set(['4-toolcalls', '4-observation']),
     'the highlight keys must expand the owning step sections',
   );
+});
+
+test('integration: selecting a stored subagent retargets causal attribution from root/conversation scope', async () => {
+  const { rendered } = await renderLoadedViewer({
+    queryType: 'conversation',
+    queryId: 'conv-root',
+    nodeId: 'sub-stored',
+  });
+  const panels = findElements(
+    rendered,
+    (el) => el.props && 'sessionId' in el.props && 'isPreambleRound' in el.props,
+  );
+  assert.equal(panels.length, 1, 'causal attribution panel renders');
+  assert.equal(
+    panels[0].props.sessionId,
+    'sess-integration:subagent:sub-stored',
+    'causal panel must target the subagent session instead of the root conversation',
+  );
+  assert.equal(panels[0].props.idKind, 'session', 'stored subagent must query trajectories in session scope');
+  assert.equal(panels[0].props.unsupportedTarget, false);
+});
+
+test('integration: selecting an inline/shared-session subagent disables causal attribution instead of hitting root', async () => {
+  const { rendered } = await renderLoadedViewer({
+    queryType: 'session',
+    queryId: 'sess-integration',
+    nodeId: 'sub-inline',
+  });
+  const panels = findElements(
+    rendered,
+    (el) => el.props && 'sessionId' in el.props && 'isPreambleRound' in el.props,
+  );
+  assert.equal(panels.length, 1, 'causal attribution panel renders');
+  assert.equal(panels[0].props.sessionId, '', 'shared/inline subagent must not pass root sessionId');
+  assert.equal(panels[0].props.unsupportedTarget, true);
 });
