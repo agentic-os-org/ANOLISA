@@ -23,15 +23,35 @@ export const pluginState = {
   /** Whether the environment check passed. */
   environmentReady: false,
 
+  /** Runtime workspace setup owns the manager binding until it finishes. */
+  workspaceSetup: null as { source: "config" | "session"; done: Promise<void> } | null,
+
+  /** Registration work that must finish before a runtime workspace update binds. */
+  registrationSetup: null as { done: Promise<void>; changesBinding: boolean } | null,
+
   /** Saved reference to the plugin API for use in hooks. */
   pluginApi: null as OpenClawPluginApi | null,
 
   /** Resolved plugin config for inspection via ws-ckpt-config tool. */
   resolvedConfig: null as PluginConfig | null,
 
+  /** Tool updates and reloaded disables invalidate an earlier enable's validation. */
+  autoCheckpointConfigRevision: 0,
+
   /** Registrations restored by each session; only that session consumes them. */
   rollbackWorkspacesBySession: new Map<string, Set<string>>(),
 };
+
+/** Hold the binding until the current config update or session recovery finishes. */
+export function beginWorkspaceSetup(source: "config" | "session"): () => void {
+  let complete!: () => void;
+  const done = new Promise<void>((resolve) => { complete = resolve; });
+  pluginState.workspaceSetup = { source, done };
+  return () => {
+    pluginState.workspaceSetup = null;
+    complete();
+  };
+}
 
 function rollbackOwner(context?: OpenClawSessionContext): string | undefined {
   return context?.sessionKey
@@ -76,6 +96,19 @@ export function takeRollbackWorkspaces(context?: OpenClawSessionContext): Set<st
 
 export const UNAVAILABLE_MSG =
   "ws-ckpt plugin is not available. Run environment check for details.";
+
+/** Check that implicit operations would use the exact configured selector. */
+export function defaultWorkspaceError(): string | undefined {
+  const { manager, environmentReady, resolvedConfig, workspaceSetup, registrationSetup } = pluginState;
+  if (!manager || !environmentReady) return UNAVAILABLE_MSG;
+  const workspace = resolvedConfig?.workspace;
+  if (!workspace) return "No workspace configured";
+  if (workspaceSetup || registrationSetup?.changesBinding || manager.getWorkspacePath() !== workspace) {
+    return `Default workspace ${workspace} is not ready. Wait for any workspace setup to finish, ` +
+      "or fix the workspace setup and retry the same workspace configuration.";
+  }
+  return undefined;
+}
 
 export function cwdInsideWorkspaceReason(cwd: string, workspace: string): string {
   return (

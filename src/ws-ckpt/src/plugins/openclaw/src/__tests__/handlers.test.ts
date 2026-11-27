@@ -594,11 +594,14 @@ describe("handleConfig", () => {
     persistSpy.mockRestore();
   });
 
-  it("update workspace warns when setup of the new workspace fails", async () => {
+  it.each(["returns false", "throws"])("saves the workspace and allows a retry when setup %s", async (failure) => {
     const migrateSpy = vi.spyOn(CrontabManager, "migrate").mockResolvedValue([]);
     const persistSpy = vi.spyOn(await import("../persist.js"), "persistConfig").mockReturnValue("");
     const origManager = pluginState.manager;
-    pluginState.manager = { ensureWorkspace: vi.fn().mockResolvedValue(false) } as any;
+    const ensureWorkspace = vi.fn().mockResolvedValue(true);
+    if (failure === "throws") ensureWorkspace.mockRejectedValueOnce(new Error("daemon unavailable"));
+    else ensureWorkspace.mockResolvedValueOnce(false);
+    pluginState.manager = { ensureWorkspace } as unknown as BtrfsManager;
     try {
       const r = await handleConfig("update", "workspace", "/new/path");
       expect(r.isError).toBe(false);
@@ -606,6 +609,14 @@ describe("handleConfig", () => {
       expect(r.text).toContain("WARNING");
       expect(r.text).toContain("setup failed");
       expect(pluginState.resolvedConfig!.workspace).toBe("/new/path");
+      expect(persistSpy).toHaveBeenCalledWith({ workspace: "/new/path" });
+      if (failure === "throws") expect(r.text).toContain("daemon unavailable");
+
+      const retry = await handleConfig("update", "workspace", "/new/path");
+      expect(retry.isError).toBe(false);
+      expect(retry.text).not.toContain("WARNING");
+      expect(ensureWorkspace.mock.calls).toEqual([["/new/path"], ["/new/path"]]);
+      expect(migrateSpy).toHaveBeenLastCalledWith("/new/path", "/new/path", []);
     } finally {
       pluginState.manager = origManager;
       migrateSpy.mockRestore();

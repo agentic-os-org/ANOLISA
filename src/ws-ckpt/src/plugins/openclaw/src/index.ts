@@ -13,6 +13,7 @@
 import { PluginConfigManager } from "./config.js";
 import { EnvironmentChecker } from "./environment-check.js";
 import { BtrfsManager } from "./btrfs-manager.js";
+import { CommandExecutor } from "./commands.js";
 import type { PluginConfig } from "./types.js";
 import { loadPersistedConfig } from "./persist.js";
 import {
@@ -47,9 +48,15 @@ function register(api: OpenClawPluginApi): void {
   const validation = configManager.validate();
   // Keep object identity stable across reloads so stale hook closures stay live.
   const fresh = configManager.getConfig();
-  const config = pluginState.resolvedConfig
-    ? Object.assign(pluginState.resolvedConfig, fresh)
-    : (pluginState.resolvedConfig = fresh);
+  const current = pluginState.resolvedConfig;
+  const runtimeSetup = pluginState.workspaceSetup;
+  if (current && runtimeSetup?.source === "config") {
+    // An explicit update may have selected a workspace before persisting it.
+    fresh.workspace = current.workspace;
+  }
+  const config = current ? Object.assign(current, fresh) : (pluginState.resolvedConfig = fresh);
+  // A reloaded disable supersedes older enables even if the toggle was already off.
+  if (!config.autoCheckpoint) pluginState.autoCheckpointConfigRevision++;
 
   if (!validation.valid) {
     api.logger?.warn?.(
@@ -61,11 +68,19 @@ function register(api: OpenClawPluginApi): void {
   // 3. Create BtrfsManager (environment check deferred to async init)
   // ------------------------------------------------------------------
   // Idempotent: keep manager identity stable across reloads (config ref already shared).
-  pluginState.manager ??= new BtrfsManager(config);
-  pluginState.manager.updateConfig(config);
+  const manager = pluginState.manager ??= new BtrfsManager(config);
+  manager.updateConfig(config);
 
-  // Re-check environment on every register (daemon may start/stop between reloads).
-  void (async () => {
+  const previousSetup = pluginState.registrationSetup;
+  const workspace = config.workspace;
+  const changesBinding = previousSetup?.changesBinding === true || manager.getWorkspacePath() !== workspace;
+  const done = (async () => {
+    if (previousSetup) await previousSetup.done;
+    // A session only retries the saved selector. Once it releases the
+    // binding, registration can apply the selector just loaded from disk.
+    // A config update can be waiting on registration, so it owns the bind.
+    if (runtimeSetup?.source === "session") await runtimeSetup.done;
+    if (pluginState.workspaceSetup || config.workspace !== workspace) return;
     const checker = new EnvironmentChecker();
     const envResult = await checker.check();
     pluginState.environmentReady = envResult.passed;
@@ -80,26 +95,28 @@ function register(api: OpenClawPluginApi): void {
       return;
     }
 
-    const cwdCheck = cwdInsideWorkspace(config.workspace);
-    if (cwdCheck.inside) {
-      pluginState.environmentReady = false;
-      console.warn(`[ws-ckpt] Refusing: ${cwdInsideWorkspaceReason(cwdCheck.cwd, config.workspace)}`);
-    } else {
-      try {
-        const ok = await pluginState.manager!.ensureWorkspace(config.workspace);
-        if (!ok) {
-          pluginState.environmentReady = false;
-          console.warn(
-            `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace})`,
-          );
-        }
-      } catch (err) {
+    if (pluginState.workspaceSetup || config.workspace !== workspace) return;
+    try {
+      const registrationPath = await new CommandExecutor().resolveWorkspacePath(workspace);
+      if (pluginState.workspaceSetup || config.workspace !== workspace) return;
+      const cwdCheck = cwdInsideWorkspace(registrationPath);
+      if (cwdCheck.inside) {
+        pluginState.environmentReady = false;
+        console.warn(`[ws-ckpt] Refusing: ${cwdInsideWorkspaceReason(cwdCheck.cwd, registrationPath)}`);
+        return;
+      }
+      if (!(await manager.ensureWorkspace(workspace))) {
         pluginState.environmentReady = false;
         console.warn(
-          `[ws-ckpt] Degraded mode: workspace setup failed (${config.workspace}):`,
-          err instanceof Error ? err.message : String(err),
+          `[ws-ckpt] Degraded mode: workspace setup failed (${workspace})`,
         );
       }
+    } catch (err) {
+      pluginState.environmentReady = false;
+      console.warn(
+        `[ws-ckpt] Degraded mode: workspace setup failed (${workspace}):`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
 
     // No register-time policy prefetch: the view tool queries daemon
@@ -107,6 +124,11 @@ function register(api: OpenClawPluginApi): void {
     // mislead the user/LLM if the policy changed since then. Aligns with
     // the hermes plugin (no cache).
   })();
+  const setup = { done, changesBinding };
+  pluginState.registrationSetup = setup;
+  void done.finally(() => {
+    if (pluginState.registrationSetup === setup) pluginState.registrationSetup = null;
+  });
 
   // ------------------------------------------------------------------
   // 4. Warn if ws-ckpt tools are missing from the active allowlist

@@ -71,7 +71,7 @@ describe("cwdInsideWorkspace", () => {
     symlinkSync(managed, workspace, "dir");
     const previousState = { ...pluginState };
     const createCheckpoint = vi.fn().mockResolvedValue({ success: true, message: "created" });
-    pluginState.manager = { createCheckpoint } as unknown as NonNullable<typeof pluginState.manager>;
+    pluginState.manager = { createCheckpoint, getWorkspacePath: () => workspace } as unknown as NonNullable<typeof pluginState.manager>;
     pluginState.environmentReady = true;
     pluginState.resolvedConfig = { workspace } as NonNullable<typeof pluginState.resolvedConfig>;
     vi.spyOn(process, "cwd").mockReturnValue(managed);
