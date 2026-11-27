@@ -947,3 +947,100 @@ fn assert_hermes_result_identity(separate_steps: bool) {
     drop(writer);
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn hermes_child_sessions_mark_is_subagent_and_stay_out_of_preferences() {
+    let base = tmp_dir("subagent-preferences");
+    let writer = create_hermes_db(&base);
+    let child_id = "agent-run-child-0001";
+    let empty_parent_child_id = "agent-run-blank-parent-0001";
+    writer
+        .execute(
+            "INSERT INTO sessions (id, source, model, parent_session_id, started_at)
+             VALUES (?1, 'hermes', 'claude-sonnet', ?2, 1781517605.0)",
+            params![child_id, SESSION_ID],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO messages (session_id, role, content, timestamp)
+             VALUES (?1, 'user', 'Inspect parser and report findings.', 1781517605.0)",
+            params![child_id],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO sessions (id, source, model, parent_session_id, started_at)
+             VALUES (?1, 'hermes', 'claude-sonnet', '   ', 1781517606.0)",
+            params![empty_parent_child_id],
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO messages (session_id, role, content, timestamp)
+             VALUES (?1, 'user', 'Prefer concise summaries.', 1781517606.0)",
+            params![empty_parent_child_id],
+        )
+        .unwrap();
+
+    let output = base.join("trajectories.db");
+    let store = TrajectoryStore::new_with_path(&output).unwrap();
+    let outcome = hermes::collect_database(&store, &base.join("state.db"), 0).unwrap();
+    assert_eq!(outcome.ingested, 3);
+
+    let parent = store.get(&stored_id(&base, SESSION_ID)).unwrap().unwrap();
+    let child = store.get(&stored_id(&base, child_id)).unwrap().unwrap();
+    let blank_parent = store
+        .get(&stored_id(&base, empty_parent_child_id))
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !parent.is_subagent,
+        "main session must keep is_subagent=false"
+    );
+    assert!(
+        !blank_parent.is_subagent,
+        "whitespace-only parent_session_id must not mark session as subagent"
+    );
+    assert!(
+        child.is_subagent,
+        "Hermes child session with parent_session_id must be marked is_subagent=true"
+    );
+
+    let recent = store.list_recent_atif_jsons(0, 50).unwrap();
+    assert_eq!(recent.len(), 2);
+    assert!(
+        recent.iter().all(|(id, _)| id != &child.session_id),
+        "delegated Hermes child session must be excluded from list_recent_atif_jsons"
+    );
+
+    // Simulate a legacy pre-fix child row (is_subagent=0, untagged fingerprint):
+    // re-scanning the unchanged Hermes database must reclassify it cleanly.
+    drop(store);
+    let conn = Connection::open(&output).unwrap();
+    conn.execute(
+        "UPDATE collected_trajectories SET is_subagent = 0 WHERE session_id = ?1",
+        params![child.session_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE source_session_states SET file_size = 1 WHERE session_id = ?1",
+        params![child.session_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = TrajectoryStore::new_with_path(&output).unwrap();
+    let rescan = hermes::collect_database(&store, &base.join("state.db"), 0).unwrap();
+    assert_eq!(
+        rescan.ingested, 1,
+        "only stale legacy child should re-ingest"
+    );
+    let reclassified = store.get(&child.session_id).unwrap().unwrap();
+    assert!(reclassified.is_subagent);
+
+    drop(store);
+    drop(writer);
+    std::fs::remove_dir_all(base).unwrap();
+}
