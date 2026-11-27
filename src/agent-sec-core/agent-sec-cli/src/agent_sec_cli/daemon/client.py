@@ -125,4 +125,6 @@ def _trace_context_with_fallback_trace_id(
         trace_id = clean_correlation_value("trace_id", payload.get("traceId"))
     if trace_id is None:
         payload["trace_id"] = get_invocation_id()
+    else:
+        payload["trace_id"] = trace_id
     return payload

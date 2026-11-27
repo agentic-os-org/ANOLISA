@@ -237,6 +237,37 @@ def test_daemon_client_preserves_explicit_trace_id(
     assert trace_context == {"trace_id": "trace-1", "session_id": "session-1"}
 
 
+def test_daemon_client_persists_trace_id_alias_as_trace_id(
+    monkeypatch,
+    tmp_path: Path,
+):
+    clear_invocation_context_for_tests()
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "invocation-1")
+    init_invocation_context()
+    client = DaemonClient(socket_path=tmp_path / "unused.sock")
+    trace_context = {"traceId": "alias-trace-1", "sessionId": "session-1"}
+    captured = {}
+
+    def fake_send_request(request: DaemonRequest, _timeout_ms: int) -> DaemonResponse:
+        captured["request"] = request
+        return DaemonResponse(request_id=request.request_id, ok=True)
+
+    monkeypatch.setattr(client, "_send_request", fake_send_request)
+
+    try:
+        client.call("scan-prompt", trace_context=trace_context)
+    finally:
+        clear_invocation_context_for_tests()
+
+    request = captured["request"]
+    assert request.trace_context == {
+        "traceId": "alias-trace-1",
+        "sessionId": "session-1",
+        "trace_id": "alias-trace-1",
+    }
+    assert trace_context == {"traceId": "alias-trace-1", "sessionId": "session-1"}
+
+
 def test_daemon_client_requires_explicit_trace_context(tmp_path: Path):
     client = DaemonClient(socket_path=tmp_path / "unused.sock")
 
