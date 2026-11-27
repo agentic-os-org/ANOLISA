@@ -16,8 +16,8 @@ use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 
 use crate::hermes_convert::{
-    convert_session, scoped_session_id, source_fingerprint, timestamp_ns, HermesMessage,
-    HermesSession,
+    convert_session, is_subagent, scoped_session_id, source_fingerprint, timestamp_ns,
+    HermesMessage, HermesSession,
 };
 use crate::store::{extract_user_message_previews, TrajectoryRecord, TrajectoryStore};
 
@@ -398,7 +398,7 @@ fn ingest_session(
         atif_json,
         project,
         source: SOURCE.to_string(),
-        is_subagent: false,
+        is_subagent: is_subagent(session),
         file_path,
         file_size: fingerprint,
         file_mtime_ns: last_seen_ns,
