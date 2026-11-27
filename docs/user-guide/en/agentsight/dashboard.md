@@ -274,9 +274,12 @@ This is the page to open when you need to know exactly what the Agent sent and r
 
 **Filter round content** searches the currently selected trajectory locally. It matches a
 case-insensitive literal substring in messages, reasoning, tool names, arguments, and result content,
-and shows the matching/total round count. **Clear filter** restores the full list. The selected round
-detail stays visible while filtering; selecting another trajectory or importing/loading a new
-document clears the filter. Searching sends no model request and leaves **Download JSON** unchanged.
+and shows the matching and total round counts. Use **Previous match** or **Next match** to cycle
+through matching rounds. With focus in the filter field, press **Shift+Enter** or **Enter**
+respectively. The count shows your position when a match is selected. Editing or clearing the
+filter keeps the current round detail open. **Clear filter** restores the full list, and switching
+trajectories or importing or loading a new document clears the filter. Searching sends no model
+request and leaves **Download JSON** unchanged.
 
 ## Settings
 
