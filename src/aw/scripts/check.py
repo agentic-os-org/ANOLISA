@@ -161,7 +161,9 @@ def scope(event_name: str, event: dict, actual: str, repo: Path = REPO,
         )
     return any(
         tokenless_input(path) if compatibility else
-        (path.startswith(("src/aw/", "providers/", "distribution/packaging/aw/"))
+        (path.startswith((
+            "src/aw/", "providers/", "distribution/packaging/aw/", "src/semantic-arbiter/",
+        ))
          or path == "distribution/Makefile"
          or path in {".github/workflows/aw-ci.yml", ".github/workflows/aw-integration.yml",
                      ".github/workflows/aw-release.yml"})
@@ -229,7 +231,8 @@ def package_permissions() -> None:
 def check(*, daily: bool = False) -> None:
     """Run the existing contract checks and the gate's own behavior tests."""
     actual = candidate()
-    provider_roots = [REPO / "providers" / name for name in ("agent-sec-core", "tokenless")]
+    provider_roots = [REPO / "providers" / name
+                      for name in ("agent-sec-core", "tokenless", "semantic-arbiter")]
     for root in [AW, *provider_roots]:
         run(["cargo", "fmt", "--all", "--", "--check"], root)
     selftest()

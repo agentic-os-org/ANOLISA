@@ -4,6 +4,20 @@
 
 Use this guide when you need to understand, extend, test, or contribute to ANOLISA.
 
+## Semantic Arbiter
+
+- [Component overview](../../../src/semantic-arbiter/README.md)
+- [Protocol and public library contracts](../../../src/semantic-arbiter/docs/design/protocol.md)
+- [CLI and integration guide](../../user-guide/en/semantic-arbiter/index.md)
+
+Run the developer examples from `src/semantic-arbiter` to inspect closed-scenario unit replacement, the in-memory executor fixture and EvidenceSource collection:
+
+```bash
+cargo run --example judgment_unit
+cargo run --example executor_fixture
+cargo run --example evidence_source
+```
+
 ## SDK
 
 - [Tokenless Python SDK](sdk/tokenless/index.md)

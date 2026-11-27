@@ -36,6 +36,7 @@
 - [SkillFS](skillfs/index.md)：将 Skills 组织成稳定的文件系统视图，供 Agent 按需发现和读取。
 - [Workspace Checkpoint](ws-ckpt/index.md)：为 Agent 工作区创建快照、比较文件差异，并在需要时回滚变更。
 - [ktuner](ktuner/index.md)：检查 Linux 内核参数，给出调优建议，并支持应用和回滚改动。
+- [semantic-arbiter](semantic-arbiter/index.md)：孵化中的语义判断组件，支持成果保护与任务范围的确定性检查和模型求值，不执行真实动作。
 
 <!-- navigation:end -->
 

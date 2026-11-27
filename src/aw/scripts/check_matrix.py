@@ -243,8 +243,8 @@ def validate(matrix: dict, runnable: dict[str, set[str]], root: Path) -> None:
     cells = capability_cells(matrix)
     if any(len(row) != len(HOOK_EVENTS) for row in cells.values()):
         raise ValueError("incomplete 16 x framework capability cell grid")
-    if set(matrix["providers"]) != {"sec-core", "tokenless"}:
-        raise ValueError("sec-core and Tokenless provider contracts are required")
+    if set(matrix["providers"]) != {"sec-core", "tokenless", "semantic-arbiter"}:
+        raise ValueError("sec-core, Tokenless and semantic-arbiter provider contracts are required")
     for provider, cases in matrix["providers"].items():
         covered(cases, provider)
     expected_grid = table(matrix)

@@ -86,6 +86,13 @@
     ],
     "notes": "Trace the selected CLI mode into its owning framework crate. Distinguish software installation, Hook connection and provider contracts. Read scoped AW instructions."
   },
+  "semantic-arbiter": {
+    "architecture": "Agent-independent model judgments and deterministic evidence checking",
+    "entrypoints": [
+      "src/semantic-arbiter/Cargo.toml"
+    ],
+    "notes": "Identify the judgment unit, the deterministic local policy or hard gate versus the model fallback route, and the evidence stage. Distinguish a model verdict from an evidence-gap fail-closed decision; do not infer detection capability from block counts alone."
+  },
   "benchmark": {
     "architecture": "Benchmark runners, workloads and evaluation contracts",
     "entrypoints": [
