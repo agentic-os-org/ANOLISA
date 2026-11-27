@@ -9,26 +9,39 @@ function browser(t, { secure = true, writeText, execCommand = () => true } = {})
   );
   const children = [];
   const copies = [];
-  let focused = false;
+  const restorations = [];
+  const initialFocus = {
+    isConnected: true,
+    focus(options) {
+      restorations.push(options);
+      document.activeElement = this;
+    },
+  };
   let selected = false;
   const document = {
+    activeElement: initialFocus,
     createElement(tag) {
       assert.equal(tag, 'textarea');
       return {
         value: '',
         style: {},
-        focus() { focused = true; },
+        focus() { document.activeElement = this; },
         select() { selected = true; },
+        remove() { document.body.removeChild(this); },
       };
     },
     body: {
       appendChild(node) { children.push(node); },
-      removeChild(node) { children.splice(children.indexOf(node), 1); },
+      removeChild(node) {
+        children.splice(children.indexOf(node), 1);
+        if (document.activeElement === node) document.activeElement = this;
+      },
     },
     execCommand(command) {
       assert.equal(command, 'copy');
-      assert.ok(focused && selected);
+      assert.ok(selected);
       assert.equal(children.length, 1);
+      assert.equal(document.activeElement, children[0]);
       copies.push(children[0].value);
       return execCommand();
     },
@@ -43,7 +56,7 @@ function browser(t, { secure = true, writeText, execCommand = () => true } = {})
       else delete globalThis[key];
     }
   });
-  return { children, copies };
+  return { children, copies, document, initialFocus, restorations };
 }
 
 test('secure clipboard waits for completion before showing feedback', async (t) => {
@@ -131,4 +144,64 @@ test('a rejected clipboard write whose fallback fails or throws does not invoke 
     assert.equal(completions, 0);
     assert.deepEqual(state.children, []);
   }
+});
+
+for (const [outcome, execCommand, expectedFeedback] of [
+  ['succeeds', () => true, 1],
+  ['returns false', () => false, 0],
+  ['throws', () => { throw new Error('copy unsupported'); }, 0],
+]) {
+  test(`restores focus without scrolling when fallback ${outcome}`, (t) => {
+    const state = browser(t, { execCommand });
+    let completions = 0;
+    copyText('keyboard copy', () => { completions += 1; });
+    assert.equal(state.document.activeElement, state.initialFocus);
+    assert.deepEqual(state.restorations, [{ preventScroll: true }]);
+    assert.equal(completions, expectedFeedback);
+    assert.deepEqual(state.children, []);
+  });
+}
+
+test('restores the control focused when the asynchronous fallback starts', async (t) => {
+  let rejectWrite;
+  const state = browser(t, {
+    writeText: () => new Promise((_, reject) => { rejectWrite = reject; }),
+  });
+  const laterFocus = {
+    isConnected: true,
+    focus() { state.document.activeElement = this; },
+  };
+  copyText('delayed copy', () => {});
+  laterFocus.focus();
+  rejectWrite(new Error('permission denied'));
+  await new Promise(setImmediate);
+  assert.equal(state.document.activeElement, laterFocus);
+  assert.deepEqual(state.restorations, []);
+});
+
+test('leaves focus alone when a copy handler moves it elsewhere', (t) => {
+  const other = { isConnected: true };
+  const state = browser(t, {
+    execCommand() {
+      state.document.activeElement = other;
+      return true;
+    },
+  });
+  copyText('keyboard copy', () => {});
+  assert.equal(state.document.activeElement, other);
+  assert.deepEqual(state.restorations, []);
+  assert.deepEqual(state.children, []);
+});
+
+test('does not focus a control that was removed during copying', (t) => {
+  const state = browser(t, {
+    execCommand() {
+      state.initialFocus.isConnected = false;
+      return true;
+    },
+  });
+  copyText('keyboard copy', () => {});
+  assert.equal(state.document.activeElement, state.document.body);
+  assert.deepEqual(state.restorations, []);
+  assert.deepEqual(state.children, []);
 });
