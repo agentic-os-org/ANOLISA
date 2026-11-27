@@ -82,11 +82,11 @@ class Utf8PathPackagingTests(unittest.TestCase):
     def test_packager_succeeds_under_c_locale_via_subprocess(self):
         """Run the packager itself under the C locale, matching #10783.
 
-        A direct call to package() cannot exercise this: the constructor reads
-        sys.flags.utf8_mode of the *test* interpreter, which CI starts as UTF-8.
-        Only a fresh process with LC_ALL=C PYTHONUTF8=0 reproduces the reported
-        ASCII filesystem encoding, where decoded Unicode paths must still be
-        stat()-able. The packager re-execs itself into UTF-8 mode at entry.
+        A direct call to package() from the test interpreter (started as UTF-8)
+        cannot exercise this: only a fresh process with LC_ALL=C PYTHONUTF8=0
+        reproduces the ASCII filesystem encoding that broke #10783. The
+        packager addresses it with byte paths for file access and an explicit
+        UTF-8 encoding for tar member names, so both work under any locale.
         """
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

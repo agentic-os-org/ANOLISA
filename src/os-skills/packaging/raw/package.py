@@ -120,7 +120,15 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
         with staged.open("wb") as raw, gzip.GzipFile(
             filename="", mode="wb", fileobj=raw, mtime=0
         ) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT) as tar:
+            # tarfile encodes member names with the passed encoding (default:
+            # the filesystem encoding). Force UTF-8 so tar names match the
+            # UTF-8 SBOM names even under LC_ALL=C, where the default is ASCII.
+            with tarfile.open(
+                fileobj=compressed,
+                mode="w",
+                format=tarfile.GNU_FORMAT,
+                encoding="utf-8",
+            ) as tar:
                 for name in sorted(directories | files.keys()):
                     entry = tarfile.TarInfo("." if name == "." else f"./{name}")
                     entry.mtime = epoch
