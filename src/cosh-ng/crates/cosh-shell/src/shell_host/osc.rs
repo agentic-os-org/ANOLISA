@@ -642,7 +642,7 @@ impl OscParser {
             if bytes[idx] == b'\x08' {
                 self.clean.append(&run)?;
                 run.clear();
-                self.clean.pop_last_utf8_char()?;
+                self.push_clean_byte(bytes[idx])?;
             } else {
                 run.push(bytes[idx]);
             }
@@ -654,7 +654,11 @@ impl OscParser {
 
     fn push_clean_byte(&mut self, byte: u8) -> io::Result<()> {
         if byte == b'\x08' {
-            return self.clean.pop_last_utf8_char();
+            let lower_bound = self
+                .current
+                .as_ref()
+                .map_or(0, |command| command.output_start);
+            return self.clean.pop_last_utf8_char(lower_bound);
         }
         self.clean.append(&[byte])
     }

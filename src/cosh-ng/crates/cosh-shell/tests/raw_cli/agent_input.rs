@@ -1287,6 +1287,46 @@ fn raw_cli_non_ascii_shell_input_supports_backspace() {
 }
 
 #[test]
+fn raw_cli_command_output_backspace_keeps_session_alive() {
+    assert_command_output_backspace_keeps_session_alive("bash");
+}
+
+#[test]
+fn raw_cli_zsh_command_output_backspace_keeps_session_alive() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    assert_command_output_backspace_keeps_session_alive("zsh");
+}
+
+fn assert_command_output_backspace_keeps_session_alive(shell: &str) {
+    const FOLLOWUP_OUTPUT: &str = "backspace-session-alive";
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", shell],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"printf '\\b'\n"),
+            ("cosh-osc$ ", b"printf '%s%s\\n' backspace- session-alive\n"),
+            (FOLLOWUP_OUTPUT, b""),
+            ("cosh-osc$ ", b"exit 0\n"),
+        ],
+    );
+
+    assert!(
+        strip_ansi_escape(&output)
+            .lines()
+            .any(|line| line.trim_matches('\r') == FOLLOWUP_OUTPUT),
+        "{output}"
+    );
+}
+
+#[test]
 fn routing_c3_explicit_draft_soft_newline_composes_multiline_prompt() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
