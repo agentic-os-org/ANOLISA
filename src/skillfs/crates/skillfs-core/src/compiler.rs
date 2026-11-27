@@ -1375,7 +1375,81 @@ Run: pip install requests
             let input = format!("{fence}sh\necho \"\n{fence}\npip install control\n");
             let expected = input.replace("pip install control", "uv pip install control");
             assert_eq!(compile(&input, &env_uv_pnpm()), expected);
+
+            let unterminated_heredoc =
+                format!("{fence}sh\ncat <<EOF\npip install inside\n{fence}\npip install control\n");
+            let expected_heredoc =
+                unterminated_heredoc.replace("pip install control", "uv pip install control");
+            assert_eq!(
+                compile(&unterminated_heredoc, &env_uv_pnpm()),
+                expected_heredoc
+            );
         }
+        let indented_fence_in_heredoc = concat!(
+            "```sh\n",
+            "cat <<-EOF\n",
+            "\t```\n",
+            "\tpip install inside\n",
+            "    ```\n",
+            "    pip install inside2\n",
+            "\tEOF\n",
+            "```\n",
+            "pip install control\n",
+        );
+        assert_eq!(
+            compile(indented_fence_in_heredoc, &env_uv_pnpm()),
+            indented_fence_in_heredoc.replace("pip install control", "uv pip install control")
+        );
+        let pipeline = crate::transform::TransformPipeline::directive_only(env_uv_pnpm());
+        for open_indent in [" ", "  ", "   "] {
+            for body_indent in ["    ", "\t"] {
+                let with_eof = format!(
+                    "{open_indent}```sh\ncat <<'EOF'\n{body_indent}```\npip install literal\nEOF\n{open_indent}```\npip install control\n"
+                );
+                assert_eq!(
+                    pipeline.run(&with_eof),
+                    with_eof.replace("pip install control", "uv pip install control"),
+                    "{open_indent:?} / {body_indent:?}"
+                );
+                let unterminated = format!(
+                    "{open_indent}```sh\ncat <<'EOF'\n{body_indent}```\npip install literal\n{open_indent}```\npip install control\n"
+                );
+                assert_eq!(
+                    pipeline.run(&unterminated),
+                    unterminated.replace("pip install control", "uv pip install control"),
+                    "unterminated {open_indent:?} / {body_indent:?}"
+                );
+            }
+        }
+        let list_container = concat!(
+            "10. Step\n",
+            "     ```sh\n",
+            "    cat <<'EOF'\n",
+            "        ```\n",
+            "    pip install literal\n",
+            "    EOF\n",
+            "    ```\n",
+            "pip install control\n",
+        );
+        assert_eq!(
+            pipeline.run(list_container),
+            list_container.replace("pip install control", "uv pip install control")
+        );
+        let paragraph_continuation = concat!(
+            "Ordinary paragraph\n",
+            "2. Still the same paragraph\n",
+            "   ```sh\n",
+            "cat <<'EOF'\n",
+            "    ```\n",
+            "pip install literal\n",
+            "EOF\n",
+            "   ```\n",
+            "pip install control\n",
+        );
+        assert_eq!(
+            pipeline.run(paragraph_continuation),
+            paragraph_continuation.replace("pip install control", "uv pip install control")
+        );
         assert_eq!(
             compile(
                 "Use `echo \"` as an example.\npip install a\n",
@@ -1392,6 +1466,210 @@ Run: pip install requests
         );
         // Quotes can begin in the middle of a shell word as well.
         assert_multiline_preserved("echo a'b\npip install requests\n'\n");
+    }
+
+    #[test]
+    fn test_heuristic_consecutive_sibling_list_items_and_delimiters() {
+        let pipeline = crate::transform::TransformPipeline::directive_only(env_uv_pnpm());
+
+        let consecutive_siblings = concat!(
+            "1. First step\n",
+            "2. Second step\n",
+            "    ```sh\n",
+            "    echo \"\n",
+            "    ```\n",
+            "pip install control\n",
+        );
+        assert_eq!(
+            pipeline.run(consecutive_siblings),
+            consecutive_siblings.replace("pip install control", "uv pip install control")
+        );
+
+        let nested_then_outer_sibling = concat!(
+            "1. Outer\n",
+            "   - Inner\n",
+            "2. Outer 2\n",
+            "    ```sh\n",
+            "    echo \"\n",
+            "    ```\n",
+            "pip install control\n",
+        );
+        assert_eq!(
+            pipeline.run(nested_then_outer_sibling),
+            nested_then_outer_sibling.replace("pip install control", "uv pip install control")
+        );
+
+        let changed_delimiter = concat!(
+            "1. First step\n",
+            "2) Second step\n",
+            "    ```sh\n",
+            "    echo \"\n",
+            "    ```\n",
+            "pip install control\n",
+        );
+        assert_eq!(
+            pipeline.run(changed_delimiter),
+            changed_delimiter.replace("pip install control", "uv pip install control")
+        );
+
+        for switched in [
+            concat!(
+                "- Bullet\n",
+                "2. Ordered\n",
+                "    ```sh\n",
+                "    echo \"\n",
+                "    ```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "1. Outer\n",
+                "   - Inner\n",
+                "   2) Nested sibling\n",
+                "       ```sh\n",
+                "       echo \"\n",
+                "       ```\n",
+                "pip install control\n",
+            ),
+        ] {
+            assert_eq!(
+                pipeline.run(switched),
+                switched.replace("pip install control", "uv pip install control"),
+                "{switched:?}"
+            );
+        }
+
+        for continuation in [
+            concat!(
+                "Ordinary paragraph\n",
+                "2) Still the same paragraph\n",
+                "   ```sh\n",
+                "cat <<'EOF'\n",
+                "    ```\n",
+                "pip install literal\n",
+                "EOF\n",
+                "   ```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "1. Outer\n",
+                "   2) Continuation of item 1 paragraph\n",
+                "      ```sh\n",
+                "   cat <<'EOF'\n",
+                "       ```\n",
+                "   pip install literal\n",
+                "   EOF\n",
+                "      ```\n",
+                "pip install control\n",
+            ),
+        ] {
+            assert_eq!(
+                pipeline.run(continuation),
+                continuation.replace("pip install control", "uv pip install control"),
+                "{continuation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_heuristic_closing_fence_rejects_non_ascii_whitespace() {
+        let pipeline = crate::transform::TransformPipeline::directive_only(env_uv_pnpm());
+        let nbsp_fence = concat!(
+            "```sh\n",
+            "cat <<'EOF'\n",
+            "```\u{00a0}\n",
+            "pip install literal\n",
+            "EOF\n",
+            "```\n",
+            "pip install control\n",
+        );
+        assert_eq!(
+            pipeline.run(nbsp_fence),
+            nbsp_fence.replace("pip install control", "uv pip install control")
+        );
+    }
+
+    #[test]
+    fn test_heuristic_list_boundary_fences_and_block_transitions() {
+        let pipeline = crate::transform::TransformPipeline::directive_only(env_uv_pnpm());
+
+        for case in [
+            concat!(
+                "-\n",
+                "\n",
+                "  ```sh\n",
+                "  cat <<'EOF'\n",
+                "    ```\n",
+                "  pip install literal\n",
+                "  EOF\n",
+                "  ```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "    echo code\n",
+                "2. Ordered item\n",
+                "    ```sh\n",
+                "    echo \"\n",
+                "    ```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "Heading\n",
+                "===\n",
+                "2. Ordered item\n",
+                "    ```sh\n",
+                "    echo \"\n",
+                "    ```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "-     code\n",
+                "  2. Ordered item\n",
+                "      ```sh\n",
+                "      echo \"\n",
+                "      ```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "1. First item\n",
+                "Lazy continuation\n",
+                "2) Second item\n",
+                "    ```sh\n",
+                "    echo \"\n",
+                "    ```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "10. Step\n",
+                "    ```sh\n",
+                "    cat <<EOF\n",
+                "    pip install inside\n",
+                "\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "10. A list example\n",
+                "    ```sh\n",
+                "    echo hello\n",
+                "```\n",
+                "cat <<EOF\n",
+                "pip install inside_top_level\n",
+                "```\n",
+                "pip install control\n",
+            ),
+            concat!(
+                "- ```sh\n",
+                "  cat <<EOF\n",
+                "  pip install inside\n",
+                "  ```\n",
+                "pip install control\n",
+            ),
+        ] {
+            assert_eq!(
+                pipeline.run(case),
+                case.replace("pip install control", "uv pip install control"),
+                "{case:?}"
+            );
+        }
     }
 
     #[test]
