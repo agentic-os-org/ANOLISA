@@ -136,6 +136,7 @@ class BatchExecutionTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(list(self.root.glob("atif-*.json")))
 
+    @unittest.skipUnless(os.name == "posix", "executable analyzer fixtures require POSIX")
     def test_real_cli_all_successes_exit_zero(self) -> None:
         analyzer = self.root / "analyzer.py"
         analyzer.write_text(
