@@ -19,8 +19,9 @@ readme = "README.md"
 # Shared dependencies across crates
 skillfs-core = { path = "crates/skillfs-core" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
+unicode-normalization = "0.1"
 sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"

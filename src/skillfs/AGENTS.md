@@ -8,7 +8,7 @@
 
 ```text
 crates/
-  skillfs-core/   parser / store / views / compiler / env / watcher
+  skillfs-core/   parser / store / views / compiler / env / watcher / plugin validation
   skillfs-fuse/   FUSE filesystem layer
   skillfs-cli/    `skillfs` binary (mount / stop / explain / classify / validate / list)
 docs/specs/       implementation specifications

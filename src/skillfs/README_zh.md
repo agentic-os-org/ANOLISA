@@ -121,6 +121,9 @@ make build
 # 验证 skills
 cargo run -p skillfs -- validate /path/to/skills
 
+# 验证 Agent Plugins 包（Experimental）
+cargo run -p skillfs -- validate --package /path/to/package --format json
+
 # 列出 skills
 cargo run -p skillfs -- list /path/to/skills
 

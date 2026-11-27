@@ -443,6 +443,35 @@ are parsed normally, and malformed bullets produce a warning and a
 In JSON output, error and warning entries include a `path` field so consumers
 can locate the exact offending skill file.
 
+#### Validate an Agent Plugins package (Experimental)
+
+`--package` requires a `skillfs` build newer than `v0.5.9` (`skillfs/v0.5.9`
+and earlier support only the `skillfs validate <SOURCE>` mode), and you can
+check your build with `skillfs validate --help`.
+
+Use the package root that contains `plugin.json`.
+
+```bash
+skillfs validate --package /path/to/package
+skillfs validate --package /path/to/package --format json
+```
+
+The command validates Agent Plugins 1.0 manifests, discovers valid skills and
+MCP server configurations, and reports diagnostics. It runs offline and leaves
+the package files untouched. MCP validation checks configuration without
+starting servers or connecting to endpoints.
+
+The validator caps each `plugin.json`, `mcp.json`, and `SKILL.md` file at 1 MiB.
+It checks `${PLUGIN_DATA}` paths against a virtual data root, and the MCP
+consumer must enforce containment in the actual data directory at runtime.
+For skill frontmatter, this experimental validator uses `serde_yaml` and
+treats explicit YAML scalar tags such as `!!int 42` as literal strings.
+
+Exit code 0 means the package root and manifest were accepted. The report may
+still contain warnings, disabled components, or skipped skills and servers.
+Exit code 1 means the package was rejected. With `--format json`, both cases
+produce a report with `accepted` and `diagnostics`.
+
 ### list and classify
 
 ```bash

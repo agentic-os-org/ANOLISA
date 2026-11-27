@@ -132,6 +132,9 @@ make build
 # Validate skills.
 cargo run -p skillfs -- validate /path/to/skills
 
+# Validate an Agent Plugins package (experimental).
+cargo run -p skillfs -- validate --package /path/to/package --format json
+
 # List skills.
 cargo run -p skillfs -- list /path/to/skills
 
