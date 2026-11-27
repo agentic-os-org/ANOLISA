@@ -194,7 +194,7 @@ fn process_session(
         !is_codex && (session.source == "gemini-cli" || gemini::is_gemini_chat(&events));
     let is_cline = !is_codex && !is_gemini && cline::is_cline_task(&events);
     if is_cline {
-        cline::append_ui_records(&session.path, &mut events);
+        cline::try_append_ui_records(&session.path, &mut events)?;
     }
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?

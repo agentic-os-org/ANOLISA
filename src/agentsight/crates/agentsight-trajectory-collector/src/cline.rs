@@ -40,7 +40,8 @@ pub(crate) fn scan_fingerprint(
     api_mtime_ns: i64,
 ) -> Result<i64> {
     let mut digest = Sha256::new();
-    digest.update(b"agentsight-cline-files-v1\0");
+    // Revisit v1 rows that may have cached an unreadable UI file as absent.
+    digest.update(b"agentsight-cline-files-v2\0");
     digest.update(api_size.to_le_bytes());
     digest.update(api_mtime_ns.to_le_bytes());
     digest.update((project.len() as u64).to_le_bytes());
@@ -193,27 +194,36 @@ pub fn normalize_events(events: &mut Vec<serde_json::Value>) {
 /// ingestion even when the API history has already finished. A
 /// missing or unparsable sibling leaves the events unchanged.
 pub fn append_ui_records(session_path: &Path, events: &mut Vec<serde_json::Value>) {
+    if let Err(error) = try_append_ui_records(session_path, events) {
+        log::debug!("{error:#}");
+    }
+}
+
+pub(crate) fn try_append_ui_records(
+    session_path: &Path,
+    events: &mut Vec<serde_json::Value>,
+) -> Result<()> {
     // Guard against ingesting the ui stream twice when the discovered file
     // is itself `ui_messages.json` (a scan_dirs misconfiguration).
     if session_path
         .file_name()
         .is_some_and(|n| n == "ui_messages.json")
     {
-        return;
+        return Ok(());
     }
     let Some(dir) = session_path.parent() else {
-        return;
+        return Ok(());
     };
-    let Ok(content) = std::fs::read_to_string(dir.join("ui_messages.json")) else {
-        log::debug!(
-            "Cline ui messages missing next to {}",
-            session_path.display()
-        );
-        return;
+    let path = dir.join("ui_messages.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     if let Some(records) = record_array(&content) {
         events.extend(records);
     }
+    Ok(())
 }
 
 /// Convert Cline task events into an ATIF v1.7 trajectory.
@@ -486,7 +496,9 @@ pub fn extract_private_metadata(
 /// task-history metadata. Returns `None` for content that is not a Cline task.
 pub fn convert_task_file(path: &Path, content: &str) -> Option<Result<AtifTrajectory>> {
     let mut events = record_array(content)?;
-    append_ui_records(path, &mut events);
+    if let Err(error) = try_append_ui_records(path, &mut events) {
+        return Some(Err(error));
+    }
     let session_id = task_session_id(path);
     let project = session_id
         .as_deref()
@@ -845,6 +857,42 @@ mod tests {
         std::fs::write(state.join("taskHistory.json"), "not json").unwrap();
         assert!(task_projects(&tasks).is_empty());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn path_conversion_distinguishes_optional_ui_from_read_errors() {
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("cline-read-errors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let _cleanup = Cleanup(dir.clone());
+        let api = dir.join(API_HISTORY_FILENAME);
+        let ui = dir.join("ui_messages.json");
+        let content = api_content();
+        let convert = || convert_task_file(&api, &content).unwrap();
+        assert_eq!(convert().unwrap().steps.len(), 3);
+        for text in ["[]", "malformed"] {
+            std::fs::write(&ui, text).unwrap();
+            assert_eq!(convert().unwrap().steps.len(), 3);
+        }
+        // Invalid UTF-8 makes read_to_string fail even when running as root.
+        std::fs::write(&ui, [0xff]).unwrap();
+        let error = convert().unwrap_err();
+        assert!(error.to_string().contains(ui.to_str().unwrap()));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        // Backwards-compatible wrapper ignores read errors without mutating events.
+        let mut events = record_array(&content).unwrap();
+        let before = events.len();
+        append_ui_records(&api, &mut events);
+        assert_eq!(events.len(), before);
     }
 
     #[test]
