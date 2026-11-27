@@ -101,6 +101,8 @@ interface CausalAttributionPanelProps {
   isPreambleRound?: boolean;
   /** "conversation" when the parent page is viewing a conversation_id; unset otherwise. */
   idKind?: 'session' | 'conversation';
+  /** True when the active view is an embedded subagent without its own backend session id. */
+  unsupportedTarget?: boolean;
   /** Called when the user clicks a causal node — parent scrolls the trajectory to that step. */
   onScrollToStep?: (stepId: number) => void;
 }
@@ -491,6 +493,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   roundLabel,
   isPreambleRound = false,
   idKind,
+  unsupportedTarget = false,
   onScrollToStep,
 }) => {
   const navigate = useNavigate();
@@ -540,6 +543,14 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   // leaving it up would render the old round's verdict under the new label.
   useEffect(() => {
     leaveRun();
+    if (unsupportedTarget || !sessionId.trim()) {
+      setHistory([]);
+      setCaseData(null);
+      setCached(false);
+      setComplaint('');
+      setSelectedAltIdx(null);
+      return retireRun;
+    }
     const past = readHistory(sessionId, roundIndex, idKind);
     setHistory(past);
     if (past.length > 0) {
@@ -554,9 +565,10 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
     }
     setSelectedAltIdx(null);
     return retireRun;
-  }, [sessionId, roundIndex, idKind]);
+  }, [sessionId, roundIndex, idKind, unsupportedTarget]);
 
-  const canRun = complaint.trim().length > 0 && !loading;
+  const hasTarget = !unsupportedTarget && sessionId.trim().length > 0;
+  const canRun = hasTarget && complaint.trim().length > 0 && !loading;
 
   const run = async (force: boolean) => {
     if (!canRun) return;
@@ -695,6 +707,12 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
         </span>
       </div>
 
+      {unsupportedTarget && (
+        <div className="mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 leading-snug">
+          <b>提示：</b>当前嵌入式子 Agent 轨迹没有独立的 Session ID，无法单独发起因果归因；请切回主轨迹或选择带独立 Session ID 的子轨迹后再分析。
+        </div>
+      )}
+
       {isPreambleRound && (
         <div className="mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 leading-snug">
           <b>提示：</b>“前置”轮只包含系统 prompt，没有 agent 决策可分析。建议切到左侧某个“第 N 轮”再发起归因，结果会更有意义。
@@ -706,16 +724,18 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
           <textarea
             value={complaint}
             onChange={(e) => setComplaint(e.target.value)}
+            disabled={!hasTarget}
             placeholder="如：这轮引用靠谱吗？总觉得不太对…"
             rows={2}
-            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent"
+            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed"
           />
           <div className="flex flex-wrap gap-2 mt-2">
             {DEFAULT_PROMPTS.map((p) => (
               <button
                 key={p}
+                disabled={!hasTarget}
                 onClick={() => setComplaint(p)}
-                className="text-xs px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full"
+                className="text-xs px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {p}
               </button>
