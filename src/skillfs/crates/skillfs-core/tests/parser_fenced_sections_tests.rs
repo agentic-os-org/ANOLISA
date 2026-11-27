@@ -338,3 +338,81 @@ description: Adjacent list and top-level examples
         ["target"],
     );
 }
+
+#[test]
+fn test_fence_starting_a_list_item_hides_example_section() {
+    for (opener, indent, closer) in [("- ```markdown", "  ", "```"), ("1. ~~~yaml", "   ", "~~~")] {
+        let content = format!(
+            "---\nname: demo\ndescription: Demo\n---\n\n{opener}\n{indent}## Parameters\n{indent}- `sample` (bogus, required): example\n{indent}{closer}\n"
+        );
+        let entry = parse_skill_md(&content, "demo");
+        assert!(
+            entry.parse_status.is_ok(),
+            "{opener}: {:?}",
+            entry.parse_status
+        );
+        assert!(
+            entry.parameters.is_empty(),
+            "{opener}: {:?}",
+            entry.parameters
+        );
+    }
+}
+
+#[test]
+fn test_fence_starting_a_nested_item_ends_at_indented_closer() {
+    let content = r#"---
+name: demo
+description: Demo
+---
+
+## Parameters
+
+- - ```markdown
+    ## Parameters
+    - `sample` (bogus, required): example
+    ```
+    - `real` (string, required): After the closer, still in the item
+"#;
+    let entry = parse_skill_md(content, "demo");
+    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+    assert_eq!(entry.parameters.len(), 1);
+    assert_eq!(entry.parameters[0].name, "real");
+}
+
+#[test]
+fn test_unclosed_fence_starting_a_list_item_ends_at_dedent() {
+    let content = r#"---
+name: demo
+description: Demo
+---
+
+- ```markdown
+  ## Parameters
+  - `sample` (bogus, required): example
+## Parameters
+- `real` (string, required): After the item
+"#;
+    let entry = parse_skill_md(content, "demo");
+    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+    assert_eq!(entry.parameters.len(), 1);
+    assert_eq!(entry.parameters[0].name, "real");
+}
+
+#[test]
+fn test_indented_code_starting_a_list_item_does_not_open_a_fence() {
+    let content = r#"---
+name: demo
+description: Demo
+---
+
+-     ```markdown
+
+  ## Parameters
+  - `real` (string, required): At the item content column
+"#;
+    let entry = parse_skill_md(content, "demo");
+    assert!(entry.parse_status.is_ok(), "{:?}", entry.parse_status);
+    assert_eq!(entry.parameters.len(), 1);
+    assert_eq!(entry.parameters[0].name, "real");
+}
