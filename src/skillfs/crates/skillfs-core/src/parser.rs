@@ -444,6 +444,18 @@ fn split_sections(
             pushed_any = true;
         }
 
+        if pushed_any && col <= container_indent.saturating_add(3) {
+            if let Some((marker, len)) = fence_open(&line[idx..]) {
+                open_fence = Some(Fence {
+                    marker,
+                    len,
+                    container_indent,
+                });
+                in_paragraph = false;
+                continue;
+            }
+        }
+
         if !pushed_any {
             in_paragraph = !(is_thematic_break(trimmed)
                 || (indent <= container_indent.saturating_add(3)
