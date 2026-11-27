@@ -33,7 +33,7 @@ class _Claim:
     bridge: Any
 
 
-def _reportable_fault(hook: dict[str, Any], payload: dict[str, Any], scope: Any) -> bool:
+def _reportable_fault(hook: dict[str, Any], payload: dict[str, Any], bridge: Any) -> bool:
     """Report-configured tool.after faults keep the checked result and continue.
 
     A latched scope validity failure already stopped this task; identity and
@@ -42,8 +42,45 @@ def _reportable_fault(hook: dict[str, Any], payload: dict[str, Any], scope: Any)
     return (
         payload["event"] == "tool.after"
         and hook.get("on_error") == "report"
-        and not scope.failed
+        and bridge.failure_reply("tool.after", hook) == {}
     )
+
+
+def _valid_block(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    kind = block.get("type")
+    if kind == "text":
+        return isinstance(block.get("text"), str)
+    if kind == "image":
+        return all(isinstance(block.get(key), str) for key in ("data", "mimeType"))
+    if kind == "resource_link":
+        # The SDK stringifies the URI and joins nonempty names and descriptions.
+        return all(
+            not block.get(key) or isinstance(block[key], str) for key in ("name", "description")
+        )
+    if kind == "resource":
+        resource = block.get("resource") or {}
+        return "text" not in resource or isinstance(resource["text"], str)
+    # The SDK skips unsupported block types.
+    return True
+
+
+def _checked_result(result: Any) -> dict[str, Any]:
+    # Freeze the exact envelope inspected by the Hook and returned to the SDK.
+    try:
+        snapshot = json.loads(json.dumps(result, ensure_ascii=False, allow_nan=False).encode())
+        if (
+            isinstance(snapshot, dict)
+            and "isError" not in snapshot
+            and type(snapshot.get("is_error", False)) is bool
+        ):
+            content = snapshot.get("content", [])
+            if isinstance(content, list) and all(_valid_block(block) for block in content):
+                return snapshot
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        pass
+    return {"content": [{"type": "text", "text": "Invalid MCP tool result"}], "is_error": True}
 
 
 class ManagedServer(dict):
@@ -107,7 +144,10 @@ class ManagedServer(dict):
                 try:
                     code, output = await bridge.scope.invoke(hook, payload)
                 except Exception as error:
-                    if not _reportable_fault(hook, payload, bridge.scope):
+                    if payload["event"] == "tool.before" and not bridge.scope.failed:
+                        return {"content": [{"type": "text", "text": "AW could not confirm this tool check"}],
+                                "is_error": True}
+                    if not _reportable_fault(hook, payload, bridge):
                         raise
                     logging.getLogger(__name__).error(
                         "AW %s/%s failed: %s; on_error=%s",
@@ -123,7 +163,10 @@ class ManagedServer(dict):
                         raise CallbackFailure("MCP denial reason is invalid")
                     return {"content": [{"type": "text", "text": reason}], "is_error": True}
                 if code != 0:
-                    if not _reportable_fault(hook, payload, bridge.scope):
+                    if payload["event"] == "tool.before" and not bridge.scope.failed:
+                        return {"content": [{"type": "text", "text": "AW could not confirm this tool check"}],
+                                "is_error": True}
+                    if not _reportable_fault(hook, payload, bridge):
                         raise CallbackFailure("MCP Hook execution failed")
                     logging.getLogger(__name__).error(
                         "AW %s/%s failed: exit %d; on_error=%s",
@@ -217,20 +260,7 @@ class ManagedServer(dict):
             )
             await bridge.invocations.finish(entry)
             raise
-        try:
-            snapshot = _copy_json(result)
-            if (
-                not isinstance(snapshot, dict)
-                or "isError" in snapshot
-                or type(snapshot.get("is_error", False)) is not bool
-            ):
-                raise CallbackFailure("SDK MCP results require the public boolean is_error field")
-        except Exception:
-            bridge.failure_reply("tool.after", {})
-            await bridge.stop_task()
-            raise CallbackFailure(
-                "AW stopped the MCP task after an invalid handler result"
-            ) from None
+        snapshot = _checked_result(result)
         bridge.invocations.claim(entry.call_id, entry.name, arguments, "after")
         replacement = await self.steps(
             {

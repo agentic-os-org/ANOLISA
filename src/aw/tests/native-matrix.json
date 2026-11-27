@@ -1096,6 +1096,72 @@
           ]
         },
         {
+          "name": "resident-recovery-direct",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "recovery-direct",
+            "--output",
+            "{output}/resident-recovery-direct",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-recovery-direct/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "transport": "direct",
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
+          "name": "resident-recovery-relay",
+          "argv": [
+            "{python}",
+            "tests/sdk_resident.py",
+            "--aw",
+            "{bin}/aw",
+            "--agent",
+            "claude",
+            "--scenario",
+            "recovery-relay",
+            "--output",
+            "{output}/resident-recovery-relay",
+            "--tokenless",
+            "{bin}/tokenless",
+            "--tokenless-provider",
+            "{bin}/aw-provider-tokenless"
+          ],
+          "timeout_seconds": 120,
+          "report": "json",
+          "results": [
+            {
+              "file": "fixtures/resident-recovery-relay/result.json",
+              "values": {
+                "tasks": 1,
+                "passed": true,
+                "transport": "relay",
+                "status/bindings": 0,
+                "status/events": 0
+              }
+            }
+          ]
+        },
+        {
           "name": "resident-native-denial",
           "argv": [
             "{python}",

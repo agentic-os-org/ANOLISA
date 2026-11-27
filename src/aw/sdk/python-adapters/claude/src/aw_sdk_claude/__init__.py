@@ -55,6 +55,7 @@ class ResidentClaude:
             attach_timeout_ms=attach_timeout_ms,
             reconnect_ms=reconnect_ms,
         )
+        worker._model_transport = wiring.get("model_transport", "relay")
         worker._http_hosts = wiring.get("allow_plaintext_http_hosts", [])
         return worker
 
@@ -77,6 +78,7 @@ class ResidentClaude:
             raise ValueError("attach_timeout_ms must be 100..60000")
         self.attach_timeout_ms = attach_timeout_ms
         self.pid = pid
+        self._model_transport = "relay"
         self._http_hosts: list[str] = []
         self._clients: WeakSet["ManagedClient"] = WeakSet()
         self._closing: asyncio.Task | None = None
@@ -117,6 +119,7 @@ class ResidentClaude:
 
         client = ManagedClient(
             options,
+            model_transport=self._model_transport,
             allow_plaintext_http_hosts=self._http_hosts,
             scope_factory=lambda install: SdkScope(
                 self.instance, self.attach_timeout_ms, install, before_open=check_open

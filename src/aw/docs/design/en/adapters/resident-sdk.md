@@ -17,6 +17,28 @@ sequenced-invocation service contract. Each Query owns one execution until close
 completed tool identities are retired while the Query remains open. Its
 `--reloadable` mode uses a separate request-admission path described below.
 
+## Claude model transport
+
+Claude Python Resident defaults to `relay`. The relay independently binds model-produced tools to
+their arguments and checks completion order before sending recognized results upstream. An application
+that trusts its pinned CLI and gateway can select native model transport for an individual target.
+
+```yaml
+spec:
+  agents:
+    claude:
+      adapter: claude-sdk
+      claude_sdk:
+        model_transport: direct
+```
+
+Direct uses the CLI's effective Messages endpoint, including the configured plaintext authority
+grants. Hook admission, native permissions and managed MCP still apply. The CLI owns HTTP handling
+and tool-argument validation. AW tracks native tool identities for the current execution and
+retires them on native result delivery or execution drain. Direct descriptors require read-only
+permissions. Select Relay when policy needs an independent model-side identity or request fence.
+Neither resident mode provides strict final-text withholding.
+
 ## Runtime ownership
 
 ```mermaid
@@ -48,7 +70,7 @@ rounding semantics. Strings, booleans, tool names and structural changes remain
 distinct. AW preserves the original tool payload; this comparison does not change
 the separate integer-only AW metadata encoding. Tools needing exact large integers
 must represent them as strings in their schema.
-Pi uses its public model stream and the produced tool object. Claude uses a private
+Pi uses its public model stream and the produced tool object. By default, Claude uses a private
 loopback Anthropic Messages relay and the native SDK transport dispatch context.
 MCP `_meta.claudecode/toolUseId` links the native frame to that same identity before
 the SDK removes metadata from its public handler arguments.
@@ -261,8 +283,14 @@ to its terminal audit and response. Response adoption permits only the deadline
 subtype of transport faults; unknown or missing details remain failures. A neutral
 reply retains the original result for native HTTP MCP and built-in tools, then the
 resident callback acknowledges invocation completion before model delivery. The
-same drained client accepts the next task. Scope, identity, cancellation,
-cleanup, malformed native directives and before-Hook failures retain fail-stop.
+same drained client accepts the next task.
+
+When a pre-tool check cannot confirm admission but the scope and invocation ownership are still
+valid, the resident denies that call before the tool runs. An invalid managed MCP handler result
+becomes a tool error before `tool.after`, so the Hook and model receive the same error status.
+The client can continue in the same conversation after either outcome. Loss of trusted scope or
+invocation ownership, malformed native result directives, and cancellation or cleanup that leaves
+callbacks undrained interrupt the execution.
 Pi retains its existing audited after-report recovery.
 
 Normal policy denial and Tokenless retry suggestions remain native denials;

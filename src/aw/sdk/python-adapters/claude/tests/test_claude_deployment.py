@@ -95,6 +95,22 @@ class ClaudeDeployment(unittest.TestCase):
                     ["observe", "block", "replace_input"],
                 )
 
+    def test_direct_transport_is_explicit_in_both_configuration_paths(self) -> None:
+        from aw_sdk_claude import ResidentClaude
+
+        self.write(False)
+        document = json.loads(self.config.read_text())
+        document["spec"]["agents"]["app"]["claude_sdk"] = {"model_transport": "direct"}
+        self.config.write_text(json.dumps(document))
+        self.assertEqual(self.compile()["model_transport"], "direct")
+        with self.assertRaisesRegex(AwError, "sdk_descriptor_read_only_required"):
+            ResidentClaude.from_config(str(self.config), descriptor_file=str(self.descriptor))
+        self.descriptor.chmod(0o400)
+        for descriptor in (None, str(self.descriptor)):
+            worker = ResidentClaude.from_config(str(self.config), descriptor_file=descriptor,
+                                               executable=BINARY, target="app")
+            self.assertEqual(worker._model_transport, "direct")
+
     def test_descriptor_profile_and_configuration_must_match(self) -> None:
         from aw_sdk.claude import ResidentClaude
 

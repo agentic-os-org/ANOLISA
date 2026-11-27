@@ -104,6 +104,9 @@ pub fn compile_with_options(
         "wait_for_input_submit": requirements.iter().any(|event| event.event == "input.submit"),
         "availability": availability,
     });
+    if aw_config::direct_model_transport(&spec["agents"][target]) {
+        value["model_transport"] = serde_json::json!("direct");
+    }
     let hosts = aw_config::plaintext_http_hosts(&spec["agents"][target]);
     if !hosts.is_empty() {
         value["allow_plaintext_http_hosts"] = serde_json::json!(hosts);

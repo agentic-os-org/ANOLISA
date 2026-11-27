@@ -8,7 +8,7 @@ import re
 import secrets
 import ssl
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 from urllib.request import proxy_bypass_environment
 
 import httpx
@@ -81,6 +81,40 @@ def _normalize_no_proxy_port(rule: str) -> str:
     return rule
 
 
+def model_endpoint(environment: dict[str, str], allow_plaintext_http_hosts: list[str] | None) -> SplitResult:
+    """Validate the effective native endpoint before either transport sends a prompt."""
+    upstream = environment.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip(
+        "/"
+    )
+    parsed = urlsplit(upstream)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or "?" in upstream
+        or "#" in upstream
+    ):
+        raise ValueError(
+            "AW requires an HTTP(S) Anthropic base URL without embedded credentials"
+        )
+    granted_http = parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+    if granted_http and not allows_http(parsed.netloc, allow_plaintext_http_hosts or []):
+        raise ValueError("AW requires TLS for non-loopback model endpoints")
+    if any(
+        environment.get(key) not in {None, "", "0"}
+        for key in (
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        )
+    ):
+        raise ValueError(
+            "AW managed identities currently require the Anthropic Messages transport"
+        )
+    return parsed
+
+
 class ModelRelay:
     """One bounded relay per client; no upstream redirects or direct fallback path."""
 
@@ -89,35 +123,8 @@ class ModelRelay:
         allow_plaintext_http_hosts: list[str] | None = None,
     ) -> None:
         self.bridge = bridge
-        self.upstream = environment.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip(
-            "/"
-        )
-        parsed = urlsplit(self.upstream)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or "?" in self.upstream
-            or "#" in self.upstream
-        ):
-            raise ValueError(
-                "AW requires an HTTP(S) Anthropic base URL without embedded credentials"
-            )
-        granted_http = parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
-        if granted_http and not allows_http(parsed.netloc, allow_plaintext_http_hosts or []):
-            raise ValueError("AW requires TLS for non-loopback model endpoints")
-        if any(
-            environment.get(key) not in {None, "", "0"}
-            for key in (
-                "CLAUDE_CODE_USE_BEDROCK",
-                "CLAUDE_CODE_USE_VERTEX",
-                "CLAUDE_CODE_USE_FOUNDRY",
-            )
-        ):
-            raise ValueError(
-                "AW managed identities currently require the Anthropic Messages transport"
-            )
+        parsed = model_endpoint(environment, allow_plaintext_http_hosts)
+        self.upstream = parsed.geturl()
         self.secret = secrets.token_urlsafe(32)
         proxies = {
             key[:-6].lower(): value

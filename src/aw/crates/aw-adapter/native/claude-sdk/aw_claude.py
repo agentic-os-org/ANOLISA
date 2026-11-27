@@ -211,7 +211,9 @@ class Bridge:
                     str(error) if isinstance(error, CallbackFailure) else type(error).__name__,
                     hook["on_error"],
                 )
-                result = self.failure_reply(event, hook)
+                # A transport exception or malformed result carries no completed
+                # post-tool decision. Resident clients must fence that invocation.
+                result = self.failure_reply(event, {} if event == "tool.after" else hook)
                 if result:
                     return result
         return {}

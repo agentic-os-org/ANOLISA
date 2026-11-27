@@ -13,7 +13,7 @@ for name in ("ClaudeAgentOptions", "ClaudeSDKClient", "HookMatcher", "Permission
 sys.modules["claude_agent_sdk"] = sdk
 sys.modules["anyio"] = SimpleNamespace()
 sys.modules["aw_scope"] = SimpleNamespace(Scope=object)
-sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object)
+sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object, model_endpoint=None)
 sys.modules["aw_transport"] = SimpleNamespace(ManagedTransport=object)
 
 from aw_claude import CallbackFailure
@@ -56,6 +56,16 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             return entry, result
         finally:
             dispatch.reset(token)
+
+    async def test_report_reply_requires_a_healthy_scope_and_bridge(self):
+        hook = {"on_error": "report"}
+        bridge = self.bridge()
+        self.assertEqual(bridge.failure_reply("tool.after", hook), {})
+        self.assertIsNone(bridge.failure)
+        bridge.scope.failed = True
+        self.assertFalse(bridge.failure_reply("tool.after", hook)["continue_"])
+        bridge.scope.failed = False
+        self.assertFalse(bridge.failure_reply("tool.after", hook)["continue_"])
 
     async def test_neutral_report_finishes_and_reuses_the_execution(self):
         bridge = self.bridge()

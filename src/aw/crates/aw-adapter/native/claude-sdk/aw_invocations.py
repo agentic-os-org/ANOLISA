@@ -44,6 +44,7 @@ class Invocation:
     phase: str = "producing"
     callbacks: set[str] = field(default_factory=set)
     native_denied: bool = False
+    native_result_error: bool | None = None
 
 
 @dataclass
@@ -53,6 +54,7 @@ class Dispatch:
     execution: int
     entered: bool = False
     stop_fingerprint: bytes | None = None
+    mcp_call: bool = False
 
 
 dispatch: ContextVar[Dispatch | None] = ContextVar("aw_dispatch", default=None)
@@ -77,6 +79,8 @@ class Invocations:
         self.active: dict[str, Invocation] = {}
         self.pending: dict[str, Dispatch] = {}
         self.changed = asyncio.Event()
+        self.direct = False
+        self.native_ids: dict[str, str] = {}
         self.sequence = 0
         self.execution = 0
         self.running = False
@@ -104,6 +108,64 @@ class Invocations:
         entry = Invocation(str(uuid4()), name, self.execution)
         self.active[entry.call_id] = entry
         return entry
+
+    async def native_dispatch_id(self, native: str, request: dict[str, Any]) -> str:
+        """Register a trusted CLI call before delivering its first control callback."""
+        self.check()
+        if not isinstance(native, str) or not native or len(native.encode()) > 512:
+            raise CallbackFailure("AW requires a bounded native tool identity")
+        if native in self.native_ids:
+            return self.native_ids[native]
+        kind = request["subtype"]
+        if kind == "hook_callback" and request["input"].get("hook_event_name") == "PreToolUse":
+            payload = request["input"]
+            if payload.get("tool_use_id") != native:
+                raise CallbackFailure("AW native PreToolUse identity mismatch")
+            name, arguments = payload["tool_name"], payload["tool_input"]
+        elif kind == "can_use_tool":
+            name, arguments = request["tool_name"], request["input"]
+        elif kind == "mcp_message":
+            params = request["message"]["params"]
+            name = f"mcp__{request['server_name']}__{params['name']}"
+            arguments = params.get("arguments", {})
+        else:
+            raise CallbackFailure("AW native callback has no live invocation")
+        if len(self.active) >= self.bridge.scope.invocation_limit:
+            # Some CLI results arrive while shielded callback finalizers are live.
+            for previous, call in list(self.native_ids.items()):
+                await self.retire_delivered(previous, self.active[call])
+        entry = self.produce(name)
+        await self.register(entry, arguments)
+        self.native_ids[native] = entry.call_id
+        return entry.call_id
+
+    async def native_results(self, blocks: Any) -> None:
+        """Retire direct calls on native result delivery, including native denials."""
+        if not isinstance(blocks, list):
+            return
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            native = block.get("tool_use_id")
+            call = self.native_ids.get(native)
+            if call is None:
+                # Native argument validation can reject a call before any Hook.
+                continue
+            entry = self.active[call]
+            entry.native_result_error = block.get("is_error") is True
+            await self.retire_delivered(native, entry)
+
+    async def retire_delivered(self, native: str, entry: Invocation) -> None:
+        if entry.native_result_error is None or any(
+            ticket.call_id == entry.call_id for ticket in self.pending.values()
+        ):
+            return
+        if entry.phase in {"issued", "allowed"} and entry.native_result_error:
+            await self.finish(entry)
+        if entry.phase != "adopted" or (entry.native_denied and not entry.native_result_error):
+            raise CallbackFailure("AW received an incomplete native tool result")
+        del self.active[entry.call_id]
+        del self.native_ids[native]
 
     async def register(self, entry: Invocation, arguments: Any) -> None:
         async with self.issuing:
@@ -190,9 +252,26 @@ class Invocations:
             ):
                 raise CallbackFailure("AW callback identity was retired or already dispatched")
             entry.callbacks.add(callback)
-        ticket = Dispatch(request_id, call_id, self.execution, stop_fingerprint=stop_fingerprint)
+        ticket = Dispatch(request_id, call_id, self.execution, stop_fingerprint=stop_fingerprint,
+                          mcp_call=callback.startswith("mcp:"))
         self.pending[request_id] = ticket
         return ticket
+
+    def settle_mcp_validation_error(self, ticket: Dispatch | None, data: str) -> None:
+        # The SDK may reject the schema before it enters the managed handler.
+        if (ticket is None or not ticket.mcp_call or ticket.entered
+                or self.pending.get(ticket.request_id) is not ticket):
+            return
+        frame = json.loads(data)
+        reply = frame.get("response", {})
+        if frame.get("type") != "control_response" or reply.get("request_id") != ticket.request_id:
+            return
+        mcp = reply.get("response", {}).get("mcp_response", {})
+        entry = self.active.get(ticket.call_id)
+        if (mcp.get("result", {}).get("isError") is True and entry is not None
+                and entry.execution == ticket.execution and entry.phase == "issued"):
+            entry.native_denied = True
+            self.cancel(ticket.request_id)
 
     def cancel(self, request_id: str | None) -> None:
         ticket = self.pending.get(request_id)
@@ -244,6 +323,7 @@ class Invocations:
                     else:
                         await self.finish(entry)
                     del self.active[entry.call_id]
+        self.native_ids.clear()
         self.running = False
         self.closing = False
 

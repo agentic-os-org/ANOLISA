@@ -427,6 +427,10 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "model_transport": {
+              "type": "string",
+              "enum": ["relay", "direct"]
+            },
             "allow_plaintext_http_hosts": {
               "type": "array",
               "items": {

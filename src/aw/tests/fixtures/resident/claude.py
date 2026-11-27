@@ -193,8 +193,7 @@ async def task(index, mode, consumer="response", settings_origin=None, factory=N
             (directory / "sdk-process.json").write_text(
                 json.dumps({"pid": cli_pid, "owner": os.getpid()})
             )
-            fatal = mode == "before-error"
-            turns = 1 if fatal else 2
+            turns = 2
             for turn in range(turns):
                 await client.query("Run the fixture tool")
                 try:
@@ -206,13 +205,6 @@ async def task(index, mode, consumer="response", settings_origin=None, factory=N
                 except Exception:
                     failed = True
                 assert client._transport.delegate._process.pid == cli_pid
-            if fatal:
-                try:
-                    await client.query("failed client must remain stopped")
-                except RuntimeError:
-                    pass
-                else:
-                    raise AssertionError("failed client accepted another query")
         await client.disconnect()
         assert all(path.read_bytes() == content for path, content in native_files.items())
         try:
@@ -229,12 +221,13 @@ async def task(index, mode, consumer="response", settings_origin=None, factory=N
         assert all(item["tenant"] == str(index) for item in events)
         assert len({item["event"]["agent"]["instance_id"] for item in events}) == 1
         assert (directory / "effect").exists() == (mode in {"allow", "after-error"}), mode
-        assert failed == fatal, (mode, failed)
-        if fatal:
-            assert len(requests) == 1, (mode, "model continued after Hook failure", len(requests))
-            assert fixture.ORIGINAL not in json.dumps(requests)
-        else:
-            assert len(requests) == 2 * turns, (mode, len(requests))
+        assert not failed, mode
+        assert len(requests) == 2 * turns, (mode, len(requests))
+        if mode == "before-error":
+            assert fixture.ORIGINAL not in json.dumps([
+                b["content"] for m in requests[-1]["messages"] if isinstance(m["content"], list)
+                for b in m["content"] if b.get("type") == "tool_result"
+            ])
         if mode == "allow" and os.environ.get("AW_TEST_SCENARIO") == "cooperative-attach":
             assert fixture.ORIGINAL in json.dumps(requests[1]), requests
         assert native.count("PreToolUse") == turns, native
@@ -307,6 +300,11 @@ async def main():
 
         await run(ROOT, SOURCE)
         return
+    if scenario.startswith("recovery-"):
+        from claude_recovery import run
+
+        await run(ROOT, scenario.removeprefix("recovery-"))
+        return
     if scenario == "denial":
         from claude_denial import run
 
@@ -338,8 +336,14 @@ async def main():
         async def broken_interrupt(self):
             raise RuntimeError("injected interrupt control failure")
 
+        from aw_invocations import Invocations
+
+        def lost_identity(self, *args):
+            raise RuntimeError("injected invocation ownership failure")
+
         ClaudeSDKClient.interrupt = broken_interrupt
-        await task(0, "before-error")
+        Invocations.claim = lost_identity
+        await task(0, "allow")
         raise AssertionError("unacknowledged interruption did not terminate the host")
     if scenario == "cancel":
         running = asyncio.create_task(task(0, "cancel"))

@@ -46,7 +46,7 @@ sys.modules["claude_agent_sdk._internal.transport.subprocess_cli"] = SimpleNames
     SubprocessCLITransport=object,
 )
 sys.modules["anyio"] = SimpleNamespace(CancelScope=lambda **kwargs: nullcontext())
-sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object)
+sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object, model_endpoint=None)
 
 from aw_claude import Bridge as NativeBridge, CallbackFailure
 from aw_foreground import CheckedClient

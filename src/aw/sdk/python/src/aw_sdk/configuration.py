@@ -11,16 +11,22 @@ import subprocess
 from aw_sdk.transport import AwError
 
 
-def http_host_hint(document: dict, profile: dict) -> dict:
+def claude_transport_hints(document: dict, profile: dict) -> dict:
+    hints = {}
+    if "model_transport" in document:
+        mode = document["model_transport"]
+        if profile["adapter"] != "claude-sdk" or mode not in ("direct", "relay"):
+            raise ValueError("invalid Claude model transport")
+        hints["model_transport"] = mode
     if "allow_plaintext_http_hosts" not in document:
-        return {}
+        return hints
     from aw_sdk.aw_http_hosts import host_grants
 
     if profile["adapter"] != "claude-sdk":
         raise ValueError("unexpected HTTP host grants")
     entries = document["allow_plaintext_http_hosts"]
     host_grants(entries)
-    return {"allow_plaintext_http_hosts": entries}
+    return {**hints, "allow_plaintext_http_hosts": entries}
 
 
 def load_configuration(
@@ -56,7 +62,7 @@ def load_configuration(
     ):
         raise AwError("sdk_configuration_invalid")
     try:
-        hosts = http_host_hint(projection, profile)
+        hints = claude_transport_hints(projection, profile)
     except ValueError:
         raise AwError("sdk_configuration_invalid") from None
     daemon = projection["daemon"]
@@ -66,7 +72,7 @@ def load_configuration(
     if not Path(endpoint).is_absolute():
         raise AwError("sdk_explicit_service_path_required")
     return {
-        **hosts,
+        **hints,
         "target": selected,
         "endpoint": endpoint,
         "input_enabled": projection["input_enabled"],

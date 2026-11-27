@@ -13,6 +13,24 @@ Pi 和 Claude SDK 可在同一客户端/session 内连续
 每个 Query 持有一个 execution，直到关闭；Query 保持开启时持续回收已完成工具身份。
 其 `--reloadable` 模式使用独立的请求准入路径，详见下文。
 
+## Claude 模型传输
+
+Claude Python Resident 默认使用 `relay`。Relay 独立登记模型发出的工具与参数，并在已识别的结果发往上游前检查回调完成顺序。
+应用信任固定版本的 CLI 和模型网关时，可以在目标配置中显式选择直连。
+
+```yaml
+spec:
+  agents:
+    claude:
+      adapter: claude-sdk
+      claude_sdk:
+        model_transport: direct
+```
+
+直连沿用 CLI 实际生效的 Messages 端点和配置中的明文地址授权，保留 Hook 准入、原生权限与托管 MCP。CLI 负责 HTTP 交互和参数校验。
+AW 在当前执行内跟踪原生工具身份，收到原生结果或执行排空时回收。选择直连的 Descriptor 须以只读权限交付。
+需要独立核对模型调用身份或在上游请求发出前检查顺序时选择 Relay。两种 Resident 模式均不提供最终正文严格扣留能力。
+
 ## 运行时归属
 
 ```mermaid
@@ -40,7 +58,7 @@ binding 内按严格递增序号登记；回调到达时不能靠名称或参数
 大于 2^53 的整数遵循原生舍入语义。字符串、布尔值、工具名及结构变化仍严格区分。
 AW 保留原始工具载荷；此比较规则保持 AW 元数据的独立整数编码合同。需要精确大整数的工具
 应在 schema 中将其定义为字符串。
-Pi 使用公开模型 stream 及其产生的工具对象。Claude 使用私有 loopback Anthropic Messages
+Pi 使用公开模型 stream 及其产生的工具对象。Claude 默认使用私有 loopback Anthropic Messages
 转发层和原生 SDK 传输的回调调度上下文。MCP `_meta.claudecode/toolUseId` 在 SDK 移除
 handler 参数中的元数据前，将原生帧关联到同一个身份。
 转发层支持 SSE 流中的 CRLF、LF 和 CR 行尾，跳过注释和空白数据，允许省略
@@ -188,7 +206,12 @@ Provider 错误响应、协议错误及已验证清理的执行超时。服务�
 在终态审计和响应中补充 `failure_detail`（`deadline_exceeded`、`cancelled`、`cleanup`、
 `other`）；响应采用层仅放行其中的超时，未知或缺失详情仍作为故障。中性回复保留原生
 HTTP MCP 和内置工具的原始结果，常驻回调在结果进入模型前确认调用完成；排空后的同一
-客户端可接收下一任务。scope、身份、取消、清理、非法原生指令及前置 Hook 故障继续停止任务。
+客户端可接收下一任务。
+
+前置检查无法确认放行时，只要 scope 和调用归属仍然可信，常驻客户端就会在工具执行前拒绝本次调用。
+托管 MCP 处理函数返回无效结果时，适配器会在 `tool.after` 前将结果转成工具错误，Hook 和模型收到相同的错误状态。
+这两种情况下，客户端都可在同一会话中继续调用。scope 或调用归属失信、原生结果指令损坏、
+取消或清理后仍有回调无法排空时，当前执行会中断。
 Pi 沿用已有的后置 report 审计故障恢复行为。
 
 正常策略拒绝与 Tokenless 重试建议保留拒绝语义，新调用重新经过原生权限和 PreTool；成功分类

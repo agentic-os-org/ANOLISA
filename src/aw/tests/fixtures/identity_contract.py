@@ -46,6 +46,24 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.ledger = Invocations(types.SimpleNamespace(scope=self.scope, failure=None))
         self.ledger.begin()
 
+    async def test_direct_retirement_exceeds_historical_budget(self):
+        self.ledger.direct = True
+        for index in range(300):
+            native = f"native_{index}"
+            request = {"subtype": "hook_callback", "input": {
+                "hook_event_name": "PreToolUse", "tool_name": "tool",
+                "tool_use_id": native, "tool_input": {"value": 1},
+            }}
+            call = await self.ledger.native_dispatch_id(native, request)
+            entry = self.ledger.active[call]
+            await self.phase(entry, "before")
+            # Native denial after Pre can omit the Post callback.
+            await self.ledger.native_results([{"type": "tool_result", "tool_use_id": native,
+                                               "is_error": True}])
+        self.assertFalse(self.ledger.native_ids)
+        self.assertFalse(self.ledger.active)
+        self.assertEqual(self.scope.finished, 300)
+
     async def issue(self):
         entry = self.ledger.produce("tool")
         await self.ledger.register(entry, {"value": 1})
@@ -69,6 +87,21 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             {"messages": [{"content": [{"type": "tool_result", "tool_use_id": entry.call_id,
                                         "is_error": is_error}]}]}
         )
+
+    async def test_only_matching_mcp_rejection_releases_unentered_dispatch(self):
+        entry = await self.issue()
+        ticket = self.ledger.reserve("request", entry.call_id, "mcp:local")
+        for request_id, error in (("different", True), ("request", False), ("request", True)):
+            frame = {"type": "control_response", "response": {"request_id": request_id,
+                     "response": {"mcp_response": {"result": {"isError": error}}}}}
+            self.ledger.settle_mcp_validation_error(ticket, json.dumps(frame))
+            rejected = request_id == "request" and error
+            self.assertEqual(entry.native_denied, rejected)
+            self.assertEqual("request" in self.ledger.pending, not rejected)
+        with self.assertRaises(CallbackFailure):
+            await self.retire(entry)
+        await self.retire(entry, is_error=True)
+        self.assertEqual(self.scope.finished, 1)
 
     async def test_sparse_active_identity_survives_1200_retirements(self):
         slow = await self.issue()

@@ -64,6 +64,10 @@ Provider 引用与步骤 ID 重复，避免启用时才暴露引用拼写错误�
 
 ## Claude SDK 模型网关
 
+每个目标的 `claude_sdk.model_transport` 默认为 `relay`，由转发层在模型连接上核对工具身份与结果顺序。
+设为 `direct` 后，受信任的 Claude CLI 直接使用已配置的网关。两种模式均执行下述 HTTP 主机授权，
+并保留 AW Hook 和托管 MCP 的准入检查。
+
 Claude Python SDK 常驻 worker 的 `ModelRelay` 默认只允许 `localhost`、`127.0.0.1` 和 `::1` 使用 HTTP。
 同一目标下的一次性前台 worker 直接使用原生客户端或 `CheckedClient`，其请求不经过这层检查。
 要接入可信的 HTTP 网关，请在 `spec.agents` 下对应的 `adapter: claude-sdk` 目标中添加以下配置。
