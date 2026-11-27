@@ -12,7 +12,7 @@ use super::super::read_resolution::ReadResolution;
 use crate::attr::{file_attr_from_metadata, file_attr_from_stat};
 use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{SkillEventKind, lifecycle::is_reserved_lifecycle_name};
-use crate::sys::{errno, fstatat_leaf};
+use crate::sys::{errno, fstatat_leaf, open_parent_dir_for_physical};
 
 impl SkillFs {
     pub(in crate::fs) fn lookup_impl(
@@ -240,37 +240,12 @@ impl SkillFs {
                     }
                 };
                 let physical_path = read_dir.join(&relative_path);
-                // Use symlink_metadata so a passthrough symlink is reported
-                // with FileType::Symlink rather than collapsed onto its
-                // target. The kernel issues readlink() afterwards if it
-                // wants to follow the link.
-                match std::fs::symlink_metadata(&physical_path) {
-                    Ok(meta) => {
-                        let mut attr = file_attr_from_metadata(&meta);
+                match passthrough_attr(&physical_path) {
+                    Ok(mut attr) => {
                         let ino = self.inodes.allocate(&path_str, attr.kind, parent);
                         self.inodes.remember(ino);
                         attr.ino = ino;
                         reply.entry(&Duration::from_secs(1), &attr, 0);
-                    }
-                    Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
-                        // Long-path fallback: the leaf's absolute path
-                        // exceeds PATH_MAX so `symlink_metadata` can't
-                        // resolve it, but the parent fits and `fstatat`
-                        // with just the leaf component succeeds (or
-                        // returns the real errno such as ENOENT/ENOTDIR).
-                        match self.open_parent_dir_for(&path_str) {
-                            Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, false) {
-                                Ok(st) => {
-                                    let mut attr = file_attr_from_stat(&st);
-                                    let ino = self.inodes.allocate(&path_str, attr.kind, parent);
-                                    self.inodes.remember(ino);
-                                    attr.ino = ino;
-                                    reply.entry(&Duration::from_secs(1), &attr, 0);
-                                }
-                                Err(e2) => reply.error(errno(&e2)),
-                            },
-                            Err(_) => reply.error(errno(&e)),
-                        }
                     }
                     Err(e) => reply.error(errno(&e)),
                 }
@@ -488,9 +463,8 @@ impl SkillFs {
                         return;
                     }
                 };
-                match std::fs::symlink_metadata(&physical) {
-                    Ok(meta) => {
-                        let mut attr = file_attr_from_metadata(&meta);
+                match passthrough_attr(&physical) {
+                    Ok(mut attr) => {
                         let ino = self.inodes.allocate(&path_str, attr.kind, parent);
                         self.inodes.remember(ino);
                         attr.ino = ino;
@@ -671,36 +645,10 @@ impl SkillFs {
                     }
                 };
                 let physical_path = read_dir.join(&relative_path);
-                // symlink_metadata preserves FileType::Symlink for passthrough
-                // links; regular file/directory attrs remain unchanged.
-                match std::fs::symlink_metadata(&physical_path) {
-                    Ok(meta) => {
-                        // file_attr_from_metadata sets ino=0; the kernel
-                        // matches getattr to the inode it cached from
-                        // lookup, so we must restore the SkillFS-allocated
-                        // inode here to avoid (dev, ino) collisions that
-                        // confuse tools like `rm -r` ("Circular directory
-                        // structure" warnings).
-                        let mut attr = file_attr_from_metadata(&meta);
+                match passthrough_attr(&physical_path) {
+                    Ok(mut attr) => {
                         attr.ino = ino;
                         reply.attr(&Duration::from_secs(1), &attr);
-                    }
-                    Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
-                        // Long-path fallback: see `lookup` for the same
-                        // pattern. We fstatat against the parent dir fd
-                        // so the leaf is the only string the syscall
-                        // sees.
-                        match self.open_parent_dir_for(&path) {
-                            Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, false) {
-                                Ok(st) => {
-                                    let mut attr = file_attr_from_stat(&st);
-                                    attr.ino = ino;
-                                    reply.attr(&Duration::from_secs(1), &attr);
-                                }
-                                Err(e2) => reply.error(errno(&e2)),
-                            },
-                            Err(_) => reply.error(errno(&e)),
-                        }
                     }
                     Err(e) => reply.error(errno(&e)),
                 }
@@ -884,9 +832,8 @@ impl SkillFs {
                         return;
                     }
                 };
-                match std::fs::symlink_metadata(&physical) {
-                    Ok(meta) => {
-                        let mut attr = file_attr_from_metadata(&meta);
+                match passthrough_attr(&physical) {
+                    Ok(mut attr) => {
                         attr.ino = ino;
                         reply.attr(&Duration::from_secs(1), &attr);
                     }
@@ -1316,6 +1263,18 @@ impl SkillFs {
                 reply.error(libc::ENOENT);
             }
         }
+    }
+}
+
+/// Read the leaf's own attributes while staying in the selected live or snapshot tree.
+fn passthrough_attr(physical: &Path) -> std::io::Result<fuser::FileAttr> {
+    match std::fs::symlink_metadata(physical) {
+        Ok(meta) => Ok(file_attr_from_metadata(&meta)),
+        Err(err) if err.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+            let (parent, leaf) = open_parent_dir_for_physical(physical).map_err(|_| err)?;
+            fstatat_leaf(&parent, leaf, false).map(|stat| file_attr_from_stat(&stat))
+        }
+        Err(err) => Err(err),
     }
 }
 

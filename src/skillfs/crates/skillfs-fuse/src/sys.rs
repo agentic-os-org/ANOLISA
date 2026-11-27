@@ -95,6 +95,16 @@ pub(crate) fn open_dir_path(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
+/// Open the parent of an already resolved physical path for an `*at` retry.
+pub(crate) fn open_parent_dir_for_physical(
+    path: &Path,
+) -> std::io::Result<(std::fs::File, &std::ffi::OsStr)> {
+    let invalid = || std::io::Error::from_raw_os_error(libc::EINVAL);
+    let leaf = path.file_name().ok_or_else(invalid)?;
+    let parent = path.parent().ok_or_else(invalid)?;
+    open_dir_path(parent).map(|fd| (fd, leaf))
+}
+
 pub(crate) fn cstring_from_os_str(s: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

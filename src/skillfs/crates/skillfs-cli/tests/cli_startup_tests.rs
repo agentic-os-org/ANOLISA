@@ -299,6 +299,128 @@ fn activation_mode_file_without_security_fails_startup() {
     );
 }
 
+fn write_decision_test_skill(skill_dir: &Path) {
+    std::fs::create_dir_all(skill_dir).expect("create skill directory");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: fixture\n---\n\nDecision fixture.\n",
+    )
+    .expect("write manifest");
+}
+
+fn spawn_decision_mount(source: &Path, mountpoint: &Path, provider: &str) -> Child {
+    Command::new(bin_path())
+        .arg("mount")
+        .arg(source)
+        .arg(mountpoint)
+        .args(["--security", "--decision-command", provider])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs")
+}
+
+#[test]
+fn categorized_in_place_decision_command_is_rejected_before_mount() {
+    let source = empty_source();
+    write_decision_test_skill(&source.path().join("category/demo"));
+    let mut child = spawn_decision_mount(source.path(), source.path(), "false");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let rejected_before_mount = loop {
+        if is_mounted(source.path()) || std::time::Instant::now() >= deadline {
+            stop_mount_child(&mut child, source.path());
+            break false;
+        }
+        if child.try_wait().expect("check mount process").is_some() {
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let output = child.wait_with_output().expect("collect mount output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        rejected_before_mount && !output.status.success(),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "--in-place with --decision-command is unsupported on categorized skill sources"
+        ),
+        "{stderr}"
+    );
+    assert!(!is_mounted(source.path()));
+}
+
+#[test]
+fn decision_command_mounts_separate_categorized_and_in_place_flat_sources() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot mount decision-command fixtures");
+        return;
+    }
+    // DecisionCommand splits on whitespace. Keep the script path within
+    // a temporary directory whose name can be passed as a single token.
+    let provider_dir = tempfile::tempdir_in("/tmp").expect("provider directory");
+    let provider_script = provider_dir.path().join("provider.sh");
+    std::fs::write(
+        &provider_script,
+        r#"test -f "$2/SKILL.md" || exit 1
+case "$1" in
+    scan) exit 0 ;;
+    resolve) printf '%s\n' '{"schemaVersion":1,"skillName":"demo","status":"pass","decision":"current"}' ;;
+    *) exit 1 ;;
+esac
+"#,
+    )
+    .expect("write decision provider script");
+    let provider = format!("/bin/sh {}", provider_script.display());
+    for (relative_skill_dir, in_place) in [
+        (Some("category/demo"), false),
+        (Some("demo"), true),
+        (None, true),
+    ] {
+        let source = empty_source();
+        let separate_mount = tempfile::tempdir().expect("mount directory");
+        if let Some(relative) = relative_skill_dir {
+            write_decision_test_skill(&source.path().join(relative));
+        }
+        let mountpoint = if in_place {
+            source.path()
+        } else {
+            separate_mount.path()
+        };
+        let mut child = spawn_decision_mount(source.path(), mountpoint, &provider);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !is_mounted(mountpoint)
+            && child.try_wait().expect("check mount process").is_none()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mounted = is_mounted(mountpoint);
+        let manifest = match (relative_skill_dir, in_place) {
+            (None, _) => "skill-discover/SKILL.md",
+            (Some(_), true) => "demo/SKILL.md",
+            (Some(_), false) => "skills/demo/SKILL.md",
+        };
+        let content = mounted.then(|| std::fs::read_to_string(mountpoint.join(manifest)));
+        stop_mount_child(&mut child, mountpoint);
+        let output = child.wait_with_output().expect("collect mount output");
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(!is_mounted(mountpoint), "test mount leaked");
+        assert!(mounted, "mount {relative_skill_dir:?} failed: {logs}");
+        let content = content.expect("mount was ready").unwrap_or_else(|error| {
+            panic!("read mounted {relative_skill_dir:?} manifest: {error}\n{logs}")
+        });
+        if relative_skill_dir.is_some() {
+            assert!(content.contains("Decision fixture."), "{content}");
+        }
+    }
+}
+
 #[test]
 fn activation_mode_file_with_decision_command_fails_startup() {
     let source = empty_source();

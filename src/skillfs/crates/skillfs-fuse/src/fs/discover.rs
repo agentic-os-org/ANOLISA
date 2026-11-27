@@ -7,7 +7,10 @@
 
 use std::collections::HashSet;
 
+use skillfs_core::store::SkillStore;
+
 use super::SkillFs;
+use super::read_resolution::active_target_matches_store;
 use crate::path::find_common_path_prefix;
 
 /// One rendering-safe markdown table cell from tree-controlled text.
@@ -74,25 +77,9 @@ fn md_code_span(raw: &str) -> String {
 impl SkillFs {
     /// Generate SKILL.md content for the virtual `skill-discover` skill.
     ///
-    /// When views are configured, the body lists every secondary view as a
-    /// section with a table of `name | description | source_path` rows.
-    /// By default, `source_path` points to each physical `SKILL.md`. A
-    /// configured reader-visible root instead maps every path into the FUSE
-    /// view so a reader in another mount namespace can open it directly.
-    ///
-    /// A view that names the same skill twice collapses to one entry —
-    /// the same set semantics `SkillStore::split_primary` applies to the
-    /// `/skills` listing — so neither the table nor the frontmatter
-    /// description repeats it.
-    ///
-    /// Skill names, descriptions and source paths are tree-controlled
-    /// text rendered into markdown table cells and a YAML frontmatter
-    /// scalar; every cell goes through [`md_cell`] and every
-    /// frontmatter name through [`frontmatter_name`] so a crafted
-    /// directory name cannot forge table rows or frontmatter structure.
-    ///
-    /// When no views config is present, falls back to a simple listing of all
-    /// skills in the store.
+    /// List unique, visible members of secondary views, or all visible skills
+    /// when no secondary view exists. Paths point to physical manifests unless
+    /// a reader-visible root is configured for access through the FUSE view.
     pub(super) fn get_skill_discover_content(&self) -> String {
         let store = self.store.read();
 
@@ -103,15 +90,15 @@ impl SkillFs {
                 return self.simple_discover_md(&store);
             }
 
-            // Collect all skill names in secondary views (for frontmatter
-            // description), collapsing duplicates within and across views.
+            // Reuse each visibility decision throughout the document.
             let mut seen_hidden: HashSet<&str> = HashSet::new();
             let hidden_names: Vec<&str> = secondary_views
                 .iter()
                 .flat_map(|v| v.skills.iter().map(|s| s.as_str()))
                 .filter(|name| seen_hidden.insert(name))
-                .filter(|name| store.get(name).is_some())
+                .filter(|name| store.get(name).is_some() && self.discover_visible(&store, name))
                 .collect();
+            let listed_names: HashSet<&str> = hidden_names.iter().copied().collect();
 
             // Physical paths use a common prefix to keep the table compact.
             // Reader-visible paths stay absolute because the consumer may
@@ -166,6 +153,7 @@ Use `read_file` on any `source_path` to read the skill and learn how to use it.\
                 for skill_name in view
                     .skills
                     .iter()
+                    .filter(|name| listed_names.contains(name.as_str()))
                     .filter(|name| seen_in_view.insert(name.as_str()))
                 {
                     if let Some(entry) = store.get(skill_name.as_str()) {
@@ -200,8 +188,22 @@ Use `read_file` on any `source_path` to read the skill and learn how to use it.\
         self.simple_discover_md(&store)
     }
 
+    fn discover_visible(&self, store: &SkillStore, name: &str) -> bool {
+        self.active_resolver.as_ref().is_none_or(|resolver| {
+            resolver.get(name).is_some_and(|target| {
+                active_target_matches_store(
+                    store,
+                    &self.source,
+                    resolver.target_root(),
+                    name,
+                    &target,
+                )
+            })
+        })
+    }
+
     /// Fallback skill-discover content when no views config is present.
-    fn simple_discover_md(&self, store: &skillfs_core::store::SkillStore) -> String {
+    fn simple_discover_md(&self, store: &SkillStore) -> String {
         let mut body = String::from(
             "| name | description |
 |------|-------------|
@@ -210,16 +212,10 @@ Use `read_file` on any `source_path` to read the skill and learn how to use it.\
         let mut names: Vec<&str> = store.list();
         names.sort_unstable();
         for name in names {
-            // I2: staging roots must not participate in skill-discover.
-            // A pre-seeded staging category is scanned into the store
-            // under its nested skills' leaf names, so filter on the
-            // entry's staging privacy (name or scanned category), not
-            // the bare leaf alone. The listing renders under the single
-            // read guard `get_skill_discover_content` already holds:
-            // the predicate borrows that store instead of re-acquiring
-            // the lock — a second acquisition from inside the guard
-            // would block behind any queued sync-worker writer.
-            if self.store_entry_is_staging_private(store, name) {
+            // Match staging and activation against the same store view as the table.
+            if self.store_entry_is_staging_private(store, name)
+                || !self.discover_visible(store, name)
+            {
                 continue;
             }
             if let Some(entry) = store.get(name) {
@@ -662,5 +658,37 @@ skills = ["zz``x"]
             !content.contains(&source.path().display().to_string()),
             "physical source path leaked into reader-visible output: {content}"
         );
+    }
+
+    #[test]
+    fn discovery_requires_activation_for_the_selected_source() {
+        use crate::security::{ActiveSkillResolver, ActiveTarget};
+
+        let (source, fs) = discover_fixture_with_extra_skills(
+            "[[view]]\nname = 'reserve'\nskills = ['reserve', 'stale', 'unmapped']",
+            &["stale", "unmapped"],
+        );
+        let backing = source.path().join("backing");
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path()).with_target_root(&backing));
+        for (name, dir) in [("reserve", "reserve"), ("stale", "old-category/stale")] {
+            resolver.set(
+                name,
+                ActiveTarget::Current {
+                    source_dir: backing.join(dir),
+                },
+            );
+        }
+        let mut fs = fs.with_active_resolver(resolver);
+        for content in {
+            let secondary = fs.get_skill_discover_content();
+            fs.views_config = None;
+            [secondary, fs.get_skill_discover_content()]
+        } {
+            assert!(content.contains("| reserve |"), "{content}");
+            assert!(
+                !content.contains("unmapped") && !content.contains("stale"),
+                "{content}"
+            );
+        }
     }
 }

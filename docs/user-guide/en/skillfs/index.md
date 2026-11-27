@@ -481,7 +481,9 @@ skills = ["apple-notes", "blogwatcher"]
 
 The default view appears directly in the mounted skill view. Secondary views
 are listed by the virtual `skill-discover` skill, whose `SKILL.md` includes the
-skill names and source paths.
+skill names and source paths. When security activation is enabled,
+`skill-discover/SKILL.md` omits `Hidden` and unmapped skills. Activated
+skills in secondary views remain discoverable.
 
 Skills not assigned to any view are included in the effective default view
 in memory. Mounting does not rewrite `skillfs-views.toml`; edit it explicitly
@@ -983,6 +985,12 @@ SkillFS invokes the external command for scan and resolve decisions.
 Decision-command mode is mutually exclusive with activation file mode,
 `--notify-socket`, `--activation-events-log`, `--ledger-backing-root`, and
 `--control-socket`.
+
+SkillFS rejects `--decision-command` at startup for an in-place mount of
+categorized sources (`SOURCE` and `MOUNTPOINT` refer to the same directory).
+After the over-mount, refresh subprocesses see the flat FUSE view,
+which hides `<source>/<category>/<skill>`. Use a separate mountpoint or use
+`--activation-mode file --ledger-backing-root` for an in-place mount.
 
 ## Install Protocols
 

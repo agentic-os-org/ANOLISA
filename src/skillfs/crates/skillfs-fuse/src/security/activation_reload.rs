@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
 use super::activation::{
@@ -93,8 +94,8 @@ impl std::fmt::Display for ReloadMode {
 pub enum ReloadOutcome {
     /// Resolver updated to a new target (different from baseline).
     Updated(ActiveTarget),
-    /// Activation was readable and valid, but the target is the same as
-    /// the current resolver entry. The resolver is not mutated.
+    /// The resolver kept its entry because the decision was unchanged or
+    /// the skill moved to a different directory during reload.
     Unchanged,
     /// Poll timed out without observing a readable activation file.
     /// Current mapping kept.
@@ -126,6 +127,7 @@ pub struct ActivationReloadController {
     resolver: Arc<ActiveSkillResolver>,
     interval: Duration,
     timeout: Duration,
+    publication: Mutex<()>,
 }
 
 impl ActivationReloadController {
@@ -140,6 +142,7 @@ impl ActivationReloadController {
             resolver,
             interval,
             timeout,
+            publication: Mutex::new(()),
         }
     }
 
@@ -160,6 +163,22 @@ impl ActivationReloadController {
         &self.source_root
     }
 
+    pub(super) fn skill_dir(&self, skill_name: &str) -> PathBuf {
+        self.resolver.skill_dir_under(&self.source_root, skill_name)
+    }
+
+    fn publish_in_dir(&self, skill_name: &str, skill_dir: &Path, target: ActiveTarget) -> bool {
+        // Serialize the check and publication with other reloads. A reload
+        // for the new owner cannot publish between this check and set().
+        // skill_dir() releases the store read lock before set() runs.
+        let _publication = self.publication.lock();
+        if self.skill_dir(skill_name) != skill_dir {
+            return false;
+        }
+        self.resolver.set(skill_name, target);
+        true
+    }
+
     pub fn resolver(&self) -> &Arc<ActiveSkillResolver> {
         &self.resolver
     }
@@ -177,25 +196,35 @@ impl ActivationReloadController {
     /// Reads activation via A2 (`load_activation_prefer_xattr`), updates
     /// the resolver on success, fail-safe hides on error.
     pub fn reload_skill_once(&self, skill_name: &str) -> ReloadOutcome {
-        let skill_dir = self.source_root.join(skill_name);
-        match load_activation_prefer_xattr(&skill_dir) {
+        self.reload_skill_once_in_dir(skill_name, &self.skill_dir(skill_name))
+    }
+
+    pub(super) fn reload_skill_once_in_dir(
+        &self,
+        skill_name: &str,
+        skill_dir: &Path,
+    ) -> ReloadOutcome {
+        match load_activation_prefer_xattr(skill_dir) {
             Ok(target) => {
+                if !self.publish_in_dir(skill_name, skill_dir, target.clone()) {
+                    return ReloadOutcome::Unchanged;
+                }
                 debug!(
                     skill = %skill_name,
                     target = %target.as_label(),
                     "activation reload: updated"
                 );
-                self.resolver.set(skill_name.to_string(), target.clone());
                 ReloadOutcome::Updated(target)
             }
             Err(e) => {
-                let hidden = fail_safe_hidden(&e);
+                if !self.publish_in_dir(skill_name, skill_dir, fail_safe_hidden(&e)) {
+                    return ReloadOutcome::Unchanged;
+                }
                 warn!(
                     skill = %skill_name,
                     error = %e,
                     "activation reload: fail-safe hidden"
                 );
-                self.resolver.set(skill_name.to_string(), hidden.clone());
                 ReloadOutcome::FailSafeHidden {
                     reason: e.to_string(),
                 }
@@ -234,7 +263,7 @@ impl ActivationReloadController {
     /// request. Covers both `activation.json` mtime and skill dir
     /// ctime (for xattr changes).
     pub fn snapshot_freshness(&self, skill_name: &str) -> ActivationFreshness {
-        let skill_dir = self.source_root.join(skill_name);
+        let skill_dir = self.skill_dir(skill_name);
         ActivationFreshness::snapshot(&skill_dir)
     }
 
@@ -258,30 +287,37 @@ impl ActivationReloadController {
     ///   → keep polling.
     /// * **Parse / validation error on a fresh artifact** → fail-safe
     ///   hidden immediately.
+    /// * **Directory ownership changed** → keep current mapping, return
+    ///   `Unchanged`.
     /// * **Timeout** → keep current mapping, return `Timeout`.
     pub fn poll_reload_skill(
         &self,
         skill_name: &str,
         baseline_freshness: ActivationFreshness,
     ) -> ReloadOutcome {
-        let skill_dir = self.source_root.join(skill_name);
+        let skill_dir = baseline_freshness.skill_dir();
         let baseline = self.resolver.get(skill_name);
         let deadline = Instant::now() + self.timeout;
 
         loop {
-            let current = ActivationFreshness::snapshot(&skill_dir);
+            if self.skill_dir(skill_name) != skill_dir {
+                return ReloadOutcome::Unchanged;
+            }
+            let current = ActivationFreshness::snapshot(skill_dir);
             let is_fresh = baseline_freshness.has_advanced(&current);
 
             if is_fresh {
-                match load_activation_prefer_xattr(&skill_dir) {
+                match load_activation_prefer_xattr(skill_dir) {
                     Ok(target) => {
                         if !targets_equal(baseline.as_ref(), &target) {
+                            if !self.publish_in_dir(skill_name, skill_dir, target.clone()) {
+                                return ReloadOutcome::Unchanged;
+                            }
                             info!(
                                 skill = %skill_name,
                                 target = %target.as_label(),
                                 "activation reload: new target observed"
                             );
-                            self.resolver.set(skill_name.to_string(), target.clone());
                             return ReloadOutcome::Updated(target);
                         }
                         debug!(
@@ -294,13 +330,14 @@ impl ActivationReloadController {
                         // Race: stat'd but removed before read.
                     }
                     Err(e) => {
-                        let hidden = fail_safe_hidden(&e);
+                        if !self.publish_in_dir(skill_name, skill_dir, fail_safe_hidden(&e)) {
+                            return ReloadOutcome::Unchanged;
+                        }
                         warn!(
                             skill = %skill_name,
                             error = %e,
                             "activation reload: fresh artifact invalid, fail-safe hidden"
                         );
-                        self.resolver.set(skill_name.to_string(), hidden.clone());
                         return ReloadOutcome::FailSafeHidden {
                             reason: e.to_string(),
                         };
@@ -361,6 +398,7 @@ fn targets_equal(baseline: Option<&ActiveTarget>, new: &ActiveTarget) -> bool {
 /// json-fallback paths are covered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivationFreshness {
+    skill_dir: PathBuf,
     pub json_mtime: Option<SystemTime>,
     pub dir_ctime: Option<SystemTime>,
 }
@@ -376,20 +414,26 @@ impl ActivationFreshness {
         };
         let dir_ctime = dir_ctime_systemtime(skill_dir);
         Self {
+            skill_dir: skill_dir.to_path_buf(),
             json_mtime,
             dir_ctime,
         }
     }
 
-    /// `true` when the activation artifact has been modified since
-    /// this freshness token was captured.
+    /// The directory whose activation freshness was recorded.
+    pub fn skill_dir(&self) -> &Path {
+        &self.skill_dir
+    }
+
+    /// Whether freshness has yet to advance for this directory.
     pub fn is_stale_compared_to(&self, current: &ActivationFreshness) -> bool {
         !self.has_advanced(current)
     }
 
     pub fn has_advanced(&self, current: &ActivationFreshness) -> bool {
-        time_advanced(&self.json_mtime, &current.json_mtime)
-            || time_advanced(&self.dir_ctime, &current.dir_ctime)
+        self.skill_dir == current.skill_dir
+            && (time_advanced(&self.json_mtime, &current.json_mtime)
+                || time_advanced(&self.dir_ctime, &current.dir_ctime))
     }
 }
 
@@ -583,6 +627,91 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────
     // poll_reload_skill
     // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn old_owner_poll_cannot_replace_watchers_new_owner_decision() {
+        use crate::security::{ActivationWatcher, NoopProtocolEventWriter};
+        use parking_lot::RwLock;
+        use skillfs_core::{parser::parse_skill_file, store::SkillStore};
+
+        const FIRST: &str =
+            r#"{"schemaVersion":1,"target":".skill-meta/versions/v000001.snapshot"}"#;
+        const SECOND: &str =
+            r#"{"schemaVersion":1,"target":".skill-meta/versions/v000002.snapshot"}"#;
+        for old_update in [SECOND, "invalid activation"] {
+            let root = tempfile::tempdir().unwrap();
+            let cat_a = root.path().join("cat_a");
+            let cat_b = root.path().join("cat_b");
+            for category in [&cat_a, &cat_b] {
+                setup_skill_with_snapshot(category, "demo", "v000001");
+                setup_skill_with_snapshot(category, "demo", "v000002");
+                setup_skill_with_activation(category, "demo", FIRST);
+                std::fs::write(
+                    category.join("demo/SKILL.md"),
+                    "---\nname: demo\ndescription: fixture\n---\n",
+                )
+                .unwrap();
+            }
+            let store = Arc::new(RwLock::new(SkillStore::new()));
+            let select = |category: &Path| {
+                let manifest = category.join("demo/SKILL.md");
+                store.write().upsert(parse_skill_file(&manifest).unwrap());
+            };
+            select(&cat_a);
+            let resolver =
+                Arc::new(ActiveSkillResolver::new(root.path()).with_store(store.clone()));
+            let ctrl = Arc::new(ActivationReloadController::new(
+                root.path(),
+                resolver.clone(),
+                Duration::from_millis(20),
+                Duration::from_secs(2),
+            ));
+            let watcher =
+                ActivationWatcher::with_defaults(ctrl.clone(), Arc::new(NoopProtocolEventWriter));
+            assert!(matches!(
+                ctrl.reload_skill_once("demo"),
+                ReloadOutcome::Updated(_)
+            ));
+            let before = resolver.get_call_count();
+            let freshness = ctrl.snapshot_freshness("demo");
+            let poll_ctrl = ctrl.clone();
+            let poll_freshness = freshness.clone();
+            let poll =
+                std::thread::spawn(move || poll_ctrl.poll_reload_skill("demo", poll_freshness));
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while resolver.get_call_count() == before && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(resolver.get_call_count() > before, "poll did not start");
+
+            select(&cat_b);
+            let updates = watcher.tick_for_testing();
+            let [(id, ReloadOutcome::Updated(new_target))] = updates.as_slice() else {
+                panic!("watcher must activate the new owner: {updates:?}");
+            };
+            assert_eq!(id, "demo");
+            assert_eq!(
+                new_target.read_dir(),
+                Some(
+                    cat_b
+                        .join("demo/.skill-meta/versions/v000001.snapshot")
+                        .as_path()
+                )
+            );
+            update_activation_fresh(&cat_a, "demo", old_update);
+            assert_eq!(poll.join().unwrap(), ReloadOutcome::Unchanged);
+            assert_eq!(
+                ctrl.poll_reload_skill("demo", freshness),
+                ReloadOutcome::Unchanged
+            );
+            assert_eq!(
+                ctrl.reload_skill_once_in_dir("demo", &cat_a.join("demo")),
+                ReloadOutcome::Unchanged
+            );
+            assert_eq!(resolver.get("demo").as_ref(), Some(new_target));
+            assert!(watcher.tick_for_testing().is_empty());
+        }
+    }
 
     #[test]
     fn poll_reload_detects_change_from_snapshot_a_to_b() {

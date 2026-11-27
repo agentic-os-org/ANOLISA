@@ -1846,6 +1846,24 @@ async fn cmd_mount(
 
     let shared_store: SharedSkillStore = Arc::new(parking_lot::RwLock::new(store));
 
+    if in_place
+        && security
+        && parsed_decision_command.is_some()
+        && shared_store.read().iter().any(|(_, entry)| {
+            entry.source_path.parent().is_some_and(|dir| {
+                dir.strip_prefix(runtime_roots.physical_source_root())
+                    .is_ok_and(|relative| relative.components().count() > 1)
+            })
+        })
+    {
+        return Err(
+            "--in-place with --decision-command is unsupported on categorized skill sources: \
+             the flat FUSE view hides <source>/<category>/<skill> from post-mount refresh \
+             subprocesses. Use a separate mountpoint or --activation-mode file --ledger-backing-root"
+                .into(),
+        );
+    }
+
     // D1.3.1 active-mapping bootstrap (read-only).
     //
     // Only fires when **both** `--security` and
@@ -1876,17 +1894,22 @@ async fn cmd_mount(
         // `<skill_dir>/.skill-meta/activation.json` for every loaded
         // skill at startup and populates the resolver. Invalid or
         // missing activation files map to hidden (fail-safe).
-        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root().to_path_buf());
-        let skill_names: Vec<String> = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
-            skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root)
+        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root())
+            .with_target_root(daemon_root.clone());
+        let (resolver, skill_names) = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
+            (
+                resolver,
+                skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root),
+            )
         } else {
-            shared_store
+            let names = shared_store
                 .read()
                 .list()
                 .iter()
                 .filter(|n| **n != "skill-discover")
                 .map(|s| s.to_string())
-                .collect()
+                .collect();
+            (resolver.with_store(shared_store.clone()), names)
         };
         info!(
             count = skill_names.len(),
@@ -1921,7 +1944,8 @@ async fn cmd_mount(
             .expect("decision_command presence checked above")
             .clone();
         let adapter: Arc<dyn LedgerAdapter> = Arc::new(CliLedgerAdapter::new(cmd.clone()));
-        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root().to_path_buf());
+        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root())
+            .with_store(shared_store.clone());
         let skill_names: Vec<String> = shared_store
             .read()
             .list()
@@ -1935,7 +1959,7 @@ async fn cmd_mount(
             "security: resolving active skill mapping via scan -> resolve"
         );
         for name in &skill_names {
-            let skill_dir = runtime_roots.physical_source_root().join(name);
+            let skill_dir = resolver.skill_dir(name);
             if let Err(e) = adapter.scan(&skill_dir) {
                 warn!(
                     skill = %name,
@@ -1945,20 +1969,22 @@ async fn cmd_mount(
                 continue;
             }
             match adapter.resolve(&skill_dir) {
-                Ok(result) => match resolver.set_from_resolve_for_expected(name, &result) {
-                    Ok(target) => {
-                        info!(
+                Ok(result) => {
+                    match resolver.set_from_resolve_for_skill_dir(name, skill_dir, &result) {
+                        Ok(target) => {
+                            info!(
+                                skill = %name,
+                                target = %target.as_label(),
+                                "decision-command resolve installed"
+                            );
+                        }
+                        Err(e) => warn!(
                             skill = %name,
-                            target = %target.as_label(),
-                            "decision-command resolve installed"
-                        );
+                            error = %e,
+                            "could not install resolve target; skill will be hidden (no activation)"
+                        ),
                     }
-                    Err(e) => warn!(
-                        skill = %name,
-                        error = %e,
-                        "could not install resolve target; skill will be hidden (no activation)"
-                    ),
-                },
+                }
                 Err(e) => warn!(
                     skill = %name,
                     error = %e,

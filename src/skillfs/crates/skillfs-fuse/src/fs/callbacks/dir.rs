@@ -206,10 +206,10 @@ impl SkillFs {
                     // hidden from directory listing. Grace only allows
                     // exact-path traversal (lookup/getattr) so the
                     // installer can reach whitelisted files.
-                    if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
+                    let Some(phys_dir) = self.skill_read_dir(&skill_name) else {
                         reply.error(libc::ENOENT);
                         return;
-                    }
+                    };
                     let parent_ino = self.skills_dir_ino();
                     let mut entries: Vec<(u64, FileType, String)> = vec![
                         (ino, FileType::Directory, ".".to_string()),
@@ -219,7 +219,7 @@ impl SkillFs {
                     // Same gate as the opendir snapshot: list the virtual
                     // SKILL.md only when lookup/getattr/open can serve it
                     // (present, and within the mount's size ceiling).
-                    if self.skill_md_listable(&skill_name) {
+                    if self.skill_md_listable_in_dir(&skill_name, &phys_dir) {
                         let md_path = format!("{}/SKILL.md", path);
                         let md_ino = self.inodes.readdir_ino(&md_path);
                         entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
@@ -227,12 +227,6 @@ impl SkillFs {
 
                     if skill_name != "skill-discover" {
                         let show_meta = self.should_show_skill_meta_in_listing(&skill_name, req);
-                        // D1.1: fallback skills enumerate from the
-                        // snapshot tree; current and no-resolver skills
-                        // enumerate from the live source.
-                        let phys_dir = self
-                            .skill_read_dir(&skill_name)
-                            .unwrap_or_else(|| self.skill_physical_dir(&skill_name));
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             for (entry, name) in dir_iter.flatten().filter_map(named_entry) {
                                 if name == "SKILL.md" {
@@ -603,20 +597,17 @@ impl SkillFs {
                 let nested_id = Self::hermes_skill_id(category, skill_name);
                 let gated =
                     !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id);
-                if gated
-                    && matches!(
-                        self.resolve_hermes_nested_read(category, skill_name),
-                        ReadResolution::Hidden
-                    )
-                {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
+                let phys_dir = if gated {
+                    let Some(dir) = self.hermes_nested_skill_read_dir(category, skill_name) else {
+                        reply.error(libc::ENOENT);
+                        return;
+                    };
+                    dir
+                } else {
+                    self.hermes_skill_physical_dir(category, skill_name)
+                };
                 let show_meta =
                     self.should_show_skill_meta_in_nested_listing(category, skill_name, req);
-                let phys_dir = self
-                    .hermes_nested_skill_read_dir(category, skill_name)
-                    .unwrap_or_else(|| self.source_base().join(category).join(skill_name));
                 let parent_ino = {
                     let parent_path = Path::new(&path)
                         .parent()
@@ -902,9 +893,9 @@ impl SkillFs {
                     // ENOENT, but a stale ino must not leak a listing.
                     // I4: grace does NOT bypass opendir — same rationale
                     // as readdir above.
-                    if matches!(self.resolve_skill_read(skill_name), ReadResolution::Hidden) {
+                    let Some(phys_dir) = self.skill_read_dir(skill_name) else {
                         return reply.error(libc::ENOENT);
-                    }
+                    };
                     let skills_dir_ino = self.skills_dir_ino();
                     let mut entries = vec![
                         (ino, FileType::Directory, ".".to_string()),
@@ -916,7 +907,7 @@ impl SkillFs {
                     // file present, or the always-virtual skill-discover).
                     // A freshly-created empty skill dir has none yet and
                     // must not surface a phantom, broken entry.
-                    if self.skill_md_listable(skill_name) {
+                    if self.skill_md_listable_in_dir(skill_name, &phys_dir) {
                         let md_path = format!("{}/SKILL.md", path);
                         let md_ino = self.inodes.readdir_ino(&md_path);
                         entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
@@ -929,13 +920,6 @@ impl SkillFs {
                     // the trusted snapshot tree, files and all.
                     let dir_file = if !is_skill_discover_path(skill_name) {
                         let show_meta = self.should_show_skill_meta_in_listing(skill_name, _req);
-                        // `skill_read_dir` returns the snapshot dir for
-                        // fallback and the live dir otherwise. Hidden is
-                        // handled by the early-return above so the
-                        // `unwrap_or` is just defensive.
-                        let phys_dir = self
-                            .skill_read_dir(skill_name)
-                            .unwrap_or_else(|| self.skill_physical_dir(skill_name));
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                             phys_entries.sort_by_key(|e| e.file_name());
@@ -1319,19 +1303,17 @@ impl SkillFs {
                 // SKILL.md size gate alike.
                 let gated =
                     !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id);
-                if gated
-                    && matches!(
-                        self.resolve_hermes_nested_read(category, skill_name),
-                        ReadResolution::Hidden
-                    )
-                {
-                    return reply.error(libc::ENOENT);
-                }
+                let phys_dir = if gated {
+                    let Some(dir) = self.hermes_nested_skill_read_dir(category, skill_name) else {
+                        reply.error(libc::ENOENT);
+                        return;
+                    };
+                    dir
+                } else {
+                    self.hermes_skill_physical_dir(category, skill_name)
+                };
                 let show_meta =
                     self.should_show_skill_meta_in_nested_listing(category, skill_name, _req);
-                let phys_dir = self
-                    .hermes_nested_skill_read_dir(category, skill_name)
-                    .unwrap_or_else(|| self.hermes_skill_physical_dir(category, skill_name));
                 let parent_ino = {
                     let parent_path = Path::new(&path)
                         .parent()

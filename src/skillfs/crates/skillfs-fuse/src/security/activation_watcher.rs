@@ -73,8 +73,8 @@ struct WatcherInner {
     reload_controller: Arc<ActivationReloadController>,
     protocol_event_writer: Arc<dyn ProtocolEventWriter>,
     interval: Duration,
-    /// Per-skill freshness baselines. Updated after each successful
-    /// reload so only genuine freshness advances trigger re-reads.
+    /// Keep the path with the freshness token so a change of physical
+    /// directory is observed even if its timestamps are older.
     baselines: Mutex<HashMap<String, ActivationFreshness>>,
     /// Explicitly registered skill names (from startup bootstrap or
     /// `register_skill`). Merged with resolver keys on each tick.
@@ -247,22 +247,25 @@ impl WatcherInner {
             return Vec::new();
         }
 
-        let source_root = self.reload_controller.source_root();
         let mut outcomes = Vec::new();
 
         for name in &skills {
-            let skill_dir = source_root.join(name);
+            let skill_dir = self.reload_controller.skill_dir(name);
             let current = ActivationFreshness::snapshot(&skill_dir);
             let needs_reload = {
                 let baselines = self.baselines.lock();
                 match baselines.get(name) {
                     None => true,
-                    Some(baseline) => baseline.has_advanced(&current),
+                    Some(baseline) => {
+                        baseline.skill_dir() != skill_dir || baseline.has_advanced(&current)
+                    }
                 }
             };
 
             if needs_reload {
-                let outcome = self.reload_controller.reload_skill_once(name);
+                let outcome = self
+                    .reload_controller
+                    .reload_skill_once_in_dir(name, &skill_dir);
                 debug!(
                     skill = %name,
                     outcome = outcome.as_protocol_label(),
@@ -277,9 +280,11 @@ impl WatcherInner {
                 );
                 self.protocol_event_writer.emit(&reload_event);
 
-                self.baselines
-                    .lock()
-                    .insert(name.clone(), ActivationFreshness::snapshot(&skill_dir));
+                if outcome != ReloadOutcome::Unchanged
+                    && self.reload_controller.skill_dir(name) == skill_dir
+                {
+                    self.baselines.lock().insert(name.clone(), current);
+                }
                 outcomes.push((name.clone(), outcome));
             }
         }
