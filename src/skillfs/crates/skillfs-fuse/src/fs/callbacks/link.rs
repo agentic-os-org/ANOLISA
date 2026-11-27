@@ -264,9 +264,9 @@ impl SkillFs {
         reply: ReplyEntry,
     ) {
         let path_str = match self.build_fuse_path(parent, link_name) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
+            Ok(p) => p,
+            Err(err) => {
+                reply.error(err);
                 return;
             }
         };
@@ -451,14 +451,11 @@ impl SkillFs {
             symlink_policy::resolve_same_skill_relative(&link_relative_parent, target)
         {
             let first_component = target_in_skill.components().next().and_then(|c| match c {
-                std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                std::path::Component::Normal(name) => name.to_str(),
                 _ => None,
             });
             let lands_in_skill_meta = security::is_skill_meta_path(&target_in_skill);
-            let lands_in_lifecycle = first_component
-                .as_deref()
-                .map(is_reserved_lifecycle_name)
-                .unwrap_or(false);
+            let lands_in_lifecycle = first_component.is_some_and(is_reserved_lifecycle_name);
             if lands_in_skill_meta || lands_in_lifecycle {
                 let sensitive_label = if lands_in_skill_meta {
                     "same_skill_sensitive_target_skill_meta"
@@ -557,9 +554,9 @@ impl SkillFs {
         reply: ReplyEntry,
     ) {
         let new_path_str = match self.build_fuse_path(newparent, newname) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
+            Ok(p) => p,
+            Err(err) => {
+                reply.error(err);
                 return;
             }
         };

@@ -409,9 +409,9 @@ impl SkillFs {
         reply: fuser::ReplyCreate,
     ) {
         let path_str = match self.build_fuse_path(parent, name) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
+            Ok(p) => p,
+            Err(err) => {
+                reply.error(err);
                 return;
             }
         };
@@ -831,9 +831,9 @@ impl SkillFs {
         reply: ReplyEntry,
     ) {
         let path_str = match self.build_fuse_path(parent, name) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
+            Ok(p) => p,
+            Err(err) => {
+                reply.error(err);
                 return;
             }
         };

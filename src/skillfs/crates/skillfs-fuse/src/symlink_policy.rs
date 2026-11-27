@@ -87,11 +87,13 @@ pub fn classify_symlink_target(
         // Normal component.
         Some(_) | None => return SymlinkTargetClass::InsideSourceOutsideSkill,
     };
-    let first_str = first.to_string_lossy();
+    let Some(first_str) = first.to_str() else {
+        return SymlinkTargetClass::InsideSourceOutsideSkill;
+    };
 
     if first_str == current_skill {
         SymlinkTargetClass::SameSkill
-    } else if known_skills.iter().any(|s| *s == first_str) {
+    } else if known_skills.contains(&first_str) {
         SymlinkTargetClass::CrossSkill {
             other_skill: first_str.to_string(),
         }

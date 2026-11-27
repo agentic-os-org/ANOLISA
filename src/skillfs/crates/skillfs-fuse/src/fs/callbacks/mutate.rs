@@ -52,9 +52,9 @@ impl SkillFs {
         reply: ReplyEntry,
     ) {
         let path_str = match self.build_fuse_path(parent, name) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
+            Ok(p) => p,
+            Err(err) => {
+                reply.error(err);
                 return;
             }
         };
@@ -330,12 +330,9 @@ impl SkillFs {
         name: &std::ffi::OsStr,
         reply: ReplyEmpty,
     ) {
-        let path_str = match self.build_fuse_path(parent, name) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Ok(path_str) = self.build_fuse_path(parent, name) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         let path_type = self.parse_fuse_path(Path::new(&path_str));
         let (skill_name_for_event, relative_for_event) = match &path_type {
@@ -582,12 +579,9 @@ impl SkillFs {
         name: &std::ffi::OsStr,
         reply: ReplyEmpty,
     ) {
-        let path_str = match self.build_fuse_path(parent, name) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Ok(path_str) = self.build_fuse_path(parent, name) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         let path_type = self.parse_fuse_path(Path::new(&path_str));
 
@@ -810,17 +804,14 @@ impl SkillFs {
         }
         let no_replace = flags & SUPPORTED_RENAME_FLAGS != 0;
 
-        let old_path = match self.build_fuse_path(parent, name) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Ok(old_path) = self.build_fuse_path(parent, name) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         let new_path = match self.build_fuse_path(newparent, newname) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
+            Ok(p) => p,
+            Err(err) => {
+                reply.error(err);
                 return;
             }
         };
@@ -1516,7 +1507,7 @@ impl SkillFs {
                             ) {
                                 self.update_store_after_skill_rename(
                                     skill_name,
-                                    &newname.to_string_lossy(),
+                                    newname.to_str().expect("validated destination name"),
                                     &new_physical,
                                 );
                             } else {
