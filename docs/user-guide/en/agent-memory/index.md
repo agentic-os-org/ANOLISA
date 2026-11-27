@@ -495,9 +495,11 @@ The preview accounts for this conversion; symlink ancestors remain invalid.
 
 Before clearing a valid archive's destination, `overwrite` saves an AMA backup
 under `<mount>/.anolisa/import-backup-<ULID>.json`, readable only by its owner.
-Export, write or sync failure aborts before clearing or importing. The result
-includes a `Backup:` path after a successful backup and clear. To recover missing
-memories, read that file on the host and pass its contents as `json_data` to
+Export, write or sync failure aborts before clearing or importing. If clearing
+fails, the import stops before writing any archive entries. Some old memories
+may already be gone. The error identifies the failed path and gives the same
+`Backup:` path as a successful overwrite. To recover missing memories, read
+that file on the host and pass its contents as `json_data` to
 `mem_import` with `strategy="skip-existing"`; existing paths remain unchanged.
 Backups remain until manually removed. This is not an automatic rollback:
 later write failures can leave a partial import. Pause other writers during an
