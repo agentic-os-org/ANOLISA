@@ -242,12 +242,25 @@ fn delim_cuts(s: &str, i: usize) -> bool {
     true
 }
 
-/// Value and end offset of the ASCII number starting at byte `i` of `s`:
-/// a digit run with ',' + three-digit groups folded in as thousands
-/// separators, so "1,234" reads 1234 instead of the "234" fragment a
-/// bare run scan reports. `None` when `s[i]` is not a digit or the run
-/// does not parse.
-fn number_at(s: &str, i: usize) -> Option<(usize, usize)> {
+/// One ASCII number token. `count` is absent when the digits do not parse
+/// or the token is an identifier fragment rather than a call count.
+struct NumberToken {
+    count: Option<usize>,
+    /// Exclusive end, including a fractional part so those digits cannot
+    /// be scanned again as their own count.
+    end: usize,
+}
+
+/// Value and end offset of the ASCII number starting at byte `i` of `s`.
+///
+/// ',' + three-digit groups fold in as thousands separators, so "1,234"
+/// reads 1234 instead of the "234" fragment a bare run scan reports. A
+/// '.' with digits on both sides is the same token: the integer part is
+/// the count ("12.50" is 12, "1,234.5" is 1234) and the fraction is not
+/// a second count. A decimal glued to an identifier ("gpt-4.1",
+/// "claude-3.5", "v1.2.3") is not a call count. `None` when `s[i]` is
+/// not a digit.
+fn number_at(s: &str, i: usize) -> Option<NumberToken> {
     let b = s.as_bytes();
     if i >= b.len() || !b[i].is_ascii_digit() {
         return None;
@@ -266,12 +279,40 @@ fn number_at(s: &str, i: usize) -> Option<(usize, usize)> {
             end += 1;
         }
     }
-    let digits: String = s[i..end]
+    let int_end = end;
+    let mut fractional = false;
+    if b.get(end).copied() == Some(b'.') && b.get(end + 1).is_some_and(|c| c.is_ascii_digit()) {
+        fractional = true;
+        end += 1;
+        while end < b.len() && b[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+    if identifier_number(b, i, fractional) {
+        return Some(NumberToken { count: None, end });
+    }
+    let digits: String = s[i..int_end]
         .bytes()
         .filter(|c| c.is_ascii_digit())
         .map(|c| c as char)
         .collect();
-    digits.parse::<usize>().ok().map(|v| (v, end))
+    Some(NumberToken {
+        count: digits.parse().ok(),
+        end,
+    })
+}
+
+/// An identifier's numeric fragment, not a free-standing quantity.
+///
+/// "gpt-4.1" and "claude-3.5" are glued by a letter, '-' or '_'. The
+/// last component of "v1.2.3" is glued by the dot the previous component
+/// already consumed. " 12.50" and "12.0次" are quantities.
+fn identifier_number(bytes: &[u8], i: usize, fractional: bool) -> bool {
+    if i == 0 {
+        return false;
+    }
+    let prev = bytes[i - 1];
+    prev == b'.' || (fractional && (prev.is_ascii_alphabetic() || prev == b'-' || prev == b'_'))
 }
 
 /// Text after the last clause delimiter in `head`.
@@ -318,15 +359,22 @@ fn quantified_forward(tail: &str) -> Option<usize> {
     while i < bytes.len() {
         if bytes[i].is_ascii_digit() {
             match number_at(clause, i) {
-                Some((count, end)) => {
+                Some(NumberToken {
+                    count: Some(count),
+                    end,
+                }) => {
                     if clause[end..].trim_start().starts_with('次') {
                         return Some(count);
                     }
                     i = end;
                 }
+                Some(NumberToken { end, .. }) => {
+                    // Overflow, or an identifier fragment such as
+                    // "gpt-4.1". Skip the whole token, including a
+                    // fraction, so those digits are not a later count.
+                    i = end;
+                }
                 None => {
-                    // An unparseable run (an overflowed number) is
-                    // skipped, not fatal.
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
@@ -352,8 +400,7 @@ fn quantified_after(tail: &str) -> Option<usize> {
         }
     }
     let t = t.trim_start_matches([':', '：']).trim_start();
-    let (count, _) = number_at(t, 0)?;
-    Some(count)
+    number_at(t, 0)?.count
 }
 
 /// A "total N times" pattern ("共 42 次") anywhere in `text`.
@@ -373,7 +420,11 @@ fn total_scan(text: &str) -> Option<usize> {
     while let Some(rel) = rest.find('共') {
         let after = &rest[rel + '共'.len_utf8()..];
         let t = after.trim_start();
-        if let Some((count, end)) = number_at(t, 0) {
+        if let Some(NumberToken {
+            count: Some(count),
+            end,
+        }) = number_at(t, 0)
+        {
             let closes_clause = t[end..]
                 .trim_start()
                 .strip_prefix('次')
@@ -609,15 +660,23 @@ fn quantified_back(head: &str) -> Option<usize> {
     while i < bytes.len() {
         if bytes[i].is_ascii_digit() {
             match number_at(clause, i) {
-                Some((count, end)) => {
+                Some(NumberToken {
+                    count: Some(count),
+                    end,
+                }) => {
                     if end >= gap_suffix {
                         found = Some(count);
                     }
                     i = end;
                 }
+                Some(NumberToken { end, .. }) => {
+                    // An unparseable run, or an identifier fragment, is
+                    // skipped instead of discarding the neighbour. The
+                    // end includes a fractional part so "12.50" cannot
+                    // be reported as 50.
+                    i = end;
+                }
                 None => {
-                    // An unparseable run (an overflowed number) is skipped
-                    // instead of discarding the already-parsed neighbour.
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
@@ -972,6 +1031,45 @@ mod tests {
             parse_count_from_body("42 99999999999999999999999999 次工具调用"),
             42
         );
+    }
+
+    /// A decimal is one number. The integer part is the count; the
+    /// fractional digits are not a second count, and a version token is
+    /// not a count at all.
+    #[test]
+    fn decimal_tool_call_counts_are_one_number() {
+        let rows = [
+            ("工具调用 12.0 次", 12),
+            ("工具调用 12.00 次", 12),
+            ("工具调用 12.5 次", 12),
+            ("工具调用 12.50 次", 12),
+            ("Session had 12.0 tool calls", 12),
+            ("Session had 12.5 tool calls", 12),
+            ("Session had 12.50 tool calls", 12),
+            ("42.0 tool calls", 42),
+            ("12.0次工具调用", 12),
+            ("共 1,234.0 次工具调用", 1234),
+            ("共 1,234.5 次工具调用", 1234),
+            ("共 12.5 次，工具调用全部成功", 12),
+            ("tool calls: 12.0", 12),
+            ("total tool calls: 12.0", 12),
+            ("工具调用次数: 12.0", 12),
+            ("工具调用总数 12.0", 12),
+            ("调用 gpt-4.1 次", 0),
+            ("used claude-3.5 tool calls", 0),
+            ("used v1.2.3 tool calls", 0),
+            ("调用 gpt-4.1 15 次", 15),
+            ("使用 claude-3.5，调用 mem_read 15 次", 15),
+            ("使用 gpt-4.1: 调用工具 42 次", 42),
+            ("Session used claude-3.5 with 12 tool calls", 12),
+            ("共 1,234 次工具调用", 1234),
+            // A sentence period still splits the clause, so the digits
+            // before it are not the keyword's count.
+            ("Session had 42. tool calls", 0),
+        ];
+        for (body, expected) in rows {
+            assert_eq!(parse_count_from_body(body), expected, "{body}");
+        }
     }
 
     /// The 100-row differential corpus: every committed expectation,
