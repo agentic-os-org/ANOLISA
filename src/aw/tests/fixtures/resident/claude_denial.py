@@ -19,32 +19,34 @@ from claude_agent_sdk import (
 async def run(root, source):
     cases = []
     for name in ("native-hook-deny", "permission-deny", "mcp-native-deny",
-                 "native-input-validation", "native-permission-rule"):
+                 "mcp-non-object-input", "native-input-validation", "native-permission-rule"):
         directory = root / name
         directory.mkdir()
         spec = importlib.util.spec_from_file_location(name, source)
         fixture = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixture)
         fixture.ROOT, fixture.MODE = directory, "bash-compress"
-        fixture.BASH = name != "mcp-native-deny"
+        fixture.BASH = name not in {"mcp-native-deny", "mcp-non-object-input"}
         fixture.ORIGINAL = "native denial result"
         server = ThreadingHTTPServer(("127.0.0.1", 0), fixture.Handler)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         (directory / "endpoint.json").write_text(json.dumps({"port": server.server_port}))
         denied = True
+        override = None
         permissions = []
         events = []
+        calls = []
 
         class Handler(fixture.Handler):
             def reply(self, data, kind):
-                if name == "native-input-validation" and denied and kind == "text/event-stream":
+                if override is not None and kind == "text/event-stream":
                     frames = []
                     for line in data.decode().splitlines():
                         if line.startswith("data: "):
                             value = json.loads(line[6:])
                             if value.get("delta", {}).get("type") == "input_json_delta":
-                                value["delta"]["partial_json"] = '{"command":42}'
+                                value["delta"]["partial_json"] = override
                             line = "data: " + json.dumps(value)
                         frames.append(line)
                     data = ("\n".join(frames) + "\n").encode()
@@ -57,7 +59,9 @@ async def run(root, source):
             return {}
 
         async def hook(payload, call_id, context):
-            if denied and name not in {"native-input-validation", "native-permission-rule"}:
+            if denied and name not in {
+                "mcp-non-object-input", "native-input-validation", "native-permission-rule",
+            }:
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
@@ -75,8 +79,11 @@ async def run(root, source):
                 else PermissionResultAllow()
             )
 
-        @tool("touch", "Native permission fixture", {"value": str})
+        schema = {} if name == "mcp-non-object-input" else {"value": str}
+
+        @tool("touch", "Native permission fixture", schema)
         async def business(arguments):
+            calls.append(arguments)
             (directory / "effect").write_text("called")
             return {"content": [{"type": "text", "text": "allowed result"}]}
 
@@ -116,7 +123,14 @@ async def run(root, source):
                         }
                     )
                 )
-                for denied in (True, False):
+                turns = (
+                    ((True, "[1]"), (True, '"fixture"'), (False, "{}"))
+                    if name == "mcp-non-object-input"
+                    else ((True, '{"command":42}'), (False, None))
+                    if name == "native-input-validation"
+                    else ((True, None), (False, None))
+                )
+                for denied, override in turns:
                     await client.query("Call the fixture tool once")
                     terminals = 0
                     async for message in client.receive_response():
@@ -127,21 +141,32 @@ async def run(root, source):
                     assert (directory / "effect").exists() == (
                         not denied and name != "native-permission-rule"
                     )
+                    if denied and name == "mcp-non-object-input":
+                        assert calls == [], calls
                     assert not client._aw_bridge.failure
                     assert not client._aw_bridge.invocations.active
                     assert not client._aw_bridge.invocations.pending
-            assert len([r for r in fixture.REQUESTS if "messages" in r]) == 4
+            assert len([r for r in fixture.REQUESTS if "messages" in r]) == 2 * len(turns)
             if name == "permission-deny":
                 assert permissions == [True, False]
-            if name == "native-input-validation":
+            if name in {"mcp-non-object-input", "native-input-validation"}:
                 assert [event for blocked, event in events if blocked] == []
             if name == "native-permission-rule":
                 assert events == [(True, "PreToolUse"), (False, "PreToolUse")], events
             (directory / "native-events.json").write_text(json.dumps(events))
+            seen: set[str] = set()
             results = [block for request in fixture.REQUESTS if "messages" in request
                        for message in request["messages"] for block in message.get("content", [])
-                       if isinstance(block, dict) and block.get("type") == "tool_result"]
+                       if isinstance(block, dict) and block.get("type") == "tool_result"
+                       and not (block["tool_use_id"] in seen or seen.add(block["tool_use_id"]))]
             assert results and results[0].get("is_error") is True
+            if name == "mcp-non-object-input":
+                assert calls == [{}], calls
+                assert len(results) == 3, results
+                for index in (0, 1):
+                    assert results[index].get("is_error") is True, results[index]
+                    assert "InputValidationError" in json.dumps(results[index]), results[index]
+                assert results[2].get("is_error", False) is False, results[2]
             cases.append({"case": name, "passed": True})
         finally:
             server.shutdown()

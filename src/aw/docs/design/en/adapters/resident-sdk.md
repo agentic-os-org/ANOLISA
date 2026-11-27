@@ -57,11 +57,11 @@ and blank data, allows omitted `message_start.message.content` and strictly
 increasing non-contiguous content block indices while still rejecting pre-populated
 content or reopened blocks, and discards a trailing `[DONE]` only after a terminal
 `message_stop` or `error` event. Matching native Claude CLI recovery, malformed or
-non-object accumulated tool input JSON registers `{}` so CLI validation errors
-retire through the `is_error: true` path (and parameterless tools still match
-`PreToolUse` with `{}`), and mid-stream SSE `error` events drop any open
-unregistered tool block, mark the stream stopped, and forward the error without
-aborting the session. The relay warns once per request for each compatibility or
+non-object accumulated tool input JSON registers `{}` while forwarding the original
+payload so CLI validation errors retire through the `is_error: true` path (and
+malformed inputs that the CLI parses as `{}` still match `PreToolUse`), and
+mid-stream SSE `error` events drop any open unregistered tool block, mark the
+stream stopped, and forward the error without aborting the session. The relay warns once per request for each compatibility or
 recovery case: a discarded marker, blank data, accumulated whitespace-only deltas
 using the initial tool input, invalid or non-object tool input JSON, or an
 upstream stream error. Failures report the decoding or protocol stage and

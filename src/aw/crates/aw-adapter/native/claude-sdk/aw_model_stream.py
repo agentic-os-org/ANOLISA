@@ -199,16 +199,15 @@ class MessageStream:
                         if _SURROGATE.search(encoded):
                             # A delta boundary may split a valid UTF-16 pair.
                             arguments = json.loads(json.dumps(arguments))
-                        if not isinstance(arguments, dict):
-                            self.warn_once("non_object_tool_input", partial_bytes=partial_bytes)
-                            arguments = {}
-                            encoded = "{}"
                     else:
                         if partial:
                             self.warn_once("blank_tool_input", partial_bytes=partial_bytes)
                         arguments = initial
                         encoded = json.dumps(initial, ensure_ascii=False, separators=(",", ":"))
                     representable = fits_service_input(arguments)
+                    if representable and not isinstance(arguments, dict):
+                        self.warn_once("non_object_tool_input", partial_bytes=partial_bytes)
+                        arguments = {}
                 except json.JSONDecodeError as error:
                     self.warn_once("invalid_tool_input", partial_bytes=partial_bytes,
                                    json_err=json_error_label(error), json_pos=error.pos)
