@@ -193,6 +193,9 @@ pub struct StepScanOutcome {
 pub struct TrajectoryStore {
     conn: Mutex<Connection>,
     db_path: PathBuf,
+    // Fixed SQL projections, resolved once because read-only opens cannot migrate.
+    first_message_sql: &'static str,
+    last_message_sql: &'static str,
 }
 
 /// SQL predicate selecting the direct subagent children of `?1`, the literal
@@ -259,6 +262,8 @@ impl TrajectoryStore {
         Ok(Self {
             conn: Mutex::new(conn),
             db_path: path.to_path_buf(),
+            first_message_sql: "first_user_message",
+            last_message_sql: "last_user_message",
         })
     }
 
@@ -275,9 +280,24 @@ impl TrajectoryStore {
                 ..ConnectionOptions::default()
             },
         )?;
+        let mut first_message_sql = "NULL AS first_user_message";
+        let mut last_message_sql = "NULL AS last_user_message";
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(collected_trajectories)")?;
+            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for name in names {
+                match name?.as_str() {
+                    "first_user_message" => first_message_sql = "first_user_message",
+                    "last_user_message" => last_message_sql = "last_user_message",
+                    _ => {}
+                }
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             db_path: path.to_path_buf(),
+            first_message_sql,
+            last_message_sql,
         })
     }
 
@@ -410,11 +430,14 @@ impl TrajectoryStore {
         let conn = self.lock_conn()?;
         let record = conn
             .query_row(
-                "SELECT session_id, schema_version, agent_name, model_name, num_steps,
-                        total_prompt_tokens, total_completion_tokens, start_time, end_time,
-                        atif_json, project, source, is_subagent, file_path, file_size,
-                        file_mtime_ns, first_user_message, last_user_message
-                 FROM collected_trajectories WHERE session_id = ?1",
+                &format!(
+                    "SELECT session_id, schema_version, agent_name, model_name, num_steps,
+                            total_prompt_tokens, total_completion_tokens, start_time, end_time,
+                            atif_json, project, source, is_subagent, file_path, file_size,
+                            file_mtime_ns, {}, {}
+                     FROM collected_trajectories WHERE session_id = ?1",
+                    self.first_message_sql, self.last_message_sql
+                ),
                 params![session_id],
                 |row| {
                     Ok(TrajectoryRecord {
@@ -469,12 +492,13 @@ impl TrajectoryStore {
         limit: i64,
     ) -> Result<Vec<TrajectorySummary>> {
         let conn = self.lock_conn()?;
-        let mut sql = String::from(
+        let mut sql = format!(
             "SELECT session_id, schema_version, agent_name, model_name, num_steps,
                     total_prompt_tokens, total_completion_tokens, start_time, end_time,
                     project, source, is_subagent, collected_at_ns,
-                    first_user_message, last_user_message
+                    {}, {}
              FROM collected_trajectories",
+            self.first_message_sql, self.last_message_sql
         );
         let mut clauses: Vec<String> = Vec::new();
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
