@@ -7,7 +7,7 @@ fn cedar_source() -> Value {
     json!({
         "language": "cedar",
         "content": {
-            "schema": {"schemaId": "seccore.system", "revision": 1},
+            "schema": {"schemaId": "seccore.system", "revision": 3},
             "text": "// Keep original source for diagnostics.\nforbid(principal, action, resource);"
         }
     })
@@ -82,9 +82,9 @@ fn policy_snapshot_source_compatibility_is_strict_and_preserves_native_wire_shap
     assert_eq!(serde_json::to_value(parsed).unwrap(), cedar);
     let prefix = r#"{"policyId":"p","policyName":"test","revision":1,"template":"#;
     for source in [
-        r#"{"language":"cedar","language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"first"}}"#,
-        r#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"first","text":"second"}}"#,
-        r#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1,"revision":2},"text":"first"}}"#,
+        r#"{"language":"cedar","language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":3},"text":"first"}}"#,
+        r#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":3},"text":"first","text":"second"}}"#,
+        r#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":3,"revision":2},"text":"first"}}"#,
         r#"{"language":"unknown","specVersion":"0.1","rules":[]}"#,
         r#"{"specVersion":"0.1","rules":[],"rules":[]}"#,
     ] {

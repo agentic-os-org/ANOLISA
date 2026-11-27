@@ -308,7 +308,7 @@ with tempfile.TemporaryDirectory(prefix='asc-cedar-real-') as root:
     def run(policy, command, envelope=False):
         if envelope:
             policy = json.dumps({'language':'cedar','content':{
-                'schema':{'schemaId':'seccore.system','revision':1},'text':policy}})
+                'schema':{'schemaId':'seccore.system','revision':3},'text':policy}})
         source.write_text(policy)
         return subprocess.run([str(cli), '--socket', str(root / 'absent.sock'),
             'sandbox', 'run', '--permissions', str(source), '--'] + command,

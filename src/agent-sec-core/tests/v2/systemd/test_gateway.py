@@ -716,8 +716,6 @@ def protected_token(cli, user, agents=(AGENT,), foreign_user=None, shared_pair=F
                         f"asc-gateway-e2e-{name}",
                         "--file",
                         str(envelope),
-                        "--schema-revision",
-                        "2",
                     )
                     policies.append(policy)
                     encoded = json.dumps(policy)
@@ -908,8 +906,6 @@ def test_agent_sees_only_a_fake_inside_its_domain(host, upstream):
                 "non-root-credential",
                 "--file",
                 str(agent.envelope),
-                "--schema-revision",
-                "2",
             ],
             ["scope", "delete", "--scope-id", agent.scope_id],
         ):
@@ -1264,8 +1260,6 @@ def test_conflicting_import_and_global_retirement_apply_to_every_scope(host, ups
                 "same-pair",
                 "--file",
                 str(duplicate_envelope),
-                "--schema-revision",
-                "2",
             )
             policies.append(duplicate)
             assert pair_id(duplicate) == identity
@@ -1284,8 +1278,6 @@ def test_conflicting_import_and_global_retirement_apply_to_every_scope(host, ups
                 "same-source-replay",
                 "--file",
                 str(agent.envelope),
-                "--schema-revision",
-                "2",
             )
             policies.append(replay)
             assert replay["credentialBindings"] == agent.policy["credentialBindings"]
@@ -1307,8 +1299,6 @@ def test_conflicting_import_and_global_retirement_apply_to_every_scope(host, ups
                 "conflicting-pair",
                 "--file",
                 str(conflict_source),
-                "--schema-revision",
-                "2",
                 check=False,
             )
             assert conflict.returncode != 0 and conflict.stdout == ""
@@ -1370,8 +1360,6 @@ def test_conflicting_import_and_global_retirement_apply_to_every_scope(host, ups
                 "cannot-resurrect",
                 "--file",
                 str(agent.envelope),
-                "--schema-revision",
-                "2",
                 check=False,
             )
             assert retired.returncode != 0 and retired.stdout == ""
@@ -1518,8 +1506,6 @@ def test_empty_scope_deletion_retires_the_last_shared_pair(host, upstream):
                     "last-scope-retired",
                     "--file",
                     str(agent.envelope),
-                    "--schema-revision",
-                    "2",
                     check=False,
                 )
                 assert rejected.returncode != 0 and rejected.stdout == ""

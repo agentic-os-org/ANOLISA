@@ -54,6 +54,20 @@ impl FilePolicyBackend {
         }
         Ok(self)
     }
+    /// Automatic PAP admission must use the compiler that will build new file Bindings.
+    #[must_use]
+    pub fn deployment_selectors(
+        self,
+    ) -> &'static [asc_policy_cedar::deployment::DeploymentSelector] {
+        use asc_gateway_plan::selection::SELECTOR as GATEWAY;
+        match self {
+            Self::AgentSight => &[
+                asc_policy_translator_agentsight::selection::SELECTOR,
+                GATEWAY,
+            ],
+            Self::LuaLsm => &[asc_policy_translator_lua_lsm::SELECTOR, GATEWAY],
+        }
+    }
     fn route(self) -> &'static str {
         match self {
             Self::AgentSight => "agentsight",
@@ -213,7 +227,7 @@ fn build_reconciler<R: BindingStateRepository + BindingReconcileCatalog + 'stati
         factories.insert("gateway".into(), factory);
     }
     Ok(BindingReconciler::new(
-        repository,
+        repository.clone(),
         Arc::new(|binding: &PreparedBinding| AgentSightTranslator.translate(binding)),
         factories,
         "agentsight".into(),
@@ -233,7 +247,40 @@ fn build_reconciler<R: BindingStateRepository + BindingReconcileCatalog + 'stati
             }
         });
         target_plans(binding, backend)
+            .map_err(|failure| manual_source_failure(repository.as_ref(), binding, failure))
     }))
+}
+
+fn manual_source_failure(
+    repository: &impl BindingStateRepository,
+    binding: &PreparedBinding,
+    failure: Failure,
+) -> Failure {
+    use asc_policy_types::authoring::PolicySource;
+    let (None, PolicySource::Cedar(pinned)) =
+        (&binding.policy.deployment, &binding.policy.template)
+    else {
+        return failure;
+    };
+    let Some((index, reason)) = failure
+        .code
+        .strip_prefix("CEDAR_RULE_")
+        .and_then(|code| code.split_once('_'))
+        .and_then(|(index, reason)| Some((index.parse::<usize>().ok()?, reason)))
+    else {
+        return failure;
+    };
+    let policy = &binding.policy;
+    match repository.archived_cedar_source(&policy.policy_id, policy.revision) {
+        Ok(Some(source)) => match asc_pap::manual_source_index(&source, pinned, index) {
+            Some(original) => {
+                Failure::new(failure.kind, &format!("CEDAR_RULE_{original}_{reason}"))
+            }
+            None => failure,
+        },
+        Ok(None) => failure,
+        Err(_) => Failure::new(FailureKind::Retryable, "POLICY_SOURCE_HISTORY_UNAVAILABLE"),
+    }
 }
 
 fn translated_plan(
@@ -271,10 +318,7 @@ fn target_plans(
         }
     } else {
         let syntax = asc_policy_cedar::pst(source).map_err(invalid_source)?;
-        (
-            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::File),
-            asc_policy_cedar::project_pst(&syntax, asc_policy_cedar::PolicyDomain::Network),
-        )
+        asc_policy_cedar::manual_binding_views(&syntax, binding.policy.uses_credentials())
     };
     let mut plans = Vec::new();
     if let Some(files) = files {
@@ -521,7 +565,7 @@ mod tests {
             spec.policy.template = serde_json::from_value(serde_json::json!({
                 "language": "cedar",
                 "content": {
-                    "schema": {"schemaId": "seccore.system", "revision": 2},
+                    "schema": {"schemaId": "seccore.system", "revision": 3},
                     "text": r#"@id("reconciliation-credential")
 @modify("inject_credential")
 @real_token_file("/secure/github-real")

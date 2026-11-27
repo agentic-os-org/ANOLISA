@@ -84,8 +84,8 @@ environment; environment names and values must be valid UTF-8.
 ## Cedar input
 
 The same `--permissions` option also accepts raw Cedar using `seccore.system`
-schema revision 1, or the existing `{"language":"cedar","content":{"schema":
-{"schemaId":"seccore.system","revision":1},"text":"..."}}` source envelope.
+schema revision 3, or the existing `{"language":"cedar","content":{"schema":
+{"schemaId":"seccore.system","revision":3},"text":"..."}}` source envelope.
 Format detection uses the contents, not the filename. OS permission JSON retains
 its existing behavior. Cedar input does not enable PDP calls or start a daemon.
 
@@ -424,11 +424,7 @@ when { principal has agentType && principal.agentType == "cosh" };
 
 This rule grants process launch only; add the required file/network policies for
 the application. A missing type does not match this condition.
-Revisions 1 and 2 retain their existing admission rules. Only a source with an
-explicit principal header on every statement enters request authorization.
-Mixing bare and constrained headers is rejected. Native JSON and all-bare legacy
-Cedar sources remain on the deployment path. Clients and Cedar policies using
-the old field spelling `agent_type` must switch to `agentType`.
+Bare file rules without a subject predicate can be assigned to a process manually. To include a generic file rule in Sandbox decisions, use `principal is SecCore::Subject`. Clients and Cedar policies using the old field spelling `agent_type` must switch to `agentType`.
 
 Each request checks the PAP policy-set generation. Requests for the same generation
 reuse the compiled rules. On a cache miss, the daemon selects and loads rules from

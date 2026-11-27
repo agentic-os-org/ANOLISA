@@ -22,6 +22,41 @@ use expressions::{DELETE, READ, WRITE, WRITE_OPERATIONS, and, expression};
 pub(super) const MAX_TARGETS: usize = 64;
 type Result<T> = std::result::Result<T, &'static str>;
 
+/// Process target established by a file statement's subject predicates.
+#[must_use]
+pub fn placement(rule: &crate::deployment::StatementTarget) -> crate::deployment::Placement<'_> {
+    use crate::deployment::Placement;
+    match &rule.subject {
+        Ok(Some(subject)) => Placement::Bind(subject),
+        Ok(None) => Placement::Ignore,
+        Err(error) => Placement::Unassigned(error.to_string()),
+    }
+}
+
+/// Select the file operations shared by process file backends before target-specific lowering.
+#[must_use]
+pub fn select_operations(
+    input: &crate::selection::ValidatedStatement<'_>,
+) -> crate::selection::SelectedStatement {
+    use crate::selection::SelectedStatement;
+    let rule = input.rule;
+    if !rule.may_match(&["file.read", "file.write", "file.exec"], "SecCore::File") {
+        return SelectedStatement::Unrelated;
+    }
+    if let crate::deployment::Placement::Unassigned(reason) = placement(rule) {
+        return SelectedStatement::Unsupported(reason);
+    }
+    if !rule.may_match(&["file.write"], "SecCore::File") {
+        return SelectedStatement::Whole;
+    }
+    match input.select_operations(&["write", "delete"]) {
+        SelectedStatement::Unrelated => SelectedStatement::Unsupported(
+            "ActPlane supports only ordinary write and delete for file.write".into(),
+        ),
+        selected => selected,
+    }
+}
+
 /// Compiles a source snapshot using the selected Translator's target lowering.
 ///
 /// # Errors

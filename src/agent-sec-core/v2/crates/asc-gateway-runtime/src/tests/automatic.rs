@@ -18,7 +18,7 @@ fn source_with_pair(
     pair: &CredentialId,
 ) -> PreparedPolicy {
     let source = CedarPolicySource {
-        schema: asc_policy_cedar::schema::principal_reference(),
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: text.into(),
     };
     let registrations = asc_policy_cedar::http::compile(&source).unwrap();

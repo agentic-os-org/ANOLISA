@@ -86,7 +86,7 @@ pub fn rewrite_token_files(
 }
 
 /// Parses statements keyed by their source position, which the parser encodes in IDs.
-fn statements(text: &str) -> Result<BTreeMap<usize, (String, Policy)>, CedarError> {
+pub(crate) fn statements(text: &str) -> Result<BTreeMap<usize, (String, Policy)>, CedarError> {
     let set = PolicySet::from_str(text).map_err(Box::new)?;
     let mut ordered = BTreeMap::new();
     for policy in set.policies() {
@@ -150,7 +150,7 @@ mod tests {
         CedarPolicySource {
             schema: CedarSchemaReference {
                 schema_id: ResourceId::new(crate::schema::SCHEMA_ID).unwrap(),
-                revision: Revision::new(crate::schema::HTTP_SCHEMA_REVISION).unwrap(),
+                revision: Revision::new(crate::schema::SCHEMA_REVISION).unwrap(),
             },
             text: text.into(),
         }

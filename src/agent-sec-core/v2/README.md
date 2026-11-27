@@ -120,13 +120,14 @@ The current crates are:
   receipt handling for embedding applications.
 - `asc-pdp-runtime`: OS request evaluation over a combined Cedar policy set, advice
   handling and five-state decisions within the requested permissions.
-  `from_policy_set` is the sole policy-loading API.
+  PAP supplies revision-pinned Sandbox statement selections to the daemon.
 - `asc-policy-cedar`: library-only Cedar frontend with a pinned file/process and
   whole-network permission schema, strict SDK validation, common-subset checks
   through `validate` and official typed PST output through `pst`. Agent Hook
   actions can add separate typed contexts.
-  PAP/RPC and SQLite retain validated source and exact schema references. Revision 1
-  supports logical subjects, program calls and permit advice for sandbox authorization.
+  CLI, PAP, Intent and the runtime share `seccore.system` revision 3. Bare file rules
+  can be pinned to manual Scopes. Exact agent predicates select automatic process
+  assignments and explicit subjects can authorize Sandbox requests.
   The AgentSight adapter translates and deploys supported deletion, write and file read rules. See the
   [frontend contract and tests](../docs/design/POLICY_FRONTEND_AST_AND_TRANSLATION.md#86-cedar-frontend-library).
 - `asc-policy-translator-agentsight`: translates immutable Binding snapshots into

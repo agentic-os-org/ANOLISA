@@ -99,7 +99,7 @@ pub fn compile_binding(view: GatewayBindingView<'_>) -> Result<GatewayBindingPla
         view.source.policy_revision,
         view.credential_bindings,
         authored,
-        asc_policy_cedar::schema::uses_principal_targeting(view.schema),
+        true,
     )?;
     let plan = Plan {
         format: PlanFormat::V2,

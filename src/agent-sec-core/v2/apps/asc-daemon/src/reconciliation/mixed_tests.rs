@@ -155,7 +155,7 @@ fn setup(source: &str) -> (Arc<SqlitePolicyRepository>, PreparedBinding) {
     let mut seed: PreparedBinding = serde_json::from_value(fixture()["binding"].clone()).unwrap();
     seed.policy.template = serde_json::from_value(serde_json::json!({
         "language": "cedar", "content": {
-            "schema": {"schemaId": "seccore.system", "revision": 2}, "text": source
+            "schema": {"schemaId": "seccore.system", "revision": 3}, "text": source
         }
     }))
     .unwrap();
@@ -176,7 +176,7 @@ fn setup(source: &str) -> (Arc<SqlitePolicyRepository>, PreparedBinding) {
                     process_name: "worker".into(),
                 },
             },
-            policy_snapshots: vec![seed.policy],
+            policy_snapshots: vec![asc_pap::manual_snapshot(seed.policy).unwrap()],
             owner_uid: Some(1000),
             status: ScopeStatus::Active,
         })
@@ -258,6 +258,131 @@ fn native_seccore_policy_is_rejected_on_the_lua_lsm_route() {
     let plans = target_plans(&binding, FilePolicyBackend::AgentSight).unwrap();
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].0, "agentsight");
+}
+
+#[test]
+fn manual_file_rejection_names_the_authored_statement_after_policy_deletion() {
+    let targeted = r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+        when { principal has agentType && principal.agentType == "qoder" && resource.path == "/auto" };"#;
+    let manual = r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+        when { resource.path == "/manual" && context.input.program == "/bin/cat" };"#;
+    for preceding in [1, 11] {
+        let (repository, binding) = setup(&format!("{}{manual}", targeted.repeat(preceding)));
+        repository
+            .delete_policy_revision(&binding.policy.policy_id, binding.policy.revision)
+            .unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let core = build_reconciler(
+            repository.clone(),
+            factory(client("agentsight", &repository, &binding, &calls)),
+            None,
+            Arc::new(TestClock::default()),
+            FilePolicyBackend::AgentSight,
+        )
+        .unwrap();
+        core.reconcile(&binding.binding_id, &mut AttemptSchedule::default())
+            .unwrap();
+        let state = repository
+            .get_binding_state(&binding.binding_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.binding.status.phase, BindingStatus::ApplyFailed);
+        assert_eq!(
+            state.binding.status.error.unwrap().code,
+            format!("CEDAR_RULE_{preceding}_UNSUPPORTED_CONDITION")
+        );
+        assert!(calls.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn automatic_file_admission_uses_the_configured_backend_for_path_patterns() {
+    use asc_foundation_types::ResourceId;
+    use asc_pap::{PapError, PapService, ScopeDiscovery, ScopeDiscoverySeed};
+    use asc_policy_types::{authoring::PolicySource, cedar::CedarPolicySource};
+    struct Discovery;
+    impl ScopeDiscovery for Discovery {
+        fn start(&self, _: &ScopeDiscoverySeed) -> Result<(), PapError> {
+            Ok(())
+        }
+        fn stop(&self, _: &ResourceId) -> Result<(), PapError> {
+            Ok(())
+        }
+    }
+
+    for (backend, with_rename) in [
+        (FilePolicyBackend::AgentSight, false),
+        (FilePolicyBackend::LuaLsm, false),
+        (FilePolicyBackend::LuaLsm, true),
+    ] {
+        let operations = if with_rename {
+            r#"context.input.operation == SecCore::WriteOperation::"delete" || context.input.operation == SecCore::WriteOperation::"rename""#
+        } else {
+            r#"context.input.operation == SecCore::WriteOperation::"delete""#
+        };
+        let source = PolicySource::Cedar(CedarPolicySource {
+            schema: asc_policy_cedar::schema::embedded_reference(),
+            text: format!(
+                r#"forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+                when {{ principal has agentType && principal.agentType == "qoder" }}
+                when {{ resource.path like "/work/*" && resource.path like "*.txt" }}
+                when {{ {operations} }};"#
+            ),
+        });
+        let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
+        let pap = PapService::new(repo)
+            .with_scope_discovery(Arc::new(Discovery))
+            .with_automatic_scopes(
+                Ok(BTreeMap::from([(
+                    "qoder".into(),
+                    ProcessMatcher::Name {
+                        process_name: "qoder".into(),
+                    },
+                )])),
+                backend.deployment_selectors(),
+                || {},
+            );
+        let saved = pap.create_policy("file patterns", &source).unwrap();
+        pap.recover_scopes().unwrap();
+        let diagnostics = pap
+            .policy_details(&saved.policy_id, saved.revision)
+            .unwrap()
+            .automatic_diagnostics;
+        let [diagnostic] = diagnostics.as_slice() else {
+            panic!("expected one file decision: {diagnostics:?}")
+        };
+        let scopes = pap.list_scopes(10, 0).unwrap().items;
+        if backend == FilePolicyBackend::AgentSight {
+            assert_eq!(diagnostic.state, "failed");
+            assert!(
+                diagnostic
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("CEDAR_RULE_0_UNSUPPORTED_CONDITION"),
+                "{diagnostic:?}"
+            );
+            assert!(scopes.is_empty());
+            continue;
+        }
+        assert_eq!(diagnostic.state, "waitingForProcess");
+        let [scope] = scopes.as_slice() else {
+            panic!("expected one Lua-LSM scope")
+        };
+        let mut binding: PreparedBinding =
+            serde_json::from_value(fixture()["binding"].clone()).unwrap();
+        binding.policy = scope.policy_snapshots[0].clone();
+        let plans = target_plans(&binding, backend).unwrap();
+        let file: asc_lua_lsm_protocol::LuaLsmPlan =
+            serde_json::from_slice(&plans[0].1.content).unwrap();
+        assert_eq!(plans[0].0, LUA_LSM_ROUTE);
+        assert_eq!(file.patterns[&0].len(), 2);
+        assert!(file.policy.targets[0].protections.delete);
+        if with_rename {
+            let fragment = &binding.policy.deployment.unwrap().fragments["policy0"];
+            assert!(!fragment.contains("rename"));
+        }
+    }
 }
 
 #[test]
@@ -389,7 +514,7 @@ fn root_exit_cleans_up_mixed_lua_deployment() {
 #[test]
 fn network_without_credentials_is_routed_and_rejected_before_target_mutation() {
     let (repository, binding) = setup(
-        r#"permit(principal, action == SecCore::Action::"network.use", resource == SecCore::Network::"all");"#,
+        r#"permit(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint);"#,
     );
     assert!(!binding.policy.uses_credentials());
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -604,7 +729,7 @@ fn automatic_file_and_gateway_plans_use_only_their_selected_source_statements() 
     else {
         panic!("fixture must contain Cedar");
     };
-    cedar.schema = asc_policy_cedar::schema::principal_reference();
+    cedar.schema = asc_policy_cedar::schema::embedded_reference();
     cedar.text = cedar.text.replace(
         "when {",
         r#"when { principal has agentType && principal.agentType == "qoder" &&"#,

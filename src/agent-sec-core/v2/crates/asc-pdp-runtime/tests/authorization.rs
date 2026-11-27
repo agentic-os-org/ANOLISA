@@ -10,7 +10,7 @@ fn source(text: &str) -> CedarPolicySource {
     CedarPolicySource {
         schema: CedarSchemaReference {
             schema_id: ResourceId::new("seccore.system").unwrap(),
-            revision: Revision::new(1).unwrap(),
+            revision: Revision::new(3).unwrap(),
         },
         text: text.to_owned(),
     }
@@ -171,7 +171,7 @@ fn evaluate_v3(text: &str, agent_type: Option<&str>) -> OsPermissionSet {
         policy_id: ResourceId::new("v3").unwrap(),
         revision: Revision::new(1).unwrap(),
         source: CedarPolicySource {
-            schema: asc_policy_cedar::schema::principal_reference(),
+            schema: asc_policy_cedar::schema::embedded_reference(),
             text: text.into(),
         },
     });
@@ -196,23 +196,23 @@ fn selected_fragments_drive_sandbox_decisions_without_losing_path_or_subject() {
     use asc_policy_cedar::selection::{SelectedStatement, ValidatedPolicy, ValidatedStatement};
 
     let mut member = member("qoder", "");
-    member.source.schema = asc_policy_cedar::schema::principal_reference();
+    member.source.schema = asc_policy_cedar::schema::embedded_reference();
     member.source.text = r#"
         permit(principal, action == SecCore::Action::"process.spawn", resource);
-        permit(principal, action == SecCore::Action::"file.read", resource);
-        permit(principal, action == SecCore::Action::"file.write", resource);
-        forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+        permit(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource);
+        permit(principal is SecCore::Subject, action == SecCore::Action::"file.write", resource);
+        forbid(principal is SecCore::Subject, action == SecCore::Action::"file.write", resource is SecCore::File)
         when { principal has agentType && principal.agentType == "qoder" }
         when { resource.path == "/work/reports" || resource.path like "/work/reports/*" }
         when { context.input.operation == SecCore::WriteOperation::"write" ||
                context.input.operation == SecCore::WriteOperation::"delete" ||
                context.input.operation == SecCore::WriteOperation::"rename" };
-        forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
+        forbid(principal is SecCore::Subject, action == SecCore::Action::"file.write", resource is SecCore::File)
         when { (context.input.operation == SecCore::WriteOperation::"write" && resource.path == "/work/A") ||
                (context.input.operation == SecCore::WriteOperation::"delete" && resource.path == "/work/B") };
         forbid(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint);
         @advice("{\"verdict\":\"warn\",\"message\":\"Confirm the report destination\"}")
-        permit(principal, action == SecCore::Action::"file.write", resource)
+        permit(principal is SecCore::Subject, action == SecCore::Action::"file.write", resource)
         when { context.input.operation == SecCore::WriteOperation::"write" ||
                context.input.operation == SecCore::WriteOperation::"delete" };
     "#.into();
@@ -315,22 +315,19 @@ fn v3_mixed_source_preserves_the_qoder_file_forbid_without_granting_network() {
 }
 
 #[test]
-fn a_file_membership_that_cannot_be_mapped_to_a_path_is_reported_in_each_schema() {
-    for revision in [1, 2, 3] {
-        for header in ["in", "is SecCore::File in"] {
-            let text = format!(
-                r#"forbid(principal is SecCore::Subject, action, resource {header} SecCore::File::"private");"#
-            );
-            let mut policy = member("file-member", &text);
-            policy.source.schema.revision = Revision::new(revision).unwrap();
-            let set = AuthorizationPolicySet {
-                version: "file-membership".into(),
-                policies: vec![policy],
-            };
-            assert!(
-                matches!(PdpRuntime::from_policy_set(set), Err(asc_pdp_runtime::PdpError::Unsupported(reason)) if reason.contains("filesystem policy resources must use path predicates"))
-            );
-        }
+fn a_file_membership_that_cannot_be_mapped_to_a_path_is_reported() {
+    for header in ["in", "is SecCore::File in"] {
+        let text = format!(
+            r#"forbid(principal is SecCore::Subject, action, resource {header} SecCore::File::"private");"#
+        );
+        let policy = member("file-member", &text);
+        let set = AuthorizationPolicySet {
+            version: "file-membership".into(),
+            policies: vec![policy],
+        };
+        assert!(
+            matches!(PdpRuntime::from_policy_set(set), Err(asc_pdp_runtime::PdpError::Unsupported(reason)) if reason.contains("filesystem policy resources must use path predicates"))
+        );
     }
 }
 
@@ -357,23 +354,19 @@ fn v3_optional_uid_is_evaluated_with_the_original_cedar_operator() {
 }
 
 #[test]
-fn each_member_keeps_its_own_operation_contract_in_a_mixed_snapshot() {
-    let operation = r#"forbid(principal, action == SecCore::Action::"file.write", resource)
-        when { context.input.operation == SecCore::WriteOperation::"delete" };"#;
-    let mut mixed = snapshot(operation);
-    let mut v3 = member("shared", operation);
-    v3.source.schema = asc_policy_cedar::schema::principal_reference();
-    mixed.policies.push(v3);
-    assert!(
-        matches!(PdpRuntime::from_policy_set(mixed), Err(asc_pdp_runtime::PdpError::Unsupported(reason)) if reason.contains("runtime file-operation"))
-    );
+fn retired_schema_references_cannot_enter_an_otherwise_valid_snapshot() {
+    let mut mixed = snapshot("");
+    let mut old = member("retired", COMMAND);
+    old.source.schema.revision = Revision::new(2).unwrap();
+    mixed.policies.push(old);
+    assert!(PdpRuntime::from_policy_set(mixed).is_err());
 }
 
 #[test]
 fn v3_ordinary_write_checks_delete_predicates_and_their_sibling_paths() {
     for (condition, restrict_a) in [("", false), (r#" || resource.path == "/work/A""#, true)] {
         let text = format!(
-            r#"forbid(principal, action == SecCore::Action::"file.write", resource)
+            r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.write", resource)
                when {{ context.input.operation == SecCore::WriteOperation::"delete"{condition} }};"#
         );
         let permissions = evaluate_v3(&text, Some("qoder"));

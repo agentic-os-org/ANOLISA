@@ -11,7 +11,7 @@ use crate::model::{Page, PolicyRevisionState};
 pub enum PolicySnapshotKind {
     /// Include every current policy for request-time authorization.
     AllCurrent,
-    /// Include only v3 source policies eligible for automatic deployment.
+    /// Include only Cedar sources eligible for automatic deployment.
     Automatic,
 }
 
@@ -97,7 +97,7 @@ pub trait PapRepository: Send + Sync {
             .policies)
     }
 
-    /// Snapshot current v3 source policies for process deployment.
+    /// Snapshot current Cedar sources for process deployment.
     /// # Errors
     /// Returns storage or snapshot capacity errors.
     fn automatic_policies(&self) -> Result<Vec<PreparedPolicy>, PapError> {
@@ -106,7 +106,7 @@ pub trait PapRepository: Send + Sync {
             .policies)
     }
 
-    /// Returns only the ordered v3 identities and revisions used to fence publication.
+    /// Returns only the ordered Cedar identities and revisions used to fence publication.
     ///
     /// # Errors
     /// Returns storage or snapshot capacity errors.
@@ -147,7 +147,7 @@ pub trait PapRepository: Send + Sync {
         Err(PapError::Unavailable)
     }
 
-    /// Commit a derived Scope only if its old snapshot and all v3 sources still match.
+    /// Commit a derived Scope only if its old snapshot and all Cedar sources still match.
     /// # Errors
     /// Rejects stale source revisions or a changed serving assignment.
     fn replace_automatic_scopes(

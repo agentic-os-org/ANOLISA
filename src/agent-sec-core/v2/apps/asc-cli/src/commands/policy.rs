@@ -69,7 +69,7 @@ pub(crate) struct PolicyInput {
     /// Cedar schema identity [default: the embedded system schema].
     #[arg(long, value_parser = resource_id)]
     schema_id: Option<ResourceId>,
-    /// Cedar schema revision (default 1, use 3 for principal-based targeting).
+    /// Cedar schema revision (defaults to the embedded system schema revision).
     #[arg(long, value_parser = revision)]
     schema_revision: Option<Revision>,
 }
@@ -154,24 +154,28 @@ impl PolicyInput {
         if bytes.len() > asc_daemon_client::MAX_FRAME_BYTES {
             return Err(InputError::TooLarge);
         }
-        match self.language {
+        let template = match self.language {
             // Decode the typed template before conversion to Value, so duplicate
             // fields cannot be silently collapsed by an untyped JSON map.
-            SourceLanguage::Json => Ok(source_serde::from_slice(&bytes)?),
+            SourceLanguage::Json => source_serde::from_slice(&bytes)?,
             SourceLanguage::Cedar => {
                 let text = String::from_utf8(bytes).map_err(|_| InputError::PolicyUtf8)?;
                 // The resolved reference is stored with the Policy, so a later
                 // binary with a newer default cannot reinterpret this source.
                 let embedded = asc_policy_cedar::schema::embedded_reference();
-                Ok(PolicySource::Cedar(CedarPolicySource {
+                PolicySource::Cedar(CedarPolicySource {
                     schema: CedarSchemaReference {
                         schema_id: self.schema_id.clone().unwrap_or(embedded.schema_id),
                         revision: self.schema_revision.unwrap_or(embedded.revision),
                     },
                     text,
-                }))
+                })
             }
+        };
+        if let PolicySource::Cedar(source) = &template {
+            asc_policy_cedar::schema::validate_reference(&source.schema)?;
         }
+        Ok(template)
     }
 }
 
@@ -243,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_cedar_is_the_default_language_and_schema_flags_override_the_reference() {
+    fn raw_cedar_is_the_default_language_and_uses_the_embedded_reference() {
         let directory = tempfile::tempdir().expect("temp dir");
         let path = directory.path().join("policy.cedar");
         let text = "forbid(principal, action, resource);\n";
@@ -253,19 +257,9 @@ mod tests {
         assert_eq!(
             request.params["template"],
             serde_json::json!({"language": "cedar", "content": {
-                "schema": {"schemaId": "seccore.system", "revision": 1},
+                "schema": {"schemaId": "seccore.system", "revision": 3},
                 "text": text,
             }})
-        );
-
-        let request = create_request(
-            &path,
-            &["--schema-id", "other.schema", "--schema-revision", "7"],
-        )
-        .expect("schema flags are forwarded and validated by the daemon");
-        assert_eq!(
-            request.params["template"]["content"]["schema"],
-            serde_json::json!({"schemaId": "other.schema", "revision": 7})
         );
     }
 
@@ -278,7 +272,7 @@ mod tests {
             create_request(&path, &[]),
             Err(InputError::PolicyUtf8)
         ));
-        for flag in ["--schema-id=seccore.system", "--schema-revision=1"] {
+        for flag in ["--schema-id=seccore.system", "--schema-revision=3"] {
             assert!(matches!(
                 create_request(&path, &["--language=json", flag]),
                 Err(InputError::SchemaWithJson)

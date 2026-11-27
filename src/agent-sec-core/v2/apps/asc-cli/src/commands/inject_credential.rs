@@ -21,7 +21,7 @@ use asc_daemon_protocol::method::{
 use asc_daemon_protocol::{CreatePolicyParams, CreateScopeParams, DaemonResponse, ListParams};
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::authoring::PolicySource;
-use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
+use asc_policy_types::cedar::CedarPolicySource;
 use asc_policy_types::scope::{PolicyReference, ProcessMatcher, ScopeSelector};
 use clap::{Args, ValueEnum};
 use serde_json::{Value, json};
@@ -322,12 +322,7 @@ impl InjectCredentialCommand {
         let text = String::from_utf8(bytes)
             .map_err(|_| failure(format!("{} is not valid UTF-8", path.display())))?;
         Ok(CedarPolicySource {
-            schema: CedarSchemaReference {
-                schema_id: ResourceId::new(asc_policy_cedar::schema::SCHEMA_ID)
-                    .map_err(io::Error::other)?,
-                revision: Revision::new(asc_policy_cedar::schema::HTTP_SCHEMA_REVISION)
-                    .map_err(io::Error::other)?,
-            },
+            schema: asc_policy_cedar::schema::embedded_reference(),
             text,
         })
     }

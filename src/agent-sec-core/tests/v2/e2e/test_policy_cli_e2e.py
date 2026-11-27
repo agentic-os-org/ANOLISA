@@ -131,7 +131,7 @@ def test_raw_cedar_files_round_trip_through_the_daemon(cli, daemon, tmp_path):
     assert exported.returncode == 0, exported.stderr
     baseline = tmp_path / "baseline.cedar"
     baseline.write_text(exported.stdout)
-    schema = {"schemaId": "seccore.system", "revision": 1}
+    schema = {"schemaId": "seccore.system", "revision": 3}
     policy = daemon.request(
         "policy", "create", "--name", "baseline", "--file", str(baseline)
     )
@@ -158,7 +158,7 @@ def test_raw_cedar_files_round_trip_through_the_daemon(cli, daemon, tmp_path):
         "--schema-id",
         "seccore.system",
         "--schema-revision",
-        "1",
+        "3",
         "--file",
         str(protect),
     )
@@ -198,17 +198,21 @@ def test_raw_cedar_files_round_trip_through_the_daemon(cli, daemon, tmp_path):
             assert json.loads(rejected.stderr)["error"]["code"] == "invalid_argument"
             assert daemon.request("policy", "list")["items"] == [updated]
 
-    # An unknown revision is rejected by the daemon, never resolved to another one.
-    unknown = daemon.cli(
-        "policy",
-        "create",
-        "--name",
-        "future",
-        "--schema-revision",
-        "99",
-        "--file",
-        str(protect),
-    )
-    assert unknown.returncode == 1
-    assert json.loads(unknown.stderr)["error"]["code"] == "invalid_argument"
-    assert daemon.request("policy", "list")["items"] == [updated]
+    for revision in ("1", "2", "99"):
+        rejected = daemon.cli(
+            "policy",
+            "create",
+            "--name",
+            "unsupported",
+            "--schema-revision",
+            revision,
+            "--file",
+            str(protect),
+        )
+        assert rejected.returncode == 1
+        assert (
+            f"unsupported Cedar schema seccore.system revision {revision}"
+            in rejected.stderr
+        )
+        assert "use seccore.system revision 3" in rejected.stderr
+        assert daemon.request("policy", "list")["items"] == [updated]

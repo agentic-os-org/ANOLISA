@@ -418,6 +418,9 @@ pub enum InputError {
     /// A JSON source names its own schema, so the flags would be silently ignored.
     #[error("--schema-id and --schema-revision require --language cedar")]
     SchemaWithJson,
+    /// A Cedar policy specified a schema this CLI does not support.
+    #[error(transparent)]
+    CedarSchema(#[from] asc_policy_cedar::CedarError),
     /// Invalid authoring JSON or request serialization.
     #[error("invalid Policy request input: {0}")]
     Json(#[from] serde_json::Error),
@@ -464,6 +467,7 @@ impl InputError {
             | Self::TooLarge
             | Self::PolicyUtf8
             | Self::SchemaWithJson
+            | Self::CedarSchema(_)
             | Self::Json(_)
             | Self::LocalCommand
             | Self::PromptScanBatch

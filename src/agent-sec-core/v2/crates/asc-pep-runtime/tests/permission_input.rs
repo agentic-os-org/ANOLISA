@@ -247,7 +247,7 @@ fn cedar_regions_preserve_exclusions_and_directory_boundaries() {
     assert_eq!(permissions.network.mode, NetworkMode::Off);
     assert!(permissions.execution.deny_paths.is_empty());
     let envelope = json!({"language":"cedar", "content":{
-        "schema":{"schemaId":"seccore.system","revision":1}, "text":TREE
+        "schema":{"schemaId":"seccore.system","revision":3}, "text":TREE
     }});
     assert_eq!(resolve(&envelope.to_string()), permissions);
 }
@@ -1631,7 +1631,7 @@ forbid(principal, action == SecCore::Action::"{action}", resource) when {{ {} }}
                 exclusion
             );
             let envelope = json!({"language":"cedar", "content":{
-                "schema":{"schemaId":"seccore.system","revision":1}, "text":source
+                "schema":{"schemaId":"seccore.system","revision":3}, "text":source
             }});
             for text in [source.clone(), envelope.to_string()] {
                 let input = PermissionInput::parse(&text).unwrap();

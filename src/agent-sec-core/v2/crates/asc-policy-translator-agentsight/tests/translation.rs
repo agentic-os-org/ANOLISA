@@ -313,7 +313,7 @@ fn cedar_unconstrained_operations_are_rejected_without_a_partial_plan() {
     let mut binding = complete_binding_fixture();
     binding.policy.template = serde_json::from_value(serde_json::json!({
         "language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system","revision":1},
+            "schema":{"schemaId":"seccore.system","revision":3},
             "text":"forbid(principal, action == SecCore::Action::\"file.write\", resource);"
         }
     }))

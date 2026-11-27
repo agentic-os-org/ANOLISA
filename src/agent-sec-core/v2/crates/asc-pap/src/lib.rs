@@ -24,11 +24,11 @@ mod model;
 mod repository;
 mod selection;
 mod service;
+use asc_policy_cedar::deployment::StatementTarget;
 pub use asc_policy_types::policy::AutomaticDiagnostic;
 pub use automatic::{ScopePublication, ScopeUpdate, is_automatic_source};
 pub use selection::ConsumerPolicySet;
 
-pub use asc_policy_cedar::schema::{PRINCIPAL_SCHEMA_REVISION, SCHEMA_ID};
 pub use error::{EnqueueError, PapError};
 pub use model::{Page, PolicyRevisionState, ScopeDiscoverySeed};
 pub use repository::{PapRepository, PolicySnapshot, PolicySnapshotKind};
@@ -69,6 +69,95 @@ pub fn validate_policy_snapshot(
         ));
     }
     Ok(())
+}
+
+/// Pin the bare statements that an operator can assign to a process Scope.
+///
+/// # Errors
+/// Rejects sources without a manual process assignment or invalid Cedar.
+pub fn manual_snapshot(
+    mut policy: asc_policy_types::policy::PreparedPolicy,
+) -> Result<asc_policy_types::policy::PreparedPolicy, PapError> {
+    use asc_policy_types::authoring::PolicySource;
+    let PolicySource::Cedar(source) = &mut policy.template else {
+        return Ok(policy);
+    };
+    let statements = asc_policy_cedar::deployment::statements(source)?;
+    let manual = manual_rules(&statements);
+    if manual.is_empty() {
+        return Err(PapError::InvalidScope(
+            asc_policy_types::ValidationError::new(
+                "policyTemplates",
+                format!(
+                    "policy {} revision {} has no bare file or HTTP statement for manual assignment",
+                    policy.policy_id,
+                    policy.revision.get()
+                ),
+            ),
+        ));
+    }
+    if statements.iter().all(StatementTarget::manual_assignment) {
+        return Ok(policy);
+    }
+    policy.credential_bindings.retain(|binding| {
+        manual
+            .iter()
+            .any(|rule| rule.credential_rule.as_ref() == Some(&binding.rule_id))
+    });
+    source.text = manual_text(&manual);
+    validate_policy_snapshot(&policy)?;
+    Ok(policy)
+}
+
+fn manual_rules(statements: &[StatementTarget]) -> Vec<&StatementTarget> {
+    let mut manual: Vec<_> = statements
+        .iter()
+        .filter(|rule| rule.manual_assignment())
+        .collect();
+    if !manual.is_empty() {
+        // Include potentially applicable restrictions on a sibling manual credential grant.
+        manual.extend(statements.iter().filter(|rule| {
+            !rule.manual_assignment()
+                && rule.credential_rule.is_none()
+                && rule.may_match(&["network.send"], "SecCore::HttpEndpoint")
+        }));
+        manual.sort_by_key(|rule| (rule.id.len(), &rule.id));
+    }
+    manual
+}
+
+fn manual_text(rules: &[&StatementTarget]) -> String {
+    rules
+        .iter()
+        .map(|rule| {
+            // Pin implicit credential IDs before filtering changes their position.
+            if rule.credential_rule.is_some() && rule.policy().annotation("id").is_none() {
+                format!("@id(\"{}\")\n{}", rule.id, rule.cedar())
+            } else {
+                rule.cedar()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Resolve an ordinal in a compact manual snapshot against the exact authored revision.
+/// An archive from a schema upgrade can differ from this projection and has no index mapping.
+#[must_use]
+pub fn manual_source_index(
+    authored: &asc_policy_types::cedar::CedarPolicySource,
+    pinned: &asc_policy_types::cedar::CedarPolicySource,
+    index: usize,
+) -> Option<usize> {
+    if authored.schema != pinned.schema || authored.text == pinned.text {
+        return None;
+    }
+    let statements = asc_policy_cedar::deployment::statements(authored).ok()?;
+    let rules = manual_rules(&statements);
+    if manual_text(&rules) != pinned.text {
+        return None;
+    }
+    rules.get(index)?.id.strip_prefix("policy")?.parse().ok()
 }
 
 /// Post-commit Binding wake-up; notifications contain no command or spec.

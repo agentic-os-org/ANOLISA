@@ -18,6 +18,15 @@ use asc_policy_types::{
     target::{AdapterFault, TargetBindingPlan, TranslationOutcome, TranslationRejection},
 };
 
+/// Select and validate automatic file assignments using Lua-LSM's path-pattern support.
+pub const SELECTOR: asc_policy_cedar::deployment::DeploymentSelector =
+    asc_policy_cedar::deployment::DeploymentSelector {
+        backend: asc_policy_types::policy::DeploymentBackend::ActPlane,
+        select: |input| input.selection(file_protection::select_operations(input)),
+        place: file_protection::placement,
+        validate: Some(|files| file_protection::translate_pst(files, cedar_target).map(|_| ())),
+    };
+
 /// Produces Lua modules from the same file intent used by `AgentSight`.
 #[derive(Debug, Clone)]
 pub struct LuaLsmTranslator {

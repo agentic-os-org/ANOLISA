@@ -2,6 +2,8 @@
 
 [中文版](POLICY_FRONTEND_AST_AND_TRANSLATION_zh.md)
 
+The revision 1 and 2 contracts below document the original frontend integration. The unified frontend accepts `seccore.system` revision 3 and shares one schema with the request and process consumers. See the [single-revision deployment contract](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT.md#single-revision-contract).
+
 This document describes the existing AgentSecCore V2 policy pipeline and the
 Cedar integration design. Sections 1–4 cover the current implementation;
 sections 5–7 retain the earlier Cedar/Dogwood import assessment. Section 8 records

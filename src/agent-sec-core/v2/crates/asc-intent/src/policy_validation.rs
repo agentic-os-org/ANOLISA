@@ -11,7 +11,7 @@ use std::str::FromStr as _;
 use thiserror::Error;
 
 /// Single embedded source of the shared policy type contract.
-pub const CEDAR_SCHEMA: &str = include_str!("../../asc-policy-cedar/schema/seccore.cedarschema");
+pub const CEDAR_SCHEMA: &str = asc_policy_cedar::schema::SCHEMA_TEXT;
 /// Policy text budget.
 pub const MAX_POLICY_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_POLICIES: usize = 1024;

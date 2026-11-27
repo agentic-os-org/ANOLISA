@@ -2,7 +2,8 @@
 
 use asc_agentsight_protocol::FileProtectionTargetKind;
 use asc_policy_cedar::{
-    deployment::{DeploymentSelector, Placement, StatementTarget},
+    deployment::DeploymentSelector,
+    file_protection,
     selection::{
         Direction, EnforcementDeviation, SelectedStatement, Selection, ValidatedStatement,
     },
@@ -13,35 +14,20 @@ use asc_policy_types::policy::DeploymentBackend;
 pub const SELECTOR: DeploymentSelector = DeploymentSelector {
     backend: DeploymentBackend::ActPlane,
     select,
-    place,
+    place: file_protection::placement,
+    validate: Some(crate::validate_file_protection),
 };
 
 fn select(input: &ValidatedStatement<'_>) -> Selection {
-    let rule = input.rule;
-    if !rule.may_match(&["file.read", "file.write", "file.exec"], "SecCore::File") {
-        return input.selection(SelectedStatement::Unrelated);
-    }
-    // Report the same targeting failure in static coverage and automatic Scope diagnostics.
-    if asc_policy_cedar::schema::uses_principal_targeting(input.schema)
-        && let Placement::Unassigned(reason) = place(rule)
-    {
-        return input.selection(SelectedStatement::Unsupported(reason));
-    }
-    let selected = if rule.may_match(&["file.write"], "SecCore::File") {
-        input.select_operations(&["write", "delete"])
-    } else {
-        SelectedStatement::Whole
-    };
+    let selected = file_protection::select_operations(input);
     let fragment = match &selected {
         SelectedStatement::Fragment { cedar, .. } => Some(cedar.as_str()),
-        SelectedStatement::Unrelated => {
-            return input.selection(SelectedStatement::Unsupported(
-                "ActPlane supports only ordinary write and delete for file.write".into(),
-            ));
+        SelectedStatement::Unrelated | SelectedStatement::Unsupported(_) => {
+            return input.selection(selected);
         }
         _ => None,
     };
-    let residual = match rule.deployment_rule(fragment) {
+    let residual = match input.rule.deployment_rule(fragment) {
         Ok(rule) => rule,
         Err(error) => return input.selection(SelectedStatement::Unsupported(error.diagnostic())),
     };
@@ -99,14 +85,4 @@ fn select(input: &ValidatedStatement<'_>) -> Selection {
         });
     }
     selection
-}
-
-fn place(rule: &StatementTarget) -> Placement<'_> {
-    match &rule.subject {
-        Ok(Some(subject)) => Placement::Bind(subject),
-        Ok(None) => Placement::Unassigned(
-            "automatic ActPlane deployment requires an exact principal.agentType".into(),
-        ),
-        Err(error) => Placement::Unassigned(error.to_string()),
-    }
 }

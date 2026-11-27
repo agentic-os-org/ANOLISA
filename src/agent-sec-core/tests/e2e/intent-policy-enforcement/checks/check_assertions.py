@@ -1449,7 +1449,7 @@ class CredentialCleanupTests(unittest.TestCase):
                     return {}
                 if args[:2] == ("policy", "create"):
                     source = {
-                        "schema": {"schemaId": "seccore.system", "revision": 2},
+                        "schema": {"schemaId": "seccore.system", "revision": 3},
                         "text": Path(args[5]).read_text(),
                     }
                     policy.update(
@@ -1465,7 +1465,7 @@ class CredentialCleanupTests(unittest.TestCase):
                         store.parent.mkdir()
                         # Match the wire representation hashed by GatewayService::register.
                         encoded = (
-                            '{"schema":{"schemaId":"seccore.system","revision":2},"text":'
+                            '{"schema":{"schemaId":"seccore.system","revision":3},"text":'
                             + json.dumps(source["text"], ensure_ascii=False)
                             + "}"
                         )

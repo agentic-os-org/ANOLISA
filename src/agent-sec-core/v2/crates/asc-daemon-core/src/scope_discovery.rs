@@ -288,7 +288,7 @@ mod tests {
         assigned.owner_uid = Some(1000);
         assigned.policy_snapshots[0].template = serde_json::from_value(serde_json::json!({
             "language": "cedar", "content": {
-                "schema": {"schemaId": "seccore.system", "revision": 2},
+                "schema": {"schemaId": "seccore.system", "revision": 3},
                 "text": r#"@id("owner-selection")
 @modify("inject_credential")
 @real_token_file("/tmp/asc-discovery-real")

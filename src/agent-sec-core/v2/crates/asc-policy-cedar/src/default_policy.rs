@@ -37,7 +37,7 @@ mod tests {
         // this test together with the embedded policy text it was authored against.
         let source = default_policy_source();
         assert_eq!(source.schema.schema_id.as_str(), "seccore.system");
-        assert_eq!(source.schema.revision.get(), 1);
+        assert_eq!(source.schema.revision.get(), 3);
         assert_eq!(source.text, DEFAULT_POLICY_TEXT);
     }
 }

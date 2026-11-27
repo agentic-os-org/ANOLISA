@@ -438,7 +438,7 @@ impl Fixture {
         PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
             schema: asc_policy_types::cedar::CedarSchemaReference {
                 schema_id: ResourceId::new("seccore.system").unwrap(),
-                revision: Revision::new(2).unwrap(),
+                revision: Revision::new(3).unwrap(),
             },
             text: include_str!("../../asc-gateway-plan/policies/github.cedar")
                 .replace(

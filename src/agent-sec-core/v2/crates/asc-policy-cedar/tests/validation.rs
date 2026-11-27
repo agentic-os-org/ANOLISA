@@ -1,8 +1,5 @@
 use asc_policy_cedar::http::compile as credential_rules;
-use asc_policy_cedar::schema::{
-    HTTP_SCHEMA_REVISION, HTTP_SCHEMA_TEXT, PRINCIPAL_SCHEMA_REVISION, SCHEMA_ID, SCHEMA_REVISION,
-    SCHEMA_TEXT,
-};
+use asc_policy_cedar::schema::{SCHEMA_ID, SCHEMA_REVISION, SCHEMA_TEXT};
 use asc_policy_cedar::{CedarError, PolicyDomain, project_pst, pst, validate};
 use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
 use asc_policy_types::identifiers::{ResourceId, Revision};
@@ -46,34 +43,26 @@ when {
 
 #[test]
 fn retired_agent_type_is_rejected_before_cedar_can_treat_it_as_always_false() {
-    for revision in [
-        SCHEMA_REVISION,
-        HTTP_SCHEMA_REVISION,
-        PRINCIPAL_SCHEMA_REVISION,
+    for condition in [
+        "principal has agent_type",
+        r#"principal has "agent_type" && principal["agent_type"] == "cosh""#,
+        r#"principal.agent_type == "cosh""#,
     ] {
-        for condition in [
-            "principal has agent_type",
-            r#"principal has "agent_type" && principal["agent_type"] == "cosh""#,
-            r#"principal.agent_type == "cosh""#,
-        ] {
-            let mut input = source(&format!(
-                r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource)
+        let input = source(&format!(
+            r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource)
                    when {{ {condition} }};"#
-            ));
-            input.schema.revision = Revision::new(revision).unwrap();
-            assert!(matches!(
-                validate(&input),
-                Err(CedarError::LegacyAgentType { statement_id }) if statement_id == "policy0"
-            ));
-        }
-        let mut supported = source(
-            r#"// Legacy agent_type may be mentioned in a comment.
+        ));
+        assert!(matches!(
+            validate(&input),
+            Err(CedarError::LegacyAgentType { statement_id }) if statement_id == "policy0"
+        ));
+    }
+    let supported = source(
+        r#"// Legacy agent_type may be mentioned in a comment.
             forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource)
             when { principal has agentType && principal.agentType == "agent_type" };"#,
-        );
-        supported.schema.revision = Revision::new(revision).unwrap();
-        assert!(validate(&supported).is_ok());
-    }
+    );
+    assert!(validate(&supported).is_ok());
 }
 
 #[test]
@@ -113,11 +102,7 @@ fn schema_has_no_warnings_and_accepts_action_specific_fields() {
         r#"forbid(principal, action, resource) when { { Var: "principal" }.Var == "principal" };"#,
         r#"permit(principal, action == SecCore::Action::"file.read", resource) when { false };"#,
     ] {
-        for revision in [SCHEMA_REVISION, HTTP_SCHEMA_REVISION] {
-            let mut input = source(text);
-            input.schema.revision = Revision::new(revision).unwrap();
-            validate(&input).unwrap_or_else(|error| panic!("schema {revision}: {text}: {error:?}"));
-        }
+        validate(&source(text)).unwrap_or_else(|error| panic!("{text}: {error:?}"));
     }
 }
 
@@ -139,7 +124,7 @@ fn validate_returns_non_blocking_warnings_with_policy_identity() {
 #[test]
 fn validate_and_pst_enforce_the_same_admission_contract() {
     let mut unknown_schema = source(DELETE_POLICY);
-    unknown_schema.schema.revision = Revision::new(PRINCIPAL_SCHEMA_REVISION + 1).unwrap();
+    unknown_schema.schema.revision = Revision::new(SCHEMA_REVISION + 1).unwrap();
     for input in [
         source(DELETE_POLICY),
         source(""),
@@ -176,7 +161,7 @@ fn unknown_schema_versions_never_fall_back_to_the_builtin() {
         Err(CedarError::UnsupportedSchema { .. })
     ));
     input.schema.schema_id = ResourceId::new(SCHEMA_ID).unwrap();
-    input.schema.revision = Revision::new(PRINCIPAL_SCHEMA_REVISION + 1).unwrap();
+    input.schema.revision = Revision::new(SCHEMA_REVISION + 1).unwrap();
     assert!(matches!(
         validate(&input),
         Err(CedarError::UnsupportedSchema { .. })
@@ -444,7 +429,7 @@ fn http_source(annotations: &str, condition: &str) -> CedarPolicySource {
     let mut input = source(&format!(
         "{annotations}\npermit(principal, action == SecCore::Action::\"network.send\", resource is SecCore::HttpEndpoint)\nwhen {{ {condition} }};"
     ));
-    input.schema.revision = Revision::new(HTTP_SCHEMA_REVISION).unwrap();
+    input.schema.revision = Revision::new(SCHEMA_REVISION).unwrap();
     input
 }
 
@@ -692,7 +677,15 @@ fn credentials_reject_overlapping_rules_principals_and_every_unconsumed_conditio
     for text in variants {
         let mut input = valid.clone();
         input.text = text;
-        assert!(credential_rules(&input).is_err(), "{}", input.text);
+        assert!(
+            pst(&input).map_or(true, |syntax| asc_policy_cedar::http::lower(
+                &syntax,
+                &input.schema
+            )
+            .is_err()),
+            "{}",
+            input.text
+        );
     }
     for extra in [
         "true",
@@ -726,7 +719,14 @@ fn credentials_reject_overlapping_rules_principals_and_every_unconsumed_conditio
             CREDENTIAL_ANNOTATIONS,
             &format!("{HTTP_CONDITION} && {extra}"),
         );
-        assert!(credential_rules(&input).is_err(), "{extra}");
+        assert!(
+            pst(&input).map_or(true, |syntax| asc_policy_cedar::http::lower(
+                &syntax,
+                &input.schema
+            )
+            .is_err()),
+            "{extra}"
+        );
     }
     assert!(
         credential_rules(&http_source(
@@ -801,7 +801,7 @@ fn network_views_include_permissions_and_restrictions_without_credentials() {
            when { resource.host == "api.example.com" };"#,
     ] {
         let mut input = source(text);
-        input.schema.revision = Revision::new(HTTP_SCHEMA_REVISION).unwrap();
+        input.schema.revision = Revision::new(SCHEMA_REVISION).unwrap();
         let syntax = pst(&input).unwrap();
         let view = project_pst(&syntax, PolicyDomain::Network).unwrap();
         assert_eq!(view, syntax);
@@ -826,6 +826,37 @@ fn ambiguous_actions_preserve_restrictions_in_both_domain_views() {
 }
 
 #[test]
+fn manual_file_bindings_keep_subject_specific_http_guards_in_the_scope_network_view() {
+    for endpoint in [
+        "resource is SecCore::HttpEndpoint",
+        r#"resource == SecCore::HttpEndpoint::"remote""#,
+        r#"resource in SecCore::HttpEndpoint::"remote""#,
+        r#"resource is SecCore::HttpEndpoint in SecCore::HttpEndpoint::"remote""#,
+    ] {
+        let guard = format!(
+            r#"forbid(principal, action, {endpoint})
+                when {{ principal has agentType && principal.agentType == "cosh" }};"#
+        );
+        let syntax = pst(&source(&format!("{DELETE_POLICY}\n{guard}"))).unwrap();
+        let (file, network) = asc_policy_cedar::manual_binding_views(&syntax, false);
+        assert_eq!(file.unwrap().policies.len(), 1, "{endpoint}");
+        assert!(network.is_none(), "{endpoint}");
+        let scope_network = project_pst(&syntax, PolicyDomain::Network).unwrap();
+        assert_eq!(scope_network.policies.len(), 1);
+        assert_eq!(
+            asc_policy_cedar::manual_binding_views(&syntax, true).1,
+            Some(scope_network)
+        );
+    }
+    // A bare HTTP restriction is itself manually assigned even without a grant.
+    let bare = "forbid(principal, action, resource is SecCore::HttpEndpoint);";
+    let syntax = pst(&source(&format!("{DELETE_POLICY}\n{bare}"))).unwrap();
+    let (file, network) = asc_policy_cedar::manual_binding_views(&syntax, false);
+    assert_eq!(file.unwrap().policies.len(), 1);
+    assert_eq!(network.unwrap().policies.len(), 1);
+}
+
+#[test]
 fn http_annotations_cannot_escape_through_file_or_request_authorization_views() {
     let input = source(&format!("{CREDENTIAL_ANNOTATIONS}\n{DELETE_POLICY}"));
     assert!(project_pst(&pst(&input).unwrap(), PolicyDomain::Network).is_none());
@@ -835,7 +866,7 @@ fn http_annotations_cannot_escape_through_file_or_request_authorization_views() 
         .text
         .replace("principal,", "principal is SecCore::Subject,");
     validate(&input).unwrap();
-    assert!(asc_policy_cedar::request_authorization_eligible(&input).is_err());
+    assert!(!asc_policy_cedar::request_authorization_eligible(&input).unwrap());
 }
 
 #[test]
@@ -939,9 +970,8 @@ fn shared_source_budget_accepts_boundary_inputs_and_rejects_overflow() {
 when {{ {}.contains(resource.path) }};"#,
         json!(paths),
     );
-    for revision in [SCHEMA_REVISION, HTTP_SCHEMA_REVISION] {
+    {
         let mut input = source(&text);
-        input.schema.revision = Revision::new(revision).unwrap();
         input.text.push_str(&" ".repeat(256 * 1024 - text.len()));
         assert!(validate(&input).is_ok());
         assert!(pst(&input).is_ok());
@@ -964,27 +994,26 @@ when {{ {}.contains(resource.path) }};"#,
 }
 
 #[test]
-fn schema_two_adds_http_without_changing_schema_one_or_existing_advice() {
-    let (_, warnings) = Schema::from_cedarschema_str(HTTP_SCHEMA_TEXT).unwrap();
-    assert_eq!(warnings.count(), 0);
+fn canonical_schema_includes_http_and_rejects_retired_revisions() {
     assert_eq!(
         asc_policy_cedar::schema::embedded_reference()
             .revision
             .get(),
-        1
+        3
     );
     let mut input = http_source(CREDENTIAL_ANNOTATIONS, HTTP_CONDITION);
-    input.schema.revision = Revision::new(1).unwrap();
-    assert!(credential_rules(&input).is_err());
-    let original = source(
-        r#"@id("file") @advice("{\"verdict\":\"escalate\",\"reason\":\"approval_required\"}") permit(principal == SecCore::Subject::"worker", action == SecCore::Action::"process.spawn", resource) when { resource.program == "gh" };"#,
-    );
-    let mut newer = original.clone();
-    newer.schema.revision = Revision::new(2).unwrap();
-    assert_eq!(pst(&original).unwrap(), pst(&newer).unwrap());
-    assert!(credential_rules(&newer).unwrap().is_empty());
+    assert!(credential_rules(&input).is_ok());
+    for revision in [1, 2] {
+        input.schema.revision = Revision::new(revision).unwrap();
+        assert!(matches!(
+            credential_rules(&input),
+            Err(CedarError::UnsupportedSchema { .. })
+        ));
+    }
     let action: EntityUid = r#"SecCore::Action::"network.send""#.parse().unwrap();
-    let schema = asc_policy_cedar::schema::load_schema(&newer.schema).unwrap();
+    let schema =
+        asc_policy_cedar::schema::load_schema(&asc_policy_cedar::schema::embedded_reference())
+            .unwrap();
     let context = Context::from_json_value(
         json!({"input":{"scheme":"https","method":"GET","path":"/a/b"}}),
         Some((&schema, &action)),
@@ -1064,7 +1093,7 @@ fn shared_gateway_path_matrix_agrees_with_sdk_authorization() {
 fn v3_registers_only_credential_annotations_and_preserves_subjects_for_runtime() {
     let fixture = include_str!("../../../fixtures/policy/qoder-v3.cedar");
     let mut input = CedarPolicySource {
-        schema: asc_policy_cedar::schema::principal_reference(),
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: format!(
             "{fixture}\nforbid(principal, action, resource is SecCore::HttpEndpoint) when {{ resource.host == \"api.github.com\" }};"
         ),
@@ -1092,7 +1121,7 @@ fn v3_registers_only_credential_annotations_and_preserves_subjects_for_runtime()
 fn credential_registration_accepts_a_subject_alternative_without_authorizing_its_residual() {
     let fixture = include_str!("../../../fixtures/policy/qoder-v3.cedar");
     let mut source = CedarPolicySource {
-        schema: asc_policy_cedar::schema::principal_reference(),
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: fixture.replace(
             "principal.agentType == \"qoder\" &&",
             "(principal.agentType == \"qoder\" || principal.agentType == \"cosh\") &&",
@@ -1105,4 +1134,34 @@ fn credential_registration_accepts_a_subject_alternative_without_authorizing_its
     assert!(asc_policy_cedar::http::lower(&network, &source.schema).is_err());
     source.text=fixture.replace("resource.host == \"api.github.com\"", "(resource.host == \"api.github.com\" || (principal has agentType && principal.agentType == \"cosh\"))");
     assert!(credential_rules(&source).is_err());
+}
+
+#[test]
+fn migration_preserves_request_effects_and_process_selectors() {
+    use asc_policy_cedar::{
+        deployment::statements, migration::upgrade_text, request_authorization_eligible,
+    };
+
+    let text = r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+        when { resource.path == "/secret" };"#;
+    let mut file = source(text);
+    assert!(!request_authorization_eligible(&file).unwrap());
+    file.text = upgrade_text(&file, 3, true).unwrap().unwrap();
+    assert!(request_authorization_eligible(&file).unwrap());
+    assert!(file.text.contains("principal is SecCore::Subject"));
+    assert!(upgrade_text(&source(text), 2, true).unwrap().is_none());
+    assert!(upgrade_text(&source(text), 3, false).unwrap().is_none());
+
+    let mut old = source(
+        r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+        when { principal has "agent_type" && principal["agent_type"] == "qoder" }
+        when { resource.path == "/agent_type" };"#,
+    );
+    old.text = upgrade_text(&old, 1, true).unwrap().unwrap();
+    assert!(old.text.contains("/agent_type"));
+    let rules = statements(&old).unwrap();
+    let target = rules[0].subject.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(target.agent_type, "qoder");
+    assert_eq!(target.owner_uid, None);
+    assert!(!request_authorization_eligible(&old).unwrap());
 }

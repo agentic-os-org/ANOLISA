@@ -101,16 +101,10 @@ mod tests {
     use asc_policy_types::authoring::PolicySource;
 
     fn source(text: &str) -> PolicySource {
-        schema_source(1, text)
-    }
-
-    fn schema_source(revision: u32, text: &str) -> PolicySource {
-        PolicySource::Cedar(
-            serde_json::from_value(serde_json::json!({
-                "schema":{"schemaId":"seccore.system","revision":revision},"text":text
-            }))
-            .unwrap(),
-        )
+        PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
+            schema: asc_policy_cedar::schema::embedded_reference(),
+            text: text.into(),
+        })
     }
 
     fn fixture() -> (
@@ -193,7 +187,7 @@ mod tests {
         pap.update_policy(
             &added.policy_id,
             "deployment only",
-            &source("forbid(principal, action == SecCore::Action::\"process.spawn\", resource);"),
+            &source("forbid(principal, action == SecCore::Action::\"file.read\", resource);"),
         )
         .unwrap();
         assert_eq!(
@@ -280,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_v2_scope_update_preserves_sandbox_decision_and_receipt() {
+    fn manual_scope_update_preserves_sandbox_decision_and_receipt() {
         use asc_daemon_protocol::authorization::DecisionVerdict;
         use asc_pap::{PapError, ScopeDiscovery, ScopeDiscoverySeed};
         use asc_policy_types::identifiers::ResourceId;
@@ -303,12 +297,9 @@ mod tests {
         let before = authorization.evaluate(&readable_request(), 100).unwrap();
         assert_eq!(before.verdict, DecisionVerdict::Allow);
         let manual = |path| {
-            schema_source(
-                2,
-                &format!(
-                    r#"forbid(principal, action == SecCore::Action::"file.read", resource) when {{resource.path == "{path}"}};"#
-                ),
-            )
+            source(&format!(
+                r#"forbid(principal, action == SecCore::Action::"file.read", resource) when {{resource.path == "{path}"}};"#
+            ))
         };
         let first = pap.create_policy("manual", &manual("/private")).unwrap();
         let scope = pap

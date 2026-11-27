@@ -76,15 +76,15 @@ resource.path == "/a//b"      // 重复分隔符
 resource.path == "/a\\b"    // 反斜杠
 ```
 
-## 能解析但会被拒
+## 常见问题
 
-这些写法语法合法，但会被子集检查或 schema 校验拒绝：
+下面列出本 Skill 的写作约束和入口校验要求。
 
-| 写法 | 拒绝原因 |
+| 写法 | 处理方式 |
 |---|---|
-| `permit(principal == SecCore::Subject::"A", ...)` | 主体由 Scope/Binding 选择，策略不绑定身份 |
-| `when { principal == ... }` | 条件中不允许引用 `principal` |
-| `@id("x")` / `@advice("x")` | 任何注解都不写 |
+| `permit(principal == SecCore::Subject::"A", ...)` | 本 Skill 生成手工文件规则，进程由 Scope 选择 |
+| `when { principal == ... }` | 本 Skill 生成裸 principal 文件规则；自动部署支持明确的 `principal.agentType` 条件 |
+| `@id("x")` / `@advice("x")` | 本 Skill 省略注解 |
 | 模板与 `?principal` | 不支持模板链接 |
 | 空策略集 | 至少要有一条静态策略 |
 | `context.input.nonexistent` | 未在 schema 声明的字段 |
@@ -105,14 +105,14 @@ resource.path == "/a\\b"    // 反斜杠
 
 本 Skill 只交付 Cedar 源码，不负责提交。下游可直接把源码保存为 UTF-8 的 `.cedar` 文件，
 用 `agent-sec-cli policy create --name <名称> --file <文件>.cedar` 导入；schema 引用缺省为
-`seccore.system` revision 1，也可用 `--schema-id`、`--schema-revision` 显式指定。只有使用
+`seccore.system` revision 3，也可用 `--schema-id`、`--schema-revision` 显式指定。只有使用
 `--language json` 或直接调用 RPC 时，才需要把源码放入 JSON 封装的 `content.text`，例如：
 
 ```json
 {
   "language": "cedar",
   "content": {
-    "schema": { "schemaId": "seccore.system", "revision": 1 },
+    "schema": { "schemaId": "seccore.system", "revision": 3 },
     "text": "forbid(principal, action == SecCore::Action::\"network.use\", resource == SecCore::Network::\"all\");"
   }
 }

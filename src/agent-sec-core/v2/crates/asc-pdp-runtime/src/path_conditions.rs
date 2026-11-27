@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use asc_policy_types::cedar::CedarSchemaReference;
 use cedar_policy::{Policy, ResourceConstraint};
 use cedar_policy_core::ast::{BinaryOp, Expr, ExprKind, Literal, PatternElem, Var};
 
@@ -10,7 +9,7 @@ use crate::PdpError;
 
 pub(crate) fn collect_boundaries(
     policy: &Policy,
-    schema: &CedarSchemaReference,
+    projected_write: bool,
     paths: &mut BTreeSet<String>,
 ) -> Result<(), PdpError> {
     if !asc_policy_cedar::deployment::header_may_match(
@@ -32,12 +31,7 @@ pub(crate) fn collect_boundaries(
     }
     let ast: &cedar_policy_core::ast::Policy = policy.as_ref();
     if let Some(condition) = ast.non_scope_constraints() {
-        inspect(
-            policy,
-            condition,
-            paths,
-            asc_policy_cedar::schema::uses_principal_targeting(schema),
-        )?;
+        inspect(policy, condition, paths, projected_write)?;
     }
     Ok(())
 }
@@ -46,7 +40,7 @@ fn inspect(
     policy: &Policy,
     expression: &Expr,
     paths: &mut BTreeSet<String>,
-    ordinary_write: bool,
+    projected_write: bool,
 ) -> Result<(), PdpError> {
     match expression.expr_kind() {
         ExprKind::BinaryApp {
@@ -96,10 +90,10 @@ fn inspect(
                 "resource may only appear in exact or directory-prefix path predicates",
             ));
         }
-        // Schema v3 shares rules with other consumers. Cedar evaluates operation
+        // Sandbox shares file rules with other consumers. Cedar evaluates operation
         // against an ordinary write, while sibling path predicates still partition it.
         ExprKind::GetAttr { expr, attr }
-            if ordinary_write
+            if projected_write
                 && attr == "operation"
                 && matches!(expr.expr_kind(), ExprKind::GetAttr { expr, attr } if attr == "input"
                 && matches!(expr.expr_kind(), ExprKind::Var(Var::Context))) =>
@@ -115,7 +109,7 @@ fn inspect(
         _ => {}
     }
     visit_children(expression, |child| {
-        inspect(policy, child, paths, ordinary_write)
+        inspect(policy, child, paths, projected_write)
     })
 }
 

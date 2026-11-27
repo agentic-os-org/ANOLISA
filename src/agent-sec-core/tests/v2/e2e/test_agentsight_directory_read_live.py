@@ -112,7 +112,7 @@ def _assignment(
             {
                 "language": "cedar",
                 "content": {
-                    "schema": {"schemaId": "seccore.system", "revision": 1},
+                    "schema": {"schemaId": "seccore.system", "revision": 3},
                     "text": cedar,
                 },
             }
@@ -363,22 +363,24 @@ if role == "root":
     Path("/proc/self/comm").write_text(os.environ.get("ASC_TEST_PROCESS_NAME", "cosh-core"))
     spawn("early")
 (work / (role + ".ready")).touch()
+signal = work / ("probe-manual" if role == "manual" else "probe")
 for _ in range(900):
-    if (work / "probe").exists():
+    if signal.exists():
         break
     time.sleep(.1)
 else:
     sys.exit(1)
 if role == "root":
     spawn("late")
+protected, control = ("unrestricted", "secret") if role == "manual" else ("secret", "unrestricted")
 try:
-    (work / "secret").read_bytes()
+    (work / protected).read_bytes()
 except OSError as error:
     result = error.errno
 else:
     result = 0
 (work / (role + ".result")).write_text(str(result))
-(work / (role + ".control")).write_bytes((work / "unrestricted").read_bytes())
+(work / (role + ".control")).write_bytes((work / control).read_bytes())
 for child in children:
     if child.wait(timeout=10):
         sys.exit(1)
@@ -401,14 +403,20 @@ def test_automatic_file_scope_covers_existing_and_future_children(
         'forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File) '
         'when { principal has agentType && principal.agentType == "cosh" '
         f"&& resource.path == {json.dumps(str(secret))} }};\n"
+        'forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File) '
+        f"when {{ resource.path == {json.dumps(str(tmp_path / 'unrestricted'))} }};\n"
         "forbid(principal, action, resource is SecCore::HttpEndpoint) "
         'when { principal has agentType && principal.agentType == "cosh" '
         '&& resource.host == "private.example" };\n'
         'forbid(principal, action, resource in SecCore::HttpEndpoint::"remote") '
         'when { principal has agentType && principal.agentType == "cosh" };'
     )
-    with subprocess.Popen([sys.executable, worker, tmp_path, "root"]) as process:
+    with (
+        subprocess.Popen([sys.executable, worker, tmp_path, "root"]) as process,
+        subprocess.Popen([sys.executable, worker, tmp_path, "manual"]) as manual,
+    ):
         policy = None
+        manual_scope = None
         try:
             _wait_for(lambda: (tmp_path / "early.ready").exists(), bool)
             policy = daemon.request(
@@ -418,8 +426,6 @@ def test_automatic_file_scope_covers_existing_and_future_children(
                 "automatic-file",
                 "--language",
                 "cedar",
-                "--schema-revision",
-                "3",
                 "--file",
                 str(source),
             )
@@ -435,25 +441,57 @@ def test_automatic_file_scope_covers_existing_and_future_children(
             ], listing
             (receipt,) = _sight("bindings")["bindings"]
             assert receipt["state"] == "enforced", receipt
+            assert receipt["request"]["root_pid"] == process.pid
             (tmp_path / "probe").touch()
             assert process.wait(timeout=15) == 0
+            # ActPlane accepts one active Binding per enforcer. Wait for actual detach.
+            _wait_for(lambda: _sight("bindings")["bindings"], lambda items: not items)
+            _wait_for(
+                lambda: daemon.request("binding", "list")["items"],
+                lambda items: not items,
+            )
+            manual_scope = daemon.request(
+                "scope",
+                "create",
+                "--pid",
+                str(manual.pid),
+                "--policy-id",
+                policy["policyId"],
+                "--policy-revision",
+                str(policy["revision"]),
+            )
+            bindings = _wait_for(
+                lambda: daemon.request("binding", "list")["items"],
+                lambda items: len(items) == 1
+                and items[0]["status"]["phase"] in {"READY", "APPLY_FAILED"},
+            )
+            assert bindings[0]["status"]["phase"] == "READY", bindings
+            (manual_receipt,) = _sight("bindings")["bindings"]
+            assert manual_receipt["state"] == "enforced", manual_receipt
+            assert manual_receipt["request"]["root_pid"] == manual.pid
+            (tmp_path / "probe-manual").touch()
+            assert manual.wait(timeout=15) == 0
             reads = {
                 role: {
                     "protected_errno": int((tmp_path / f"{role}.result").read_text()),
-                    "unrestricted": (tmp_path / f"{role}.control").read_text(),
+                    "control": (tmp_path / f"{role}.control").read_text(),
                 }
-                for role in ("root", "early", "late")
+                for role in ("root", "early", "late", "manual")
             }
             print(f"ActPlane {receipt['state']}, process reads: {json.dumps(reads)}")
-            for result in reads.values():
+            for role, result in reads.items():
                 assert result == {
                     "protected_errno": errno.EPERM,
-                    "unrestricted": "ordinary",
+                    "control": "test" if role == "manual" else "ordinary",
                 }
             assert secret.read_bytes() == b"test"
         finally:
             (tmp_path / "probe").touch()
+            (tmp_path / "probe-manual").touch()
             process.wait(timeout=15)
+            manual.wait(timeout=15)
+            if manual_scope is not None:
+                daemon.request("scope", "delete", "--scope-id", manual_scope["scopeId"])
             if policy is not None:
                 daemon.request(
                     "policy",

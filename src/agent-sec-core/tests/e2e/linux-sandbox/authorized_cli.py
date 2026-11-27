@@ -95,7 +95,7 @@ def policy_source(requirement: str, excluded: Path | None = None) -> dict:
     return {
         "language": "cedar",
         "content": {
-            "schema": {"schemaId": "seccore.system", "revision": 1},
+            "schema": {"schemaId": "seccore.system", "revision": 3},
             "text": text,
         },
     }
@@ -308,7 +308,10 @@ def exercise(daemon: Path, example: Path, helper: Path, root: Path) -> None:
                 "policy.templates.get",
                 {"id": policy_id, "revision": current["revision"]},
             )
-            assert persisted.get("result") == current, persisted
+            assert "result" in persisted, persisted
+            saved_policy = persisted["result"].copy()
+            saved_policy.pop("automaticDiagnostics", None)
+            assert saved_policy == current, persisted
 
             def publish(requirement: str, excluded: Path | None = None) -> dict:
                 nonlocal current

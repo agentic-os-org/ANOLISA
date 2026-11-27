@@ -179,7 +179,7 @@ type Slot = Mutex<Option<Arc<ConsumerPolicySet>>>;
 
 #[derive(Default)]
 pub(super) struct SelectionCache {
-    // The two reads have different admission limits. They can share the parsed v3 policies.
+    // The two reads have different admission limits. They can share the parsed Cedar policies.
     sources: Mutex<[Option<Arc<Sources>>; 2]>,
     sandbox: Slot,
     deployment_slots: Mutex<BTreeMap<DeploymentBackend, Arc<Slot>>>,

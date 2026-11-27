@@ -584,35 +584,52 @@ when {
 ```bash
 agent-sec-cli --socket "$SOCKET" policy create --name "Cedar protection" --file cedar-policy.cedar
 agent-sec-cli --socket "$SOCKET" policy get --policy-id "$POLICY_ID" --revision 1
-agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --schema-revision 1 --file cedar-policy-v2.cedar
+agent-sec-cli --socket "$SOCKET" policy update --policy-id "$POLICY_ID" --name "Cedar protection v2" --file cedar-policy-v2.cedar
 ```
 
-The file must be UTF-8 and is stored verbatim. `--schema-id` defaults to
-`seccore.system` and `--schema-revision` to the revision of the schema embedded
-in the CLI (1); both apply only to `--language cedar`. The resolved reference is
-saved with the Policy and selects its schema revision. `agent-sec-cli policy default` prints the built-in baseline as a
-Cedar file that these commands accept; `policy default --json` prints it as a
-JSON source envelope instead.
+Save UTF-8 Cedar files using the default schema, `seccore.system` revision 3.
+An explicit `--schema-revision 3` selects the same schema. The revision in
+`policy get --revision` identifies a saved edit of the Policy. Use
+`policy default` to print the default Cedar source or `policy default --json` for its envelope.
 
-Use `--schema-revision 3` to target an agent family in Cedar, for example
-`principal has agentType && principal.agentType == "qoder"`.
-Use `context.agent.agentType` in Sandbox or Hook requests.
-An optional `ownerUid` can narrow a process assignment. A Sandbox request supplies
-the available agent category and omits the process owner. Manual `scope create` accepts
-revisions 1 and 2. If you upgrade a Policy to revision 3, existing manual assignments
-retain their pinned snapshots.
+PAP evaluates placement separately for each statement.
 
-**Before upgrading**, use the old daemon to review current Policies and pinned
-Scope and Binding snapshots. Export affected Policies and replace the Cedar
-attribute `agent_type` with `agentType`, including in `has` conditions. In a
-maintenance window, withdraw the affected old assignments and records while
-the old daemon can still read them. Import the rewritten Policies with the
-upgraded daemon, recreate any required manual Scopes and update request
-clients before resuming affected workloads. The upgraded daemon rejects
-`agent_type` on import. If stored copies still use it, startup stops and
-reports the Policy IDs and revisions that require migration.
+| Statement | Where it applies |
+|---|---|
+| File restriction with a bare `principal` and no subject predicate | Use `scope create` to pin it to the selected process. |
+| Supported file rule with `principal has agentType && principal.agentType == "qoder"` | ActPlane automatically targets matching Qoder processes. An exact `ownerUid` narrows the target. Sandbox evaluates the original predicate on requests. |
+| HTTP credential grant | Automatic Gateway placement requires an exact agent type and non-root owner UID on that grant. A bare grant requires a manual Scope and non-root owner UID. |
+| `process.spawn` or whole-network `network.use` | Sandbox evaluates the rule at request time. |
 
-PAP accepts up to 4096 current v3 policies and 16 MiB of serialized v3 snapshots. A write that exceeds either limit reports an error. If an existing database is over the limit, delete or shrink v3 policies to resume automatic deployment.
+If a bare-principal statement can match both a file action and either `process.spawn` or `network.use`,
+qualify its principal or split it into statements with explicit actions. PAP checks
+this on every Policy create or update, including single-statement Policies.
+
+A mixed Policy can produce automatic Scopes and a separate manually pinned assignment.
+An HTTP restriction scoped to `SecCore::HttpEndpoint` stays in the Gateway view even
+when its action is unconstrained. A manual file Binding can apply its file rules
+independently of a subject-specific HTTP restriction. Gateway checks the full network
+view when a Scope grants a credential. Each ActPlane enforcer supports one active
+Binding at a time across manual and automatic assignments.
+
+For a generic file rule that should apply to every Sandbox request, write
+`principal is SecCore::Subject`. Sandbox requests carry the available agent type in
+`context.agent.agentType` and omit the process owner UID.
+
+**Upgrade and rollback.** Back up the Policy database with the old daemon stopped.
+Startup migrates current Policies and embedded Scope and Binding snapshots in one
+transaction. It preserves pinned content revisions and process ownership. A rewritten
+current Policy gets a new content revision. Migration retains the original source,
+converts direct uses of `principal.agent_type` to `principal.agentType`, and makes
+previously global Sandbox file rules explicit. Previously manual rules that name an
+agent can also reach matching processes through ActPlane. Review wildcard rules
+against the current schema, which includes HTTP actions absent from revision 1. Check the Scope, Binding
+and enforcement receipt before retiring an existing manual assignment. Restore the
+pre-upgrade database when rolling back the binary.
+
+Automatic planning reads up to 4096 current Cedar Policies and 16 MiB of serialized
+Cedar snapshots. If upgraded data exceeds either limit, delete or shrink policies
+to resume automatic deployment.
 
 The daemon's built-in `cosh` mapping matches the process name `cosh-core`.
 To deploy to Qoder, configure its installed entry point in the root-owned
@@ -637,7 +654,7 @@ requests remain available.
 When `policy get` has automatic assignment results, it returns `automaticDiagnostics`
 with the source revision, status, reason and available `scopeId`. Use the Scope ID
 to find the Bindings and inspect installation results for individual processes.
-File rules with no exact `agentType` report an unassigned ActPlane result.
+A subject condition that process discovery cannot verify reports the affected statement and backend.
 After a credential Policy update, use `gateway status` to confirm the serving
 revision. If candidate admission fails, the old revision can still serve.
 To withdraw a grant independently of a failed update, delete its source Policy
@@ -650,7 +667,7 @@ A JSON source envelope names the schema inside the file and is imported with
 {
   "language": "cedar",
   "content": {
-    "schema": {"schemaId": "seccore.system", "revision": 1},
+    "schema": {"schemaId": "seccore.system", "revision": 3},
     "text": "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { context.input.operation == SecCore::WriteOperation::\"delete\" && resource.path == \"/workspace/important\" };"
   }
 }
@@ -669,7 +686,7 @@ Policies describe file and network requirements through `file.*` and `network.*`
 actions. Network actions cover whole-network permissions and HTTP requests;
 credential injection is one network capability. Mixed deployment currently supports
 independent file-protection `forbid` rules and HTTP credential-injection `permit`
-rules. Use schema revision 2 for a manual assignment or revision 3 for principal-based targeting. Credential administration requires root. Before downgrading to a version without mixed-policy support, delete
+rules. Credential administration requires root. Before downgrading to a version without mixed-policy support, delete
 mixed Scopes, confirm cleanup and remove their mixed Policy records before restoring
 older policies and assignments.
 
@@ -691,11 +708,10 @@ Sandbox runtime authorization uses the same Cedar Policy objects. The OS authori
 Agent subjects, `process.spawn` and supported permit advice. Authorization is enabled
 by default, without a separate permission-ceiling configuration. Decisions must be
 accepted within 60 seconds; accepted approval waits and execution may finish later.
-For v3, the PDP loads the Cedar statements or fragments selected for Sandbox.
+The PDP loads the Cedar statements or fragments selected for Sandbox.
 It reuses them while the PAP policy-set generation is unchanged and evaluates
 each request with its own attributes. Use `principal is SecCore::Subject` with
-the optional `agentType` attribute to match requests. For v1/v2, the existing
-principal-header rules determine which policies are eligible.
+the optional `agentType` attribute to match requests.
 
 Updates and deletions take effect on subsequent requests. An empty set denies
 authorization. Read or validation failures stop new authorizations. Existing

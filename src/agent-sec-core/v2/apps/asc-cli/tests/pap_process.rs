@@ -297,7 +297,7 @@ async fn cedar_cli_create_update_query_and_rejection_use_the_existing_pap_entryp
     let (shutdown, task, _) = start(&socket, PrincipalRole::PolicyAdministrator).await;
     let mut source = json!({
         "language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system","revision":1},
+            "schema":{"schemaId":"seccore.system","revision":3},
             "text":"// Original text.\nforbid(principal, action == SecCore::Action::\"file.write\", resource);"
         }
     });

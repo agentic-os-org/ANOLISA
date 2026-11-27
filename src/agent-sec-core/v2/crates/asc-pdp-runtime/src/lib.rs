@@ -60,9 +60,8 @@ impl PdpRuntime {
                 "policy set version is required".into(),
             ));
         }
-        let schema = asc_policy_cedar::schema::load_schema(
-            &asc_policy_cedar::schema::principal_reference(),
-        )?;
+        let schema =
+            asc_policy_cedar::schema::load_schema(&asc_policy_cedar::schema::embedded_reference())?;
         Ok(Self {
             version,
             schema,
@@ -90,17 +89,16 @@ impl PdpRuntime {
     }
 }
 
-/// Checks launch coverage for a task draft authored against the embedded v1 schema.
+/// Checks launch coverage for a task draft authored against the embedded schema.
 /// A runtime file operation in such a draft cannot be guaranteed at sandbox launch.
 ///
 /// # Errors
 /// Returns the same unsupported predicate or resource error as snapshot admission.
 pub fn validate_os_policy_regions(policies: &cedar_policy::PolicySet) -> Result<(), PdpError> {
-    let schema = asc_policy_cedar::schema::embedded_reference();
     let mut paths = std::collections::BTreeSet::new();
     policies
         .policies()
-        .try_for_each(|policy| path_conditions::collect_boundaries(policy, &schema, &mut paths))
+        .try_for_each(|policy| path_conditions::collect_boundaries(policy, false, &mut paths))
 }
 
 /// Failures admitting a snapshot or preparing an authorization result.

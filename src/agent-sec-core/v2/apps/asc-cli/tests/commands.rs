@@ -257,8 +257,8 @@ fn file_errors_duplicate_keys_and_oversized_inputs_are_local_failures() {
         br#"{"specVersion":"0.1","specVersion":"0.1","rules":[]}"#,
         br#"{"specVersion":"0.1","rules":[{"effect":"block","category":"file","action":"write","target":{"type":"file","path":"/one","path":"/two"}}]}"#,
         br#"{"specVersion":"0.1","rules":[],"extra":true}"#,
-        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"first","text":"second"}}"#,
-        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1,"revision":2},"text":"first"}}"#,
+        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":3},"text":"first","text":"second"}}"#,
+        br#"{"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":3,"revision":2},"text":"first"}}"#,
     ] {
         std::fs::write(&path, bytes).unwrap();
         for operation in ["create", "update"] {
@@ -943,56 +943,52 @@ fn policy_commands_accept_raw_and_tagged_cedar_sources() {
     let directory = common::Directory::new();
     let file = directory.0.join("cedar-policy.json");
     let raw = directory.0.join("policy.cedar");
-    for (schema_id, revision) in [
-        ("seccore.system", 1),
-        ("seccore.system", 2),
-        ("custom.schema", 2),
-    ] {
-        let source = json!({"language":"cedar", "content":{
-            "schema":{"schemaId":schema_id, "revision":revision},
-            "text":"// Preserve this comment.\r\npermit(principal, action, resource);\n"
-        }});
-        std::fs::write(&file, serde_json::to_vec(&source).unwrap()).unwrap();
-        std::fs::write(&raw, source["content"]["text"].as_str().unwrap()).unwrap();
-        let revision = revision.to_string();
-        for operation in ["create", "update"] {
-            let request = policy_file_cli(operation, &file, &["--language", "json"])
-                .request()
-                .unwrap();
-            let mut params = json!({"policyName":"sandbox", "template":source});
-            if operation == "update" {
-                params["policyId"] = json!("sandbox-baseline");
-            }
-            assert_eq!(request.params, params);
-            assert_eq!(request.method, format!("policy.templates.{operation}"));
-            let raw_request = policy_file_cli(
-                operation,
-                &raw,
-                &[
-                    "--language",
-                    "cedar",
-                    "--schema-id",
-                    schema_id,
-                    "--schema-revision",
-                    &revision,
-                ],
-            )
+    let schema_id = "seccore.system";
+    let revision = 3;
+    let source = json!({"language":"cedar", "content":{
+        "schema":{"schemaId":schema_id, "revision":revision},
+        "text":"// Preserve this comment.\r\npermit(principal, action, resource);\n"
+    }});
+    std::fs::write(&file, serde_json::to_vec(&source).unwrap()).unwrap();
+    std::fs::write(&raw, source["content"]["text"].as_str().unwrap()).unwrap();
+    let revision = revision.to_string();
+    for operation in ["create", "update"] {
+        let request = policy_file_cli(operation, &file, &["--language", "json"])
             .request()
             .unwrap();
-            assert_eq!(
-                raw_request, request,
-                "{operation} raw/envelope equivalent wire"
-            );
+        let mut params = json!({"policyName":"sandbox", "template":source});
+        if operation == "update" {
+            params["policyId"] = json!("sandbox-baseline");
         }
-        let mut with_trailing_data = serde_json::to_vec(&source).unwrap();
-        with_trailing_data.extend_from_slice(b" {}");
-        std::fs::write(&file, with_trailing_data).unwrap();
-        for operation in ["create", "update"] {
-            assert!(matches!(
-                policy_file_cli(operation, &file, &["--language", "json"]).request(),
-                Err(InputError::Json(_))
-            ));
-        }
+        assert_eq!(request.params, params);
+        assert_eq!(request.method, format!("policy.templates.{operation}"));
+        let raw_request = policy_file_cli(
+            operation,
+            &raw,
+            &[
+                "--language",
+                "cedar",
+                "--schema-id",
+                schema_id,
+                "--schema-revision",
+                &revision,
+            ],
+        )
+        .request()
+        .unwrap();
+        assert_eq!(
+            raw_request, request,
+            "{operation} raw/envelope equivalent wire"
+        );
+    }
+    let mut with_trailing_data = serde_json::to_vec(&source).unwrap();
+    with_trailing_data.extend_from_slice(b" {}");
+    std::fs::write(&file, with_trailing_data).unwrap();
+    for operation in ["create", "update"] {
+        assert!(matches!(
+            policy_file_cli(operation, &file, &["--language", "json"]).request(),
+            Err(InputError::Json(_))
+        ));
     }
 }
 
@@ -1002,40 +998,14 @@ fn raw_cedar_create_and_update_preserve_text_and_schema_selection() {
     let file = directory.0.join("policy=a b.cedar");
     let text = "  // Preserve café and line endings.\r\npermit(principal, action, resource);\r\n\t";
     std::fs::write(&file, text).unwrap();
-    let cases: &[(&[&str], &str, u32)] = &[
-        (&["--language", "cedar"], "seccore.system", 1),
-        (&["--schema-revision", "3"], "seccore.system", 3),
-        (
-            &["--language", "cedar", "--schema-revision", "2"],
-            "seccore.system",
-            2,
-        ),
-        (
-            &["--language", "cedar", "--schema-id", "custom.schema"],
-            "custom.schema",
-            1,
-        ),
-        (
-            &[
-                "--language",
-                "cedar",
-                "--schema-id",
-                "custom.schema",
-                "--schema-revision",
-                "2",
-            ],
-            "custom.schema",
-            2,
-        ),
-    ];
-    for (options, schema_id, revision) in cases {
+    for options in [&["--language", "cedar"], &["--schema-revision", "3"]] {
         for operation in ["create", "update"] {
             let request = policy_file_cli(operation, &file, options)
                 .request()
                 .unwrap();
             let mut params = json!({"policyName":"sandbox", "template":{
                 "language":"cedar", "content":{
-                    "schema":{"schemaId":schema_id, "revision":revision}, "text":text
+                    "schema":{"schemaId":"seccore.system", "revision":3}, "text":text
                 }
             }});
             if operation == "update" {
@@ -1043,6 +1013,38 @@ fn raw_cedar_create_and_update_preserve_text_and_schema_selection() {
             }
             assert_eq!(request.params, params, "{operation} {options:?}");
             assert_eq!(request.method, format!("policy.templates.{operation}"));
+        }
+    }
+}
+
+#[test]
+fn unsupported_schema_is_rejected_before_building_a_raw_or_json_request() {
+    let directory = common::Directory::new();
+    let raw = directory.0.join("policy.cedar");
+    let envelope = directory.0.join("policy.json");
+    let text = "forbid(principal, action, resource);";
+    std::fs::write(&raw, text).unwrap();
+    for (schema_id, revision) in [
+        ("seccore.system", 1),
+        ("seccore.system", 2),
+        ("seccore.system", 4),
+        ("other.system", 3),
+    ] {
+        let source = json!({"language":"cedar", "content":{
+            "schema":{"schemaId":schema_id, "revision":revision}, "text":text
+        }});
+        std::fs::write(&envelope, serde_json::to_vec(&source).unwrap()).unwrap();
+        let revision = revision.to_string();
+        for operation in ["create", "update"] {
+            let raw_request = policy_file_cli(
+                operation,
+                &raw,
+                &["--schema-id", schema_id, "--schema-revision", &revision],
+            );
+            let json_request = policy_file_cli(operation, &envelope, &["--language", "json"]);
+            for cli in [raw_request, json_request] {
+                assert!(matches!(cli.request(), Err(InputError::CedarSchema(_))));
+            }
         }
     }
 }
@@ -1090,7 +1092,7 @@ fn json_policy_files_reject_raw_schema_options() {
     for source in [
         json!({"specVersion":"0.1", "rules":[]}),
         json!({"language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system", "revision":1},
+            "schema":{"schemaId":"seccore.system", "revision":3},
             "text":"permit(principal, action, resource);"
         }}),
     ] {

@@ -33,6 +33,14 @@ fn uses_principal(expr: &Expr) -> bool {
     )
 }
 
+pub(crate) fn bare_principal(policy: &StaticPolicy) -> bool {
+    let body = policy.body();
+    matches!(body.principal, PrincipalConstraint::Any)
+        && body.clauses().iter().all(|clause| match clause {
+            Clause::When(expr) | Clause::Unless(expr) => !uses_principal(expr),
+        })
+}
+
 impl Predicates {
     fn take(&mut self, expr: &Arc<Expr>) -> Result<Option<Arc<Expr>>, &'static str> {
         match expr.as_ref() {
@@ -146,8 +154,10 @@ pub fn split_subject(
             Clause::Unless(_) => clauses.push(clause.clone()),
         }
     }
-    if (predicates.has_uid && predicates.uid.is_none())
-        || (predicates.agent.is_none() && (predicates.has_agent || predicates.uid.is_some()))
+    // Every Linux process has an owner. With a verified agent target a presence
+    // guard alone is true for process deployment; Sandbox omits ownerUid.
+    if predicates.agent.is_none()
+        && (predicates.has_agent || predicates.has_uid || predicates.uid.is_some())
     {
         return Err(reject(
             "deployment requires an exact agentType and a value for each guarded attribute",
@@ -257,6 +267,36 @@ pub struct StatementTarget {
 }
 
 impl StatementTarget {
+    pub(crate) fn from_policy(policy: &cedar_policy::Policy) -> Result<Self, CedarError> {
+        let id = policy.id().to_string();
+        let cedar_policy::pst::Policy::Static(statement) = policy
+            .to_pst()
+            .map_err(|e| CedarError::Representation(Box::new(e.into())))?
+        else {
+            return Err(CedarError::Unsupported {
+                policy_id: id,
+                reason: "deployment requires a static policy",
+            });
+        };
+        let credential_rule = policy
+            .annotations()
+            .any(|(name, _)| crate::http::is_annotation(name))
+            .then(|| {
+                policy
+                    .annotation("id")
+                    .map_or_else(|| id.clone(), str::to_owned)
+            });
+        Ok(StatementTarget {
+            id,
+            subject: split_subject(&statement).map(|(subject, _)| subject),
+            original: policy.clone(),
+            syntax: statement,
+            action: policy.action_constraint(),
+            resource: policy.resource_constraint(),
+            credential_rule,
+        })
+    }
+
     /// Original validated statement, including conditions and annotations.
     #[must_use]
     pub fn policy(&self) -> &cedar_policy::Policy {
@@ -275,6 +315,37 @@ impl StatementTarget {
     #[must_use]
     pub fn cedar(&self) -> String {
         self.original.to_string()
+    }
+
+    /// A bare process assignment has neither a subject header nor a subject predicate.
+    #[must_use]
+    pub fn bare_principal(&self) -> bool {
+        bare_principal(&self.syntax)
+    }
+
+    /// Whether manual assignment can supply the entire process target.
+    #[must_use]
+    pub fn manual_assignment(&self) -> bool {
+        self.bare_principal()
+            && (self.may_match(&["file.read", "file.write", "file.exec"], "SecCore::File")
+                || self.may_match(&["network.send"], "SecCore::HttpEndpoint"))
+    }
+
+    /// Whether this statement can participate in a Sandbox OS request.
+    #[must_use]
+    pub fn request_eligible(&self) -> bool {
+        // Sandbox requests never carry an owner UID. A leading presence test
+        // short-circuits all later guards, including path expressions that the
+        // launch-time compiler cannot represent.
+        if let Some(Clause::When(expr)) = self.syntax.body().clauses().first()
+            && matches!(expr.as_ref(), Expr::HasAttr { expr, attrs } if matches!(expr.as_ref(), Expr::Var(Var::Principal)) && attrs.len() == 1 && attrs.head == "ownerUid")
+        {
+            return false;
+        }
+        let file = self.may_match(&["file.read", "file.write", "file.exec"], "SecCore::File");
+        let other = self.may_match(&["process.spawn"], "SecCore::Process")
+            || self.may_match(&["network.use"], "SecCore::Network");
+        (file || other) && !(file && self.bare_principal())
     }
 
     /// Whether the header can match a request in the consumer's action and resource domain.
@@ -327,12 +398,18 @@ pub enum Placement<'a> {
     Unassigned(String),
 }
 
+/// Optional backend compiler for a complete process deployment view.
+pub type ValidateDeployment =
+    fn(&PolicySet) -> Result<(), asc_policy_types::target::TranslationRejection>;
+
 /// Registered by the daemon; PAP groups the results without interpreting backend policy.
 #[derive(Clone, Copy)]
 pub struct DeploymentSelector {
     pub backend: DeploymentBackend,
     pub select: crate::selection::Select,
     pub place: for<'a> fn(&'a StatementTarget) -> Placement<'a>,
+    /// Optional static compiler check on a complete projected policy before Scope publication.
+    pub validate: Option<ValidateDeployment>,
 }
 
 /// Read source identities, subject predicates, and action/resource headers once per Policy.
@@ -348,35 +425,7 @@ pub(crate) fn statements_from_policies(
 ) -> Result<Vec<StatementTarget>, CedarError> {
     policies
         .policies()
-        .map(|policy| {
-            let id = policy.id().to_string();
-            let cedar_policy::pst::Policy::Static(statement) = policy
-                .to_pst()
-                .map_err(|e| CedarError::Representation(Box::new(e.into())))?
-            else {
-                return Err(CedarError::Unsupported {
-                    policy_id: id,
-                    reason: "deployment requires a static policy",
-                });
-            };
-            let credential_rule = policy
-                .annotations()
-                .any(|(name, _)| crate::http::is_annotation(name))
-                .then(|| {
-                    policy
-                        .annotation("id")
-                        .map_or_else(|| id.clone(), str::to_owned)
-                });
-            Ok(StatementTarget {
-                id,
-                subject: split_subject(&statement).map(|(subject, _)| subject),
-                original: policy.clone(),
-                syntax: statement,
-                action: policy.action_constraint(),
-                resource: policy.resource_constraint(),
-                credential_rule,
-            })
-        })
+        .map(StatementTarget::from_policy)
         .collect()
 }
 
@@ -391,16 +440,10 @@ mod tests {
 
     #[test]
     fn embedded_resource_types_and_actions_have_no_cross_type_hierarchy() {
-        for revision in [1, 2, 3] {
-            let reference = CedarSchemaReference {
-                schema_id: ResourceId::new(crate::schema::SCHEMA_ID).unwrap(),
-                revision: Revision::new(revision).unwrap(),
-            };
-            let schema = crate::schema::load_schema(&reference).unwrap();
-            assert_eq!(schema.action_groups().count(), 0);
-            for ty in schema.entity_types() {
-                assert!(schema.ancestors(ty).unwrap().all(|ancestor| ancestor == ty));
-            }
+        let schema = crate::schema::load_schema(&crate::schema::embedded_reference()).unwrap();
+        assert_eq!(schema.action_groups().count(), 0);
+        for ty in schema.entity_types() {
+            assert!(schema.ancestors(ty).unwrap().all(|ancestor| ancestor == ty));
         }
     }
 

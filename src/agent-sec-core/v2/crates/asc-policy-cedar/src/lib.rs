@@ -10,6 +10,7 @@ pub mod default_policy;
 pub mod deployment;
 pub mod file_protection;
 pub mod http;
+pub mod migration;
 mod rewrite;
 pub mod schema;
 pub mod selection;
@@ -17,7 +18,7 @@ mod validation;
 
 pub use rewrite::rewrite_token_files;
 
-use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
+use asc_policy_types::cedar::CedarPolicySource;
 use cedar_policy::ValidationWarning;
 
 /// Validates source for policy creation and returns non-blocking SDK warnings.
@@ -33,31 +34,22 @@ pub fn validate(source: &CedarPolicySource) -> Result<Vec<ValidationWarning>, Ce
     Ok(warnings)
 }
 
-/// Selects full-source v3 policies and eligible legacy policies for request authorization.
+/// Selects policies with eligible statements for request authorization.
 ///
 /// # Errors
 /// Rejects invalid source and incompatible headers or credential annotations.
 pub fn request_authorization_eligible(source: &CedarPolicySource) -> Result<bool, CedarError> {
     let (policies, _) = validation::parse_and_validate(source)?;
-    request_policy_headers_for_schema(&policies, &source.schema)
+    sandbox_policy_headers(&deployment::statements_from_policies(&policies)?)
 }
 
 /// Checks a parsed policy set against the request-selection contract for its schema.
 ///
 /// # Errors
 /// Rejects incompatible headers or a credential operation that could grant OS permissions.
-pub fn request_policy_headers_for_schema(
-    policies: &cedar_policy::PolicySet,
-    schema: &CedarSchemaReference,
-) -> Result<bool, CedarError> {
-    if !schema::uses_principal_targeting(schema) {
-        return request_policy_headers(policies);
-    }
-    for policy in policies.policies().filter(|policy| {
-        policy
-            .annotations()
-            .any(|(name, _)| http::is_annotation(name))
-    }) {
+fn sandbox_policy_headers(rules: &[deployment::StatementTarget]) -> Result<bool, CedarError> {
+    for rule in rules.iter().filter(|rule| rule.credential_rule.is_some()) {
+        let policy = rule.policy();
         let http_action = matches!(policy.action_constraint(), cedar_policy::ActionConstraint::Eq(action)
             if action.type_name().to_string() == "SecCore::Action" && action.id().unescaped() == "network.send");
         let endpoint = matches!(policy.resource_constraint(), cedar_policy::ResourceConstraint::Is(ty)
@@ -69,10 +61,23 @@ pub fn request_policy_headers_for_schema(
             });
         }
     }
-    Ok(true)
+    if let Some(rule) = rules.iter().find(|rule| {
+        rule.bare_principal()
+            && rule.may_match(&["file.read", "file.write", "file.exec"], "SecCore::File")
+            && (rule.may_match(&["process.spawn"], "SecCore::Process")
+                || rule.may_match(&["network.use"], "SecCore::Network"))
+    }) {
+        return Err(CedarError::Unsupported {
+            policy_id: rule.id.clone(),
+            reason: "qualify the principal or split the bare cross-domain statement by action",
+        });
+    }
+    Ok(rules
+        .iter()
+        .any(deployment::StatementTarget::request_eligible))
 }
 
-/// Checks request-authorization eligibility for a parsed policy set using the PAP header rules.
+/// Checks request-authorization eligibility for a parsed policy set for an Intent task draft.
 ///
 /// # Errors
 /// Rejects mixed principal headers or HTTP execution annotations on request policies.
@@ -133,11 +138,32 @@ pub enum PolicyDomain {
     Network,
 }
 
+// SecCore's resource entities have no parents. Membership in a concrete
+// entity therefore constrains the resource type just like equality does.
+fn resource_type(
+    resource: &cedar_policy::pst::ResourceConstraint,
+) -> Option<&cedar_policy::pst::EntityType> {
+    use cedar_policy::pst::{EntityOrSlot, ResourceConstraint};
+    match resource {
+        ResourceConstraint::Is(ty) | ResourceConstraint::IsIn(ty, _) => Some(ty),
+        ResourceConstraint::Eq(EntityOrSlot::Entity(id))
+        | ResourceConstraint::In(EntityOrSlot::Entity(id)) => Some(&id.ty),
+        _ => None,
+    }
+}
+
+fn resource_domain(resource: &cedar_policy::pst::ResourceConstraint) -> Option<PolicyDomain> {
+    match resource_type(resource)?.to_string().as_str() {
+        "SecCore::File" => Some(PolicyDomain::File),
+        "SecCore::Network" | "SecCore::HttpEndpoint" => Some(PolicyDomain::Network),
+        _ => None,
+    }
+}
+
 /// Projects a domain view while preserving statement identities, effects and conditions.
 ///
-/// Only statements provably confined to the other domain are excluded. Unconstrained,
-/// cross-domain and unclassified actions remain in both views for explicit consumer
-/// validation; projection never silently drops a restriction. Empty views return `None`.
+/// A resource or action header can confine a statement to one domain. Ambiguous
+/// statements remain in both views for consumer validation. Empty views return `None`.
 ///
 /// Borrows validated output from [`pst`], without parsing or validating source again.
 /// Only selected statements are cloned; the input remains available to other consumers.
@@ -159,6 +185,9 @@ pub fn project_pst(
         policies: syntax
             .policies
             .iter()
+            .filter(|(_, policy)| {
+                resource_domain(&policy.body().resource).is_none_or(|r| r == domain)
+            })
             .filter(|(_, policy)| !match &policy.body().action {
                 ActionConstraint::Eq(id) => other_domain(id),
                 ActionConstraint::In(ids) => !ids.is_empty() && ids.iter().all(other_domain),
@@ -172,6 +201,44 @@ pub fn project_pst(
     (!projected.policies.is_empty()).then_some(projected)
 }
 
+/// Select target plans for one manually assigned Policy in a process Binding.
+/// The full Scope network view retains subject-specific restrictions for Gateway
+/// admission, including when a sibling Policy supplies the credential grant.
+pub fn manual_binding_views(
+    syntax: &cedar_policy::pst::PolicySet,
+    has_credential_grant: bool,
+) -> (
+    Option<cedar_policy::pst::PolicySet>,
+    Option<cedar_policy::pst::PolicySet>,
+) {
+    let files = project_pst(syntax, PolicyDomain::File);
+    let network = project_pst(syntax, PolicyDomain::Network).filter(|network| {
+        // A file Binding does not deploy auxiliary Scope restrictions on its own.
+        has_credential_grant || files.is_none() || !network.policies.values().all(scope_http_guard)
+    });
+    (files, network)
+}
+
+fn scope_http_guard(policy: &cedar_policy::pst::StaticPolicy) -> bool {
+    use cedar_policy::pst::ActionConstraint;
+    let body = policy.body();
+    let send = |id: &cedar_policy::pst::EntityUID| {
+        id.ty.to_string() == "SecCore::Action" && id.eid == "network.send"
+    };
+    !deployment::bare_principal(policy)
+        && !body
+            .annotations
+            .keys()
+            .any(|key| http::is_annotation(key.as_str()))
+        && (resource_type(&body.resource)
+            .is_some_and(|ty| ty.to_string() == "SecCore::HttpEndpoint")
+            || match &body.action {
+                ActionConstraint::Eq(id) => send(id),
+                ActionConstraint::In(ids) => !ids.is_empty() && ids.iter().all(send),
+                ActionConstraint::Any => false,
+            })
+}
+
 /// Failures before a Cedar source can become a validated policy representation.
 #[derive(Debug, thiserror::Error)]
 pub enum CedarError {
@@ -179,7 +246,9 @@ pub enum CedarError {
     #[error("invalid Cedar source: {0}")]
     Source(#[from] asc_policy_types::ValidationError),
     /// The source references a schema revision unavailable in this frontend.
-    #[error("unsupported Cedar schema {schema_id} revision {revision}")]
+    #[error(
+        "unsupported Cedar schema {schema_id} revision {revision}; use seccore.system revision 3"
+    )]
     UnsupportedSchema {
         /// Requested schema identity.
         schema_id: String,
