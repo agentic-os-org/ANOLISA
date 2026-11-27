@@ -292,7 +292,7 @@ fn process_session(
     Ok(true)
 }
 
-/// Collected last activity includes tool dispatches and completions within a grouped step.
+/// Collected last activity includes turn content and tool events within a grouped step.
 fn last_activity(trajectory: &agentsight_atif::AtifTrajectory) -> Option<String> {
     let mut latest = None;
     for step in &trajectory.steps {
@@ -301,22 +301,31 @@ fn last_activity(trajectory: &agentsight_atif::AtifTrajectory) -> Option<String>
                 .ok()
                 .map(|time| (time, raw))
         });
-        let tool_activity = step.tool_calls.iter().flatten().flat_map(|call| {
-            ["start_timestamp", "result_timestamp"]
-                .into_iter()
-                .filter_map(move |key| {
-                    if step.source != agentsight_atif::StepSource::Agent {
-                        return None;
-                    }
-                    let raw = call.extra.as_ref()?.get(key)?.as_str()?;
-                    let end = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
-                    issued
-                        .as_ref()
-                        .is_none_or(|(start, _)| end >= *start)
-                        .then_some((end, raw))
-                })
+        let tool_times = step
+            .tool_calls
+            .iter()
+            .flatten()
+            .filter_map(|call| call.extra.as_ref())
+            .flat_map(|extra| {
+                ["start_timestamp", "result_timestamp"]
+                    .into_iter()
+                    .filter_map(|key| extra.get(key))
+            });
+        let end_time = step
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("end_timestamp"));
+        let agent_activity = tool_times.chain(end_time).filter_map(|value| {
+            if step.source != agentsight_atif::StepSource::Agent {
+                return None;
+            }
+            let raw = value.as_str()?;
+            let end = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+            issued
+                .is_none_or(|(start, _)| end >= start)
+                .then_some((end, raw))
         });
-        for (timestamp, raw) in issued.into_iter().chain(tool_activity) {
+        for (timestamp, raw) in issued.into_iter().chain(agent_activity) {
             if latest
                 .as_ref()
                 .is_none_or(|(previous, _)| timestamp > *previous)
