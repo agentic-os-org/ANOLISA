@@ -17,8 +17,8 @@ use agentsight::{
     event::Event,
     pipeline_core::PipelineCore,
     probes::{
-        FileWatch, FileWriteProbe, Probes, ProcMon, ProcTrace, SharedMaps, SslSniff, TcpSniff,
-        UdpDns, proctrace::VariableEvent,
+        FileWatch, FileWriteEvent, FileWriteProbe, Probes, ProcMon, ProcTrace, SharedMaps,
+        SslSniff, TcpSniff, UdpDns, pidns::proc_root_is_init_pidns, proctrace::VariableEvent,
     },
 };
 
@@ -631,6 +631,111 @@ fn filewatch_bpf_loads() {
 fn filewrite_bpf_loads() {
     let (_pt, shared) = make_shared_maps();
     FileWriteProbe::new_with_shared(&shared).expect("filewrite BPF should load on this kernel");
+}
+
+#[test]
+#[ignore]
+fn filewrite_reports_observer_pid_in_non_init_pidns() {
+    use libbpf_rs::RingBufferBuilder;
+    use std::cell::RefCell;
+    use std::process::Command;
+    use std::rc::Rc;
+
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: filewrite eBPF attach and unshare require root");
+        return;
+    }
+
+    if std::env::var_os("AGENTSIGHT_TEST_FILEWRITE_PIDNS_CHILD").is_none() {
+        let exe = std::env::current_exe().expect("resolve current test binary");
+        let output = Command::new("unshare")
+            .args([
+                "--pid",
+                "--fork",
+                "--mount-proc",
+                exe.to_str().expect("utf-8 test binary path"),
+                "--ignored",
+                "--exact",
+                "filewrite_reports_observer_pid_in_non_init_pidns",
+                "--nocapture",
+            ])
+            .env("AGENTSIGHT_TEST_FILEWRITE_PIDNS_CHILD", "1")
+            .output()
+            .expect("spawn isolated pidns test child via unshare");
+        assert!(
+            output.status.success(),
+            "isolated pidns filewrite test failed (status: {:?})\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    assert!(
+        !proc_root_is_init_pidns(),
+        "child test must execute inside a non-init PID namespace"
+    );
+
+    let (mut pt, shared) = make_shared_maps();
+    let rb_handle = pt.rb_handle().expect("rb handle");
+    let mut fw =
+        FileWriteProbe::new_with_shared(&shared).expect("filewrite BPF should load on this kernel");
+    fw.attach().expect("attach filewrite probe");
+
+    let ns_pid = std::process::id();
+    pt.add_traced_pid(ns_pid)
+        .expect("register observer-namespace pid in traced_processes");
+
+    let unique = format!(
+        "11111111-2222-3333-4444-{:012x}.jsonl",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+            & 0xffff_ffff_ffff
+    );
+    let temp_path = std::env::temp_dir().join(&unique);
+
+    let captured = Rc::new(RefCell::new(Vec::<u32>::new()));
+    let captured_cb = Rc::clone(&captured);
+    let target_filename = unique.clone();
+    let mut rb_builder = RingBufferBuilder::new();
+    rb_builder
+        .add(&rb_handle, move |data: &[u8]| {
+            const EVENT_SOURCE_FILEWRITE: u32 = 5;
+            if data.len() < 4 {
+                return 0;
+            }
+            let source = u32::from_ne_bytes(data[0..4].try_into().expect("4-byte source prefix"));
+            if source == EVENT_SOURCE_FILEWRITE
+                && let Some(ev) = FileWriteEvent::from_bytes(data)
+                && ev.filename == target_filename
+            {
+                captured_cb.borrow_mut().push(ev.pid);
+            }
+            0
+        })
+        .expect("add shared ringbuf to builder");
+    let rb = rb_builder.build().expect("build ringbuf");
+
+    std::fs::write(&temp_path, "{\"type\":\"session_meta\"}\n")
+        .expect("write session jsonl fixture");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && captured.borrow().is_empty() {
+        let _ = rb.poll(std::time::Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_file(&temp_path);
+
+    let pids = captured.borrow();
+    let observed_pid = pids
+        .first()
+        .copied()
+        .expect("expected a FileWrite event for traced pid write to <uuid>.jsonl");
+    assert_eq!(
+        observed_pid, ns_pid,
+        "FileWrite event must report observer-namespace pid ({ns_pid}), not host tgid ({observed_pid})"
+    );
 }
 
 #[test]
