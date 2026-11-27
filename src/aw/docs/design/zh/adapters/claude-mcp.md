@@ -87,6 +87,8 @@ AW 仅修改 content[0].text，保留返回对象其他字段。错误、多块�
 PostTool 观察并保持原样。业务异常生成失败的 AW completion，再沿用 SDK 异常处理。
 固定版本 SDK 自身会转换或丢弃部分 resource/structured 字段；本包装保留 handler 返回
 envelope，SDK 序列化扩展属于独立工作。
+AW 保留可选字段，包括值为 null 的 `structuredContent`。handler 省略 `content` 时，SDK 返回空内容列表。
+handler 返回无效结果时，AW 在 `tool.after` 前将其转换为 MCP 错误。Hook 与 SDK 收到相同的错误状态，会话可继续处理下一次调用。
 PostTool 检查 handler 结果的 JSON 快照；SDK 接收已检查快照或获准替换结果。
 业务持有的缓存结果被其他协程修改后，交付给 SDK 的文本和错误标记保持检查时的值。
 
@@ -96,10 +98,11 @@ MCP 压缩服务。MCP 结果按 API 响应分类，不透明名称和 command �
 Pi 的对应接点是已有公开 custom-tool before/after 链路，业务把 MCP client 暴露为 Pi 工具后
 即可进入该链路。SDK 受管工具链路之外的任意 MCP 客户端缺少 AW 结果采纳边界。
 
-Hook/Provider 故障、非法替换响应及传输边界的非法结果会先停止常驻任务，阻止原始成功结果
-继续返回模型。配置 `on_error: report` 的 tool.after 步骤是可恢复例外：传输失败、超时和 CLI
-非零退出保留已检查的原始结果，记录故障并让同一 client 上的当前任务继续。身份、生命周期及
-已锁定的 scope 有效性失败、`on_error: block` 步骤、安全拒绝和非法替换响应仍会停止任务。
+`tool.before` 无法确认放行时，AW 跳过业务 handler，向本次调用返回 MCP 错误，会话可继续使用。
+配置 `on_error: report` 的 `tool.after` 步骤记录 Provider 故障并保留已检查的结果。
+替换指令无效、身份或 scope 失效、生命周期故障或回调无法排空时，
+AW 在返回未经验证的结果前停止任务。
+
 成功分类为不支持压缩的结果正常保留。取消与 scope 关闭遵循常驻合同，远端业务副作用需要工具
 自己的取消协议。原生输入和归一化输入继续遵守一 MiB 上限。
 

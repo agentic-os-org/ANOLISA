@@ -106,7 +106,13 @@ def claim(tool, scope, on_error="report"):
         bridge.failure = "stopped"
 
     bridge.stop_task = stop
-    bridge.failure_reply = lambda *args: setattr(bridge, "failure", "failed")
+    def failure_reply(event, hook):
+        if event == "tool.after" and hook.get("on_error") == "report" and not (scope.failed or bridge.failure):
+            return {}
+        bridge.failure = "failed"
+        return {"continue_": False}
+
+    bridge.failure_reply = failure_reply
     bridge.invocations = Invocations(bridge)
     managed.claim("local", bridge)
 
@@ -258,6 +264,55 @@ class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["content"][0]["text"], "original")
         self.assertIsNot(managed["instance"].tools[0], original)
 
+    async def test_invalid_handler_result_reaches_report_hook_and_sdk_as_one_error(self):
+        result = None
+
+        async def business(arguments):
+            return result
+
+        scope = Scope()
+        managed, invoke = claim(SdkMcpTool("touch", "Fixture", {}, business), scope)
+        malformed = [
+            None, {"content": {}}, {"content": None}, {"content": [None]},
+            {"content": [{"type": "text", "text": 123}]},
+            {"content": [{"type": "image", "data": "AA=="}]},
+            {"content": [{"type": "resource", "resource": {"uri": "file:///x", "text": 7}}]},
+            {"content": [{"type": "resource_link", "uri": "file:///x", "name": 7}]},
+            {"content": [], "is_error": 1},
+            {"content": [], "isError": False},
+            {"content": [], "structuredContent": {"number": float("nan")}},
+            {"content": [{"type": "text", "text": chr(0xD800)}]},
+        ]
+        for result in malformed:
+            with self.subTest(result=result):
+                delivered = await invoke({})
+                after = scope.events[-1]
+                self.assertEqual(after["event"], "tool.after")
+                self.assertIs(after["is_error"], True)
+                self.assertIs(delivered["is_error"], True)
+                self.assertEqual(after["tool_result"], delivered)
+                self.assertEqual(delivered["content"], [{"type": "text", "text": "Invalid MCP tool result"}])
+                self.assertIsNone(managed.bridge.failure)
+        for result in (
+            {},
+            {"content": [{"type": "text", "text": "available"}], "structuredContent": None},
+            {"structuredContent": {"rows": 80}},
+            {"content": [{}, {"type": "unknown"}, {"type": "resource_link", "uri": 42}]},
+            {"content": [
+                {"type": "text", "text": "next call"},
+                {"type": "image", "data": "AA==", "mimeType": "image/png"},
+                {"type": "audio", "data": "AA==", "mimeType": "audio/wav"},
+                {"type": "resource", "resource": {"uri": "file:///x", "text": "x"}},
+                {"type": "resource", "resource": {"uri": "file:///x", "blob": "AA=="}},
+                {"type": "resource_link", "name": "x", "uri": "file:///x"},
+            ]},
+        ):
+            with self.subTest(result=result):
+                self.assertEqual(await invoke({}), result)
+                self.assertEqual(scope.events[-1]["tool_result"], result)
+                self.assertIs(scope.events[-1]["is_error"], False)
+                self.assertIsNone(managed.bridge.failure)
+
     async def test_shared_results_deliver_the_checked_snapshot(self):
         for mode in ("plain", "error", "multi", "structured"):
             with self.subTest(mode=mode):
@@ -309,7 +364,7 @@ class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(bridge.failure)
                 managed.release()
 
-    async def test_block_before_identity_and_validity_faults_still_stop_the_task(self):
+    async def test_before_fault_denies_call_and_unconfined_faults_stop_task(self):
         for on_error, fault, scope, ran in (
             ("block", "after-exit", Scope(fail_after=3), True),
             ("report", "before-exit", Scope(fail_before=3), False),
@@ -326,11 +381,14 @@ class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 managed, invoke = claim(SdkMcpTool("touch", "Business closure", {}, business),
                                         scope, on_error=on_error)
                 bridge = managed.bridge
-                # Identity faults surface as RuntimeError before the hook loop;
-                # hook faults surface as the stopping CallbackFailure.
-                with self.assertRaises((bridge_module.CallbackFailure, RuntimeError)):
-                    await invoke({"value": "fixture"})
-                self.assertEqual(bridge.failure, "stopped")
+                if fault == "before-exit":
+                    result = await invoke({"value": "fixture"})
+                    self.assertTrue(result["is_error"])
+                    self.assertIsNone(bridge.failure)
+                else:
+                    with self.assertRaises((bridge_module.CallbackFailure, RuntimeError)):
+                        await invoke({"value": "fixture"})
+                    self.assertEqual(bridge.failure, "stopped")
                 self.assertEqual(calls, [{"value": "fixture"}] if ran else [])
                 managed.release()
 

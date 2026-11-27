@@ -83,11 +83,12 @@ identity, a completed failure audit, no effects, and a terminal `report` action.
 For transport faults, only `failure_detail: deadline_exceeded` qualifies.
 The original result reaches the next model request for native HTTP MCP text and
 `structuredContent` results and built-in tools such as Bash. After invocation
-completion and callback drain, the same client accepts the next task. Managed SDK
-MCP retains its existing after-report recovery.
+completion and callback drain, the same client accepts the next task. An
+unconfirmed pre-tool check denies the affected call. Managed SDK MCP converts
+invalid handler results to tool errors before `tool.after`. The session remains usable.
 
-Identity/scope failures, cancellation, lifecycle/cleanup failures, before-Hook
-failures, invalid native responses, unknown or missing transport details and audit
+Identity/scope failures, cancellation, lifecycle/cleanup failures,
+invalid native responses, unknown or missing transport details and audit
 failures remain fail-stop. `on_error: block` retains its blocking behavior;
 policy denial remains a normal native denial. Post checks cannot undo tool side
 effects. A failed Claude interrupt terminates AW's owned foreground process group,

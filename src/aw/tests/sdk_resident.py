@@ -119,7 +119,7 @@ def main():
     parser.add_argument("--npm", type=Path)
     parser.add_argument("--scenario", choices=["lifecycle", "stop-failure", "cancel", "startup",
                         "messages", "eof-stop-failure", "close-timeout", "observation", "mcp", "mcp-failure", "long", "drain", "drain-timeout", "store", "denial", "boundaries", "settings", "report",
-                        "cooperative-attach"], default="lifecycle")
+                        "cooperative-attach", "recovery-direct", "recovery-relay"], default="lifecycle")
     parser.add_argument("--evidence-mode", choices=["auto", "off"])
     parser.add_argument("--tokenless", type=Path)
     parser.add_argument("--tokenless-provider", type=Path)
@@ -163,6 +163,9 @@ def main():
     }
     if args.scenario in {"settings", "cooperative-attach"} and args.agent == "claude":
         document["spec"]["agents"]["claude"]["claude_sdk"] = {"allow_plaintext_http_hosts": ["127.0.0.2"]}
+    if args.scenario == "recovery-direct":
+        document["spec"]["daemon"]["limits"] = {"invocations_per_binding": 1}
+        document["spec"]["agents"]["claude"]["claude_sdk"] = {"model_transport": "direct"}
     if args.evidence_mode is not None or args.scenario == "observation":
         document["spec"]["agents"][args.agent]["evidence"] = {
             "source_id": "fixture", "endpoint": "http://127.0.0.1:1",
@@ -172,9 +175,10 @@ def main():
     if args.scenario in {"mcp", "mcp-failure"}:
         assert args.agent == "claude"
         document["spec"]["providers"]["custom"]["timeout_ms"] = 4000
-    if args.scenario in {"mcp", "mcp-failure", "long"}:
+    if args.scenario in {"mcp", "mcp-failure", "long", "recovery-direct", "recovery-relay"}:
         assert args.tokenless and args.tokenless_provider
-        document["spec"]["agents"]["claude"]["argv"][-1] = str(fixture / ("long_claude.py" if args.scenario == "long" else "mcp.py"))
+        if not args.scenario.startswith("recovery-"):
+            document["spec"]["agents"]["claude"]["argv"][-1] = str(fixture / ("long_claude.py" if args.scenario == "long" else "mcp.py"))
         document["spec"]["providers"]["tokenless"] = {
             "protocol": "aw-provider/v1alpha1", "transport": {"type": "stdio", "location": "agent",
             "argv": [str(args.tokenless_provider.resolve()), "--cli", str(args.tokenless.resolve()) if args.scenario != "mcp-failure" else "/bin/false", "--data-dir", str(state_parent / "tokenless")]},

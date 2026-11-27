@@ -231,6 +231,9 @@ pub(super) fn show_target(path: &str, selection: &str) -> crate::cli::Result<cra
                 "input_enabled": requirements.iter().any(|event| event.event == "input.submit"),
                 "target_requires_service": requirements.iter().any(|event| event.required),
             });
+            if aw_config::direct_model_transport(agent) {
+                view["model_transport"] = serde_json::json!("direct");
+            }
             let hosts = aw_config::plaintext_http_hosts(agent);
             if !hosts.is_empty() {
                 view["allow_plaintext_http_hosts"] = serde_json::json!(hosts);

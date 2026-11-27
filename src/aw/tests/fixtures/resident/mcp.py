@@ -211,9 +211,12 @@ async def task(index, mode, mutation=None):
         assert len({event["tool"]["call_id"] for event in before}) == count
         assert all(event["tool"]["name"] == "mcp__local__touch" for event in events)
         assert len(calls) == (0 if mode in {"deny", "before-error"} else count), calls
-        assert failed == (mode == "before-error"), (mode, failed)
+        assert not failed, mode
         if mode == "before-error":
-            assert len(requests) == 1, (mode, len(requests))
+            assert len(requests) == 2, (mode, len(requests))
+            denied = requests[-1]["messages"][-1]["content"][-1]
+            assert denied["type"] == "tool_result" and denied["is_error"]
+            assert "AW could not confirm this tool check" in str(denied["content"])
         else:
             assert len(requests) == (4 if mode == "compress-recovery" else 2), (mode, len(requests))
             seen: set[str] = set()

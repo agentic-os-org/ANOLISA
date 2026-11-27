@@ -123,7 +123,7 @@ fn resident_report_recovery_preserves_failure_fences() {
     let output = fixture.run(command);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && stderr.contains("Ran 7 tests") && stderr.contains("\nOK\n"),
+        output.status.success() && stderr.contains("Ran 8 tests") && stderr.contains("\nOK\n"),
         "{stderr}"
     );
 }
@@ -143,7 +143,7 @@ fn managed_mcp_freezes_registered_tools_and_checked_results() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Ran 10 tests"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Ran 11 tests"));
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn model_producer_identity_and_callback_drain_contracts() {
     let output = fixture.run(command);
     assert!(
         output.status.success()
-            && String::from_utf8_lossy(&output.stderr).contains("Ran 19 tests")
+            && String::from_utf8_lossy(&output.stderr).contains("Ran 21 tests")
             && String::from_utf8_lossy(&output.stderr).contains("\nOK\n"),
         "{}",
         String::from_utf8_lossy(&output.stderr)

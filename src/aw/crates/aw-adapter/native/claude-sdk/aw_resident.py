@@ -25,13 +25,13 @@ if __package__:
     from .aw_claude import Bridge, CallbackFailure, _deny
     from .aw_scope import Scope
     from .aw_invocations import Invocations, digest
-    from .aw_model import ModelRelay
+    from .aw_model import ModelRelay, model_endpoint
     from .aw_transport import ManagedTransport
 else:
     from aw_claude import Bridge, CallbackFailure, _deny
     from aw_scope import Scope
     from aw_invocations import Invocations, digest
-    from aw_model import ModelRelay
+    from aw_model import ModelRelay, model_endpoint
     from aw_transport import ManagedTransport
 
 _active: set[ManagedClient] = set()
@@ -75,6 +75,11 @@ class ResidentBridge(Bridge):
         return await self.scope.invoke(hook, payload)
 
     def failure_reply(self, event: str, hook: dict[str, Any]) -> dict[str, Any]:
+        if event == "tool.before" and hook and not self.failure and not self.scope.failed:
+            # An unconfirmed decision cannot authorize a side effect.
+            return _deny("AW could not confirm this tool check")
+        if event == "tool.after" and hook.get("on_error") == "report" and not self.failure and not self.scope.failed:
+            return {}
         self.failure = "AW managed task stopped after a callback failure"
         if event == "tool.before":
             return {**_deny(self.failure), "continue_": False, "stopReason": self.failure}
@@ -101,6 +106,9 @@ class ResidentBridge(Bridge):
             if payload.get("tool_name") in self.mcp_names:
                 return {}
             phase = "before" if event == "tool.before" else "after"
+            if self.invocations.direct:
+                tool_use_id = self.invocations.native_ids.get(tool_use_id)
+                payload = {**payload, "tool_use_id": tool_use_id}
             entry = self.invocations.claim(
                 tool_use_id, payload["tool_name"], payload["tool_input"], phase
             )
@@ -155,6 +163,7 @@ class ManagedClient(ClaudeSDKClient):
         *,
         scope_factory: Callable[[Callable[[dict], bool]], Any] | None = None,
         allow_plaintext_http_hosts: list[str] | None = None,
+        model_transport: str = "relay",
     ) -> None:
         if sys.version_info < (3, 11):
             raise RuntimeError("AW resident Claude SDK requires Python >=3.11")
@@ -173,6 +182,10 @@ class ManagedClient(ClaudeSDKClient):
             allow_plaintext_http_hosts if self._aw_cooperative
             else self._aw_bridge.config.get("allow_plaintext_http_hosts", [])
         )
+        mode = model_transport if self._aw_cooperative else self._aw_bridge.config.get("model_transport", "relay")
+        if mode not in ("relay", "direct"):
+            raise ValueError("Unsupported Claude model transport")
+        self._aw_bridge.invocations.direct = mode == "direct"
         self._aw_bridge.stop = self._aw_stop_native
         self._aw_cwd = str(Path(options.cwd or os.getcwd()).resolve())
         self._aw_environment = {**os.environ, **options.env}
@@ -310,17 +323,20 @@ class ManagedClient(ClaudeSDKClient):
                     async with asyncio.timeout(5):
                         transport = self._custom_transport
                         environment = await transport.model_environment(self._query)
-                        self._aw_relay = ModelRelay(
-                            self._aw_bridge, {**self._aw_environment, **environment},
-                            allow_plaintext_http_hosts=self._aw_http_hosts,
-                        )
-                        endpoint = await self._aw_relay.start()
-                        await transport.route_model(
-                            self._query, endpoint, self._aw_environment, environment,
-                        )
-                    self.options = replace(
-                        self.options, env={**self.options.env, "ANTHROPIC_BASE_URL": endpoint}
-                    )
+                        effective = {**self._aw_environment, **environment}
+                        if self._aw_bridge.invocations.direct:
+                            model_endpoint(effective, self._aw_http_hosts)
+                        else:
+                            self._aw_relay = ModelRelay(
+                                self._aw_bridge, effective, allow_plaintext_http_hosts=self._aw_http_hosts,
+                            )
+                            endpoint = await self._aw_relay.start()
+                            await transport.route_model(
+                                self._query, endpoint, self._aw_environment, environment,
+                            )
+                            self.options = replace(
+                                self.options, env={**self.options.env, "ANTHROPIC_BASE_URL": endpoint}
+                            )
                 finally:
                     self._aw_connect_task = None
                 self._aw_check()
@@ -428,12 +444,16 @@ class ManagedClient(ClaudeSDKClient):
                 await self._aw_bridge.stop_task()
                 raise CallbackFailure("AW received an unsolicited execution result")
             try:
-                await self._aw_relay.drain()
+                if self._aw_relay is not None:
+                    await self._aw_relay.drain()
                 await self._aw_bridge.invocations.drain()
             except BaseException as error:
                 self._aw_bridge.failure_reply("tool.after", {})
                 await self._aw_bridge.stop_task()
-                if isinstance(error, TimeoutError):
+                if isinstance(error, TimeoutError) and (
+                    self._aw_bridge.invocations.pending or
+                    (self._aw_relay is not None and self._aw_relay.exchanges)
+                ):
                     fail_stop(self._aw_bridge.group)
                 raise
             self._aw_query_finished = True
@@ -491,6 +511,7 @@ class ManagedClient(ClaudeSDKClient):
     async def _aw_cleanup(self) -> None:
         global _poisoned
         self._aw_state = "closing"
+        native_drained = False
         try:
             # Stay in the SDK caller's task and shield teardown from request scopes.
             with anyio.CancelScope(shield=True):
@@ -517,6 +538,7 @@ class ManagedClient(ClaudeSDKClient):
                                 await self._aw_relay.close()
                         finally:
                             await self._aw_bridge.invocations.drain()
+                    native_drained = True
                     if self._aw_observe_sessions:
                         await self._aw_bridge.session_disconnected(self._aw_cwd, reason)
                 finally:
@@ -528,6 +550,12 @@ class ManagedClient(ClaudeSDKClient):
                 if self._aw_bridge.config.get("resident_policy_reload") and not self._aw_cooperative:
                     await self._aw_bridge.scope.release()
         except BaseException:
+            if native_drained:
+                # Service release may need reconciliation. This disconnected client
+                # is unusable, but its CLI and callbacks can no longer execute.
+                self._aw_state = "closed"
+                _active.discard(self)
+                raise
             _poisoned = True
             # An undrained callback may still execute caller code. Close the
             # AW-owned process group rather than returning a reusable host.

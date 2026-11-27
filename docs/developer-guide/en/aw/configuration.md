@@ -74,6 +74,11 @@ Defaults are documented behavior, not values inserted into the parsed document.
 
 ## Claude SDK model gateway
 
+The per-target `claude_sdk.model_transport` setting defaults to `relay`. The relay checks
+tool identity and result order on the model connection. Set it to `direct` to let a trusted
+Claude CLI use its configured gateway. Both modes enforce the HTTP host grants below and
+retain AW Hook and managed MCP admission.
+
 The resident Claude Python SDK worker's `ModelRelay` requires TLS outside
 `localhost`, `127.0.0.1` and `::1` by default. A one-shot foreground worker
 on the same target uses the native client or `CheckedClient` directly, so its

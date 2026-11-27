@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import stat
 
-from aw_sdk.configuration import http_host_hint
+from aw_sdk.configuration import claude_transport_hints
 from aw_sdk.transport import AwError
 
 LIMIT = 4 * 1024 * 1024
@@ -175,7 +175,7 @@ def load_descriptor(
     encoded, mode = _read_file(descriptor_file)
     try:
         value = json.loads(encoded.decode("utf-8"), object_pairs_hook=object_fields)
-        optional = {"observe_session_start", "allow_plaintext_http_hosts"}
+        optional = {"observe_session_start", "allow_plaintext_http_hosts", "model_transport"}
         if not isinstance(value, dict) or set(value) - optional != FIELDS:
             raise ValueError()
         actual_profile = value["profile"]
@@ -206,21 +206,21 @@ def load_descriptor(
             or any(not text.strip(WHITE_SPACE) for text in actual_profile.values())
         ):
             raise ValueError()
-        hosts = http_host_hint(value, actual_profile)
+        hints = claude_transport_hints(value, actual_profile)
     except (ValueError, TypeError, RecursionError):
         raise AwError("sdk_descriptor_invalid") from None
     if actual_profile != profile or (
         requires_service and value["availability"] != "required"
     ):
         raise AwError("sdk_descriptor_profile_mismatch")
-    if hosts.get("allow_plaintext_http_hosts") and mode & 0o222:
+    if (hints.get("allow_plaintext_http_hosts") or hints.get("model_transport") == "direct") and mode & 0o222:
         raise AwError("sdk_descriptor_read_only_required")
     if target is not None and target != value["target"]:
         raise AwError("sdk_descriptor_target_mismatch")
     if hashlib.sha256(read_file(config_file)).hexdigest() != value["configuration_sha256"]:
         raise AwError("sdk_descriptor_stale")
     return {
-        **hosts,
+        **hints,
         "target": value["target"],
         "endpoint": value["endpoint"],
         "input_enabled": value["wait_for_input_submit"],

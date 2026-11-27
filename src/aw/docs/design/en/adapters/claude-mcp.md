@@ -105,6 +105,10 @@ still pass through PostTool observation and remain unchanged. Handler exceptions
 produce a failed AW completion, then propagate to the SDK's existing error path.
 The pinned SDK independently transforms/drops some resource and structured fields;
 this wrapper preserves its input envelope and does not extend SDK serialization.
+AW preserves optional fields, including a null `structuredContent`. The SDK
+delivers an empty content list when the handler omits `content`. If a supplied
+result is invalid, AW converts it to an MCP error before `tool.after`. The Hook
+and SDK see the same error status, and the session can accept another call.
 PostTool inspects a JSON snapshot of the handler result. The SDK receives that
 checked snapshot or its authorized replacement, so concurrent changes to a
 business-owned cached result cannot change the delivered text or error flag.
@@ -118,15 +122,15 @@ Pi's equivalent boundary is its existing public custom-tool before/after pipelin
 MCP clients exposed as Pi tools pass through that pipeline. Arbitrary MCP clients
 outside the managed SDK tool pipeline have no AW adoption boundary.
 
-Hook/Provider failures, malformed replacement replies and unsupported result
-shapes at the transport boundary stop the resident task before returning a
-successful raw result. A `tool.after` step configured with `on_error: report`
-is the recoverable exception: transport failures, timeouts and non-zero CLI
-exits keep the checked original result, log the fault and continue the current
-task on the same client. Identity, lifecycle and latched scope validity
-failures, `on_error: block` steps, security denial and malformed replacement
-replies still stop the task. Successful unsupported-result classification is a
-normal unchanged result. Task cancellation and scope close retain the resident
+If `tool.before` cannot confirm admission, AW returns an MCP error for that call,
+skips the business handler and keeps the session usable. A `tool.after` step
+with `on_error: report` logs a Provider fault and retains the checked result.
+A malformed replacement directive, invalid identity or scope, a lifecycle
+failure or callbacks that cannot drain stop the task before it returns an
+unverified result.
+
+Results classified as ineligible for compression keep their original content.
+Task cancellation and scope close retain the resident
 contract; remote business side effects need their own cancel protocol. Native
 and normalized inputs retain the existing one-MiB bound.
 

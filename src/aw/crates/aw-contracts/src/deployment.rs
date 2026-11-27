@@ -51,6 +51,8 @@ struct Fields {
     observe_session_start: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allow_plaintext_http_hosts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_transport: Option<String>,
     availability: Availability,
 }
 

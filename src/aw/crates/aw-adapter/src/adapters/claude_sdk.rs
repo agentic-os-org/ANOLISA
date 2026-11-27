@@ -200,6 +200,7 @@ impl PreparedLaunch for Prepared {
                 "executable": context.executable, "binding": context.binding_path,
                 "ready_path": ready, "ready_token": token, "observation_enabled": observe,
                 "resident_policy_reload": self.input.options.resident_policy_reload,
+                "model_transport": agent["claude_sdk"]["model_transport"].as_str().unwrap_or("relay"),
                 "allow_plaintext_http_hosts": aw_config::plaintext_http_hosts(agent),
                 "hooks": hooks, "final_profile": final_profile,
                 "final_enforcing": super::claude_final::enforcing(&hooks),

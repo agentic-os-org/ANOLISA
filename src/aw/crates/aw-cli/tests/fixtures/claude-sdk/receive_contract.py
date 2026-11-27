@@ -102,7 +102,7 @@ sys.modules["aw_claude"] = SimpleNamespace(
 )
 sys.modules["anyio"] = SimpleNamespace()
 sys.modules["aw_scope"] = SimpleNamespace(Scope=object)
-sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object)
+sys.modules["aw_model"] = SimpleNamespace(ModelRelay=object, model_endpoint=None)
 
 from aw_invocations import dispatch
 from aw_transport import ManagedTransport
@@ -117,7 +117,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             mcp_servers=set(),
             failure_reply=lambda *args: self.stops.append("failure"),
             request_stop=lambda: self.stops.append("stop"),
-            invocations=SimpleNamespace(reserve=lambda *args: "ticket"),
+            invocations=SimpleNamespace(direct=False, reserve=lambda *args: "ticket"),
         )
         self.transport = ManagedTransport(Options(), self.bridge)
         self.readers = []

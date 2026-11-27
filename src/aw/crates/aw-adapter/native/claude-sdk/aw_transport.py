@@ -125,6 +125,7 @@ class ManagedTransport(Transport):
         await self.delegate.connect()
 
     async def write(self, data: str) -> None:
+        self.bridge.invocations.settle_mcp_validation_error(dispatch.get(), data)
         await self.delegate.write(data)
 
     async def close(self) -> None:
@@ -198,6 +199,9 @@ class ManagedTransport(Transport):
                                     raise CallbackFailure(
                                         "AW managed MCP requires native tool-use identity"
                                     )
+                        ledger = self.bridge.invocations
+                        if tracked and call_id is not None and ledger.direct:
+                            call_id = await ledger.native_dispatch_id(call_id, request)
                         if tracked and stop_fingerprint is not None:
                             ticket = self.bridge.invocations.reserve(
                                 message["request_id"], call_id, callback,
@@ -207,6 +211,8 @@ class ManagedTransport(Transport):
                                 continue
                         elif tracked:
                             ticket = self.bridge.invocations.reserve(message["request_id"], call_id, callback)
+                    elif message.get("type") == "user" and self.bridge.invocations.direct:
+                        await self.bridge.invocations.native_results(message.get("message", {}).get("content"))
                     elif message.get("type") == "control_cancel_request":
                         self.bridge.invocations.cancel(message.get("request_id"))
                 except Exception:

@@ -12,6 +12,11 @@ pub fn plaintext_http_hosts(agent: &Value) -> &[Value] {
         .unwrap_or_default()
 }
 
+/// Whether a validated target explicitly trusts its CLI for model transport.
+pub fn direct_model_transport(agent: &Value) -> bool {
+    agent["claude_sdk"]["model_transport"] == "direct"
+}
+
 pub(crate) fn validate(target: &str, agent: &Value) -> Result<(), Error> {
     if agent.get("claude_sdk").is_some() && agent["adapter"] != "claude-sdk" {
         return Err(Error::Invariant {
