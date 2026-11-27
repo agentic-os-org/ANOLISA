@@ -251,7 +251,7 @@ fn parse_file_mapping(line: &str, shared_only: bool) -> Option<Mapping> {
     let _offset = fields.next()?;
     let dev = fields.next()?;
     let ino = fields.next()?;
-    let path = fields.next()?.trim_end();
+    let path = fields.next()?.trim_start_matches(' ').trim_end();
     let perms = perms.as_bytes();
     if perms.len() < 4 || (shared_only && perms[3] != b's') {
         return None;
@@ -548,5 +548,76 @@ mod tests {
         drop(held);
         reject_preexisting_write_access(pid, &protected).expect("clean tree applies");
         std::fs::remove_dir_all(&dir).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn parse_file_mapping_handles_kernel_column_padding() {
+        let dir_mapping = parse_file_mapping(
+            "7f0000000000-7f0000001000 rw-s 00000000 103:02 1234567                      /srv/data/keep.txt",
+            true,
+        )
+        .expect("padded writable shared mapping must parse");
+        assert_eq!(dir_mapping.path, "/srv/data/keep.txt");
+        assert_eq!(dir_mapping.ino, 1234567);
+
+        assert!(
+            parse_file_mapping(
+                "7fff00000000-7fff00021000 rw-s 00000000 00:00 0                          [anon_shm]",
+                true,
+            )
+            .is_none(),
+            "padded pseudo-mappings must be ignored"
+        );
+    }
+
+    #[test]
+    fn real_proc_maps_mmap_is_rejected_under_directory_tree_scope() {
+        use std::os::fd::AsRawFd;
+
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-preexisting-maps-mmap-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("mapped.bin");
+        std::fs::write(&path, vec![0x41u8; 4096]).expect("fixture payload");
+
+        let file = std::fs::File::open(&path).expect("open fixture");
+        // SAFETY: maps one valid page of `file` read-only and unmaps before returning.
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(addr, libc::MAP_FAILED, "mmap fixture");
+
+        let canonical_dir = std::fs::canonicalize(&dir).expect("canonical dir");
+        let protected = vec![ProtectedEntry {
+            path: canonical_dir.to_string_lossy().into_owned(),
+            scope: ProtectedScope::Tree {
+                subtree_prefixes: Vec::new(),
+                exact_entries: Vec::new(),
+            },
+        }];
+
+        let result = reject_preexisting_read_mappings(std::process::id() as i32, &protected);
+
+        // SAFETY: `addr` was returned by the matching 4096-byte `mmap` above.
+        unsafe {
+            libc::munmap(addr, 4096);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = result.expect_err("real kernel /proc/self/maps mmap must be rejected");
+        assert!(
+            matches!(err, BackendError::CompileFailure(_)),
+            "unexpected error variant: {err}"
+        );
     }
 }
