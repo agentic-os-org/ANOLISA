@@ -71,8 +71,9 @@ def find_latest_trace(base_dir: Path, keyword: str, dir_pattern: str) -> tuple[P
                 continue
 
         # Find matching files
-        for f in subdir.glob(f"*{keyword}*.jsonl"):
-            if f.is_file():
+        for f in subdir.glob("*.jsonl"):
+            trace_task_id, _, run_id = f.stem.rpartition("_")
+            if trace_task_id == keyword and run_id and f.is_file():
                 candidates.append((f.stat().st_mtime, f, subdir.name))
 
     if not candidates:
