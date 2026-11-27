@@ -13,6 +13,9 @@ use std::{
     time::Duration,
 };
 
+// Large editable checkouts under cold filesystem I/O can exceed the 5-second default probe deadline.
+pub(super) const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Validate the selected installation before and after native dotenv loading.
 pub(super) fn checked_profile_command(
     command: &mut aw_exec::CommandSpec,
@@ -118,7 +121,7 @@ with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
             stdout_bytes: 4 * 1024 * 1024,
             stderr_bytes: 4096,
         },
-        std::time::Instant::now() + Duration::from_secs(30),
+        std::time::Instant::now() + PROBE_TIMEOUT,
         aw_exec::CleanupMode::Immediate,
     )
     .map_err(|error| {
@@ -181,7 +184,7 @@ with open(sys.argv[-1], 'w', encoding='utf-8') as stream:
             stdout_bytes: 4 * 1024 * 1024,
             stderr_bytes: 4096,
         },
-        std::time::Instant::now() + Duration::from_secs(5),
+        std::time::Instant::now() + PROBE_TIMEOUT,
         aw_exec::CleanupMode::Immediate,
     )?;
     if !output.status.success() {
@@ -294,7 +297,7 @@ fn checked_checkout(
     identity
         .environment
         .insert("GIT_WORK_TREE".into(), source.into());
-    let revision = adapter::Probe(cancelled).version_output(
+    let revision = adapter::Probe(cancelled).version_output_with_timeout(
         &identity,
         &[
             "--no-replace-objects".into(),
@@ -306,6 +309,7 @@ fn checked_checkout(
             "rev-parse".into(),
             "HEAD".into(),
         ],
+        PROBE_TIMEOUT,
     )?;
     if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -339,7 +343,7 @@ fn checked_checkout(
         trusted_native_path(&source.join(std::ffi::OsStr::from_bytes(path)))?;
     }
     let status = |command: &aw_exec::CommandSpec| {
-        adapter::Probe(cancelled).version_output(
+        adapter::Probe(cancelled).version_output_with_timeout(
             command,
             &[
                 "--no-replace-objects".into(),
@@ -354,6 +358,7 @@ fn checked_checkout(
                 "--porcelain".into(),
                 "--untracked-files=no".into(),
             ],
+            PROBE_TIMEOUT,
         )
     };
     let dirty = "Hermes official checkout must have no staged or unstaged tracked changes";
@@ -370,7 +375,7 @@ fn checked_checkout(
     fresh
         .environment
         .insert("GIT_INDEX_FILE".into(), scratch.path().join("index").into());
-    adapter::Probe(cancelled).version_output(
+    adapter::Probe(cancelled).version_output_with_timeout(
         &fresh,
         &[
             "--no-replace-objects".into(),
@@ -384,6 +389,7 @@ fn checked_checkout(
             "read-tree".into(),
             "HEAD".into(),
         ],
+        PROBE_TIMEOUT,
     )?;
     if !status(&fresh)?.is_empty() {
         return Err(dirty.into());
@@ -419,7 +425,7 @@ fn checked_site_paths(
     mut pending: Vec<PathBuf>,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<()> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     let mut visited = std::collections::BTreeSet::new();
     while let Some(path) = pending.pop() {
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
@@ -646,7 +652,7 @@ with open(result, 'w', encoding='utf-8') as stream:
             selector.into(),
         ],
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     let value = adapter::Probe(cancelled).python_text(probe, deadline)?;
     let timeout: f64 = serde_json::from_str(&value)?;
     if !timeout.is_finite() || timeout < 0.0 {

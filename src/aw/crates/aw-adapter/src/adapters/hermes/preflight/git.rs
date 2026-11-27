@@ -1,7 +1,7 @@
 //! Inspect effective Git configuration without running status or external helpers.
 
-use super::{checked_native_name, trusted_native_path, Result};
-use std::{ffi::OsString, os::unix::ffi::OsStrExt, time::Duration};
+use super::{checked_native_name, trusted_native_path, Result, PROBE_TIMEOUT};
+use std::{ffi::OsString, os::unix::ffi::OsStrExt};
 
 /// Run a bounded Git probe in its native directory.
 pub(super) fn inspect(
@@ -23,7 +23,7 @@ pub(super) fn inspect(
             stdout_bytes: 4 * 1024 * 1024,
             stderr_bytes: 4096,
         },
-        std::time::Instant::now() + Duration::from_secs(5),
+        std::time::Instant::now() + PROBE_TIMEOUT,
         cancelled,
     )?;
     if !output.status.success() {
