@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from collections.abc import AsyncIterator
@@ -17,6 +18,7 @@ else:
 
 MAX_FRAME = 1024 * 1024
 
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
 _LINE_END = re.compile(rb"\r\n|[\r\n]")
 _EVENTS = (
     "message_start", "content_block_start", "content_block_delta", "content_block_stop",
@@ -35,6 +37,35 @@ _JSON_ERRORS = {
 
 def json_error_label(error: json.JSONDecodeError) -> str:
     return error.msg if error.msg in _JSON_ERRORS else "Invalid JSON"
+
+
+def reject_constant(_: str) -> None:
+    # JSON.parse rejects all three named non-finite constants.
+    raise ValueError("Non-standard JSON constant")
+
+
+def native_number(token: str) -> int | float | None:
+    # JSON.stringify sends a binary64 overflow to the callback as null.
+    number = float(token)
+    if not math.isfinite(number):
+        return None
+    return int(token) if token.lstrip("-").isdigit() else number
+
+
+def decode_json(text: str) -> Any:
+    return json.loads(text, parse_constant=reject_constant, parse_int=native_number, parse_float=native_number)
+
+
+def fits_service_input(value: Any, depth: int = 0) -> bool:
+    # The IPC reader allows 40 containers, including the request and operation.
+    if isinstance(value, (dict, list)):
+        if depth >= 38:
+            return False
+        if isinstance(value, dict):
+            return all(fits_service_input(key) and fits_service_input(item, depth + 1)
+                       for key, item in value.items())
+        return all(fits_service_input(item, depth + 1) for item in value)
+    return not isinstance(value, str) or not _SURROGATE.search(value)
 
 
 def relay_log(label: str, fields: dict) -> None:
@@ -103,7 +134,7 @@ class MessageStream:
         self.details = {} if details is None else details
         self.warned: set[str] = set()
         self.invocations = invocations
-        self.blocks: dict[int, tuple[Invocation | None, str, Any]] = {}
+        self.blocks: dict[int, tuple[Invocation | None, bytearray, Any]] = {}
         self.started = False
         self.stopped = False
         self.next_index = 0
@@ -139,7 +170,7 @@ class MessageStream:
                 entry = self.invocations.produce(block["name"])
                 block["id"] = entry.call_id
                 block["input"] = {}
-            self.blocks[index] = (entry, "", initial)
+            self.blocks[index] = (entry, bytearray(), initial)
         elif kind == "content_block_delta":
             index, delta = value["index"], value["delta"]
             if index not in self.blocks:
@@ -150,46 +181,60 @@ class MessageStream:
                     delta.get("partial_json"), str
                 ):
                     raise CallbackFailure("AW model tool input delta is invalid")
-                partial += delta["partial_json"]
-                if len(partial.encode()) > MAX_FRAME:
+                partial.extend(delta["partial_json"].encode(errors="surrogatepass"))
+                if len(partial) > MAX_FRAME:
                     raise CallbackFailure("AW model tool input exceeds one MiB")
-                self.blocks[index] = (entry, partial, initial)
+                return ()
         elif kind == "content_block_stop":
             if value["index"] not in self.blocks:
                 raise CallbackFailure("AW model block was already completed")
             entry, partial, initial = self.blocks.pop(value["index"])
             if entry is not None:
-                partial_bytes = len(partial.encode())
+                partial_bytes = len(partial)
+                encoded = partial.decode(errors="surrogatepass")
                 self.details.update(stage="tool_input_json", partial_bytes=partial_bytes)
-                has_json = bool(partial.strip(" \t\r\n"))
-                if has_json:
-                    try:
-                        arguments = json.loads(partial)
-                    except json.JSONDecodeError as error:
-                        self.warn_once(
-                            "invalid_tool_input",
-                            partial_bytes=partial_bytes,
-                            json_err=json_error_label(error),
-                            json_pos=error.pos,
-                        )
-                        arguments = {}
-                    else:
+                try:
+                    if encoded.strip(" \t\r\n"):
+                        arguments = decode_json(encoded)
+                        if _SURROGATE.search(encoded):
+                            # A delta boundary may split a valid UTF-16 pair.
+                            arguments = json.loads(json.dumps(arguments))
                         if not isinstance(arguments, dict):
                             self.warn_once("non_object_tool_input", partial_bytes=partial_bytes)
                             arguments = {}
-                else:
-                    if partial:
-                        self.warn_once("blank_tool_input", partial_bytes=partial_bytes)
-                    arguments = initial
+                            encoded = "{}"
+                    else:
+                        if partial:
+                            self.warn_once("blank_tool_input", partial_bytes=partial_bytes)
+                        arguments = initial
+                        encoded = json.dumps(initial, ensure_ascii=False, separators=(",", ":"))
+                    representable = fits_service_input(arguments)
+                except json.JSONDecodeError as error:
+                    self.warn_once("invalid_tool_input", partial_bytes=partial_bytes,
+                                   json_err=json_error_label(error), json_pos=error.pos)
+                    arguments, representable = {}, True
+                except ValueError:
+                    self.warn_once("invalid_tool_input", partial_bytes=partial_bytes)
+                    arguments, representable = {}, True
+                except RecursionError:
+                    representable = False
                 self.details["stage"] = "stream_event"
-                await self.invocations.register(entry, arguments)
-                if not has_json:
-                    # Claude builds tool input from deltas, including the initial-input fallback.
-                    encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-                    return ({
-                        "type": "content_block_delta", "index": value["index"],
-                        "delta": {"type": "input_json_delta", "partial_json": encoded},
-                    }, value)
+                if representable:
+                    await self.invocations.register(entry, arguments)
+                else:
+                    # Keep the rejected identity local. An empty wire object lets
+                    # the CLI dispatch or report a schema error without decoding
+                    # an input its Python SDK or the service cannot represent.
+                    self.warn_once("unrepresentable_tool_input", partial_bytes=partial_bytes)
+                    entry.phase = "rejected"
+                    encoded = "{}"
+                # JSON escaping can use six bytes per character in an SSE frame.
+                chunk_size = MAX_FRAME // 8
+                deltas = ({
+                    "type": "content_block_delta", "index": value["index"],
+                    "delta": {"type": "input_json_delta", "partial_json": encoded[pos:pos + chunk_size]},
+                } for pos in range(0, len(encoded), chunk_size))
+                return (*deltas, value)
         elif kind == "message_stop":
             if not self.started or self.blocks:
                 raise CallbackFailure("AW model stream ended with incomplete tool inputs")

@@ -170,9 +170,10 @@ class ManagedServer(dict):
         async with bridge.invocations.callback() as ticket:
             entry = None
             try:
-                entry = bridge.invocations.claim(
-                    ticket.call_id, f"mcp__{claim.key}__{tool.name}", arguments, "before"
-                )
+                name = f"mcp__{claim.key}__{tool.name}"
+                if reason := bridge.invocations.rejection_reason(ticket.call_id, name):
+                    return {"content": [{"type": "text", "text": reason}], "is_error": True}
+                entry = bridge.invocations.claim(ticket.call_id, name, arguments, "before")
                 return await self.execute(entry, claim, tool, arguments)
             except Exception:
                 if entry is None or entry.phase != "adopted":

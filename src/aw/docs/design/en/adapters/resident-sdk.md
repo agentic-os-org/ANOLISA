@@ -66,7 +66,12 @@ recovery case: a discarded marker, blank data, accumulated whitespace-only delta
 using the initial tool input, invalid or non-object tool input JSON, or an
 upstream stream error. Failures report the decoding or protocol stage and
 structural metadata in stderr. Message text, tool input and credentials stay out
-of these diagnostics.
+of these diagnostics. The relay holds tool input deltas until the block closes.
+Named non-JSON constants use the malformed-input fallback. Numeric overflow
+registers as a null field, matching the CLI callback. Inputs with a lone UTF-16
+surrogate or nesting beyond the service IPC budget receive a per-call error.
+They never reach the tool handler or service registration. The next call can
+use the same resident client.
 Qoder uses completed model tool blocks from the Worker's private partial
 output and verifies each Hook against its native control-dispatch context. For
 child tools, a private stream-start frame reserves the native ID under an active,

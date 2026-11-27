@@ -261,6 +261,96 @@ class StreamContractMixin:
         self.assertFalse(self.bridge.invocations.active)
         self.assertIsNone(self.bridge.failure)
 
+    async def test_native_tool_input_numbers(self):
+        self.content_type = "text/event-stream"
+        for token, expected in (
+            ("NaN", {}), ("Infinity", {}), ("-Infinity", {}),
+            ("1e400", {"private-key": None}), ("1" + "0" * 400, {"private-key": None}),
+        ):
+            with self.subTest(token=token):
+                partial = '{"private-key":' + token + '}'
+                self.body = START + b"".join(line + b"\n\n" for line in tool_frames(partial)) + STOP
+                log = io.StringIO()
+                with redirect_stderr(log):
+                    response = await self.post()
+                events = [json.loads(line[6:]) for line in response.content.splitlines()
+                          if line.startswith(b"data: ")]
+                call_id = events[1]["content_block"]["id"]
+                entry = self.bridge.invocations.active.pop(call_id)
+                self.assertEqual((entry.phase, entry.arguments), ("issued", digest(expected)))
+                self.assertEqual(log.getvalue().splitlines(), [] if expected else [
+                    "AW managed model response warning: reason=invalid_tool_input "
+                    f"partial_bytes={len(partial)}",
+                ])
+                self.assertIsNone(self.bridge.failure)
+
+    async def test_initial_tool_input_overflow_matches_the_cli(self):
+        self.content_type = "text/event-stream"
+        start, blank, stop = tool_frames("")
+        start = start.replace(b'{"initial": 1}', b'{"x":1e400}')
+        self.body = START + b"\n\n".join([start, blank, stop]) + b"\n\n" + STOP
+        response = await self.post()
+        events = [json.loads(line[6:]) for line in response.content.splitlines() if line.startswith(b"data: ")]
+        call_id = events[1]["content_block"]["id"]
+        self.assertEqual(json.loads(events[2]["delta"]["partial_json"]), {"x": None})
+        self.assertEqual(self.bridge.invocations.active[call_id].arguments, digest({"x": None}))
+
+    async def test_unrepresentable_input_rejects_only_its_invocation(self):
+        self.content_type = "text/event-stream"
+        inputs = (r'{"private-key":"\ud800"}', '{"private-key":"\ud800"}',
+                  r'{"\udfff":"private-value"}', '{"private-key":' + '[' * 40 + '0' + ']' * 40 + '}',
+                  '{"private-key":' + '[' * 1500 + '0' + ']' * 1500 + '}')
+        for partial in inputs:
+            with self.subTest(size=len(partial)):
+                self.body = START + b"".join(frame + b"\n\n" for frame in tool_frames(partial)) + STOP
+                log = io.StringIO()
+                with redirect_stderr(log):
+                    response = await self.post()
+                events = [json.loads(line[6:]) for line in response.content.splitlines()
+                          if line.startswith(b"data: ")]
+                call_id = events[1]["content_block"]["id"]
+                self.assertEqual(events[2]["delta"]["partial_json"], "{}")
+                entry = self.bridge.invocations.active[call_id]
+                self.assertEqual((entry.phase, entry.sequence, entry.arguments), ("rejected", 0, None))
+                self.assertEqual(self.bridge.scope.registered, 0)
+                self.assertEqual(log.getvalue().splitlines(), [
+                    "AW managed model response warning: reason=unrepresentable_tool_input "
+                    f"partial_bytes={len(partial.encode(errors='surrogatepass'))}",
+                ])
+                result = {"type": "tool_result", "tool_use_id": call_id, "is_error": False}
+                history = {"messages": [{"content": [result]}]}
+                with self.assertRaisesRegex(RuntimeError, "returned a success"):
+                    await self.bridge.invocations.check_model_request(history)
+                result["is_error"] = True
+                self.body = START + STOP
+                self.assertEqual((await self.post(json.dumps(history).encode())).status_code, 200)
+                self.assertFalse(self.bridge.invocations.active)
+                self.assertFalse(self.stopped.is_set())
+        self.assertEqual(self.bridge.scope.finished, 0)
+
+    async def test_surrogate_pair_split_across_tool_deltas_is_admitted(self):
+        self.content_type = "text/event-stream"
+        start, high, stop = tool_frames('{"s":"\ud83d')
+        _, low, _ = tool_frames('\ude00"}')
+        self.body = START + b"\n\n".join([start, high, low, stop]) + b"\n\n" + STOP
+        response = await self.post()
+        events = [json.loads(line[6:]) for line in response.content.splitlines() if line.startswith(b"data: ")]
+        entry = self.bridge.invocations.active[events[1]["content_block"]["id"]]
+        self.assertEqual((entry.phase, entry.arguments), ("issued", digest({"s": "\U0001f600"})))
+
+    async def test_text_delta_with_surrogate_round_trips(self):
+        self.content_type = "text/event-stream"
+        events = [
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "\ud800"}},
+            {"type": "content_block_stop", "index": 0},
+        ]
+        self.body = START + b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" for e in events) + STOP
+        response = await self.post()
+        forwarded = [json.loads(line[6:]) for line in response.content.splitlines() if line.startswith(b"data: ")]
+        self.assertEqual(forwarded[2], events[1])
+        self.assertIsNone(self.bridge.failure)
+
     async def test_non_object_tool_input_recovers_with_empty_arguments(self):
         self.content_type = "text/event-stream"
         for payload in ("[1, 2, 3]", '"private-tool"', "123", "null"):
@@ -310,7 +400,7 @@ class StreamContractMixin:
         events = [json.loads(line[6:]) for line in response.content.splitlines()
                   if line.startswith(b"data: ")]
         self.assertEqual([event["type"] for event in events], [
-            "message_start", "content_block_start", "content_block_delta", "error",
+            "message_start", "content_block_start", "error",
         ])
         self.assertFalse(self.bridge.invocations.active)
         self.assertEqual(self.bridge.scope.registered, 0)

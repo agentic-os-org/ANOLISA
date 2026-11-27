@@ -17,14 +17,14 @@ if __package__:
     from aw_sdk.aw_http_hosts import allows_http
     from .aw_claude import CallbackFailure
     from .aw_model_stream import (
-        MAX_FRAME, MessageStream, event_name, json_error_label, relay_log, rewrite_message,
+        MAX_FRAME, MessageStream, decode_json, event_name, json_error_label, relay_log, rewrite_message,
         sse_fields, sse_frames,
     )
 else:
     from aw_http_hosts import allows_http
     from aw_claude import CallbackFailure
     from aw_model_stream import (
-        MAX_FRAME, MessageStream, event_name, json_error_label, relay_log, rewrite_message,
+        MAX_FRAME, MessageStream, decode_json, event_name, json_error_label, relay_log, rewrite_message,
         sse_fields, sse_frames,
     )
 
@@ -347,7 +347,7 @@ class ModelRelay:
                            data_bytes=len(data), data_lines=count, blocks_open=len(stream.blocks),
                            stream_started=int(stream.started), stream_stopped=int(stream.stopped))
             try:
-                value = json.loads(data.decode("utf-8"))
+                value = decode_json(data.decode("utf-8"))
             except ValueError:
                 details["payload_kind"] = "done" if data == b"[DONE]" else "non_json"
                 raise
@@ -356,8 +356,8 @@ class ModelRelay:
             details.update(stage="stream_event",
                            sse_event=event_name(value.get("type") if isinstance(value, dict) else None))
             for outgoing in await stream.event(value):
-                await send(writer, b"event: " + outgoing["type"].encode() + b"\ndata: "
-                           + json.dumps(outgoing, ensure_ascii=False).encode() + b"\n\n")
+                payload = json.dumps(outgoing, ensure_ascii=False).encode("utf-8", "backslashreplace")
+                await send(writer, b"event: " + outgoing["type"].encode() + b"\ndata: " + payload + b"\n\n")
             details.clear()
             details.update(http_details)
         if not stream.stopped:

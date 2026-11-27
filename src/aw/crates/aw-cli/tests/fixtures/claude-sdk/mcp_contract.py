@@ -110,11 +110,14 @@ def claim(tool, scope, on_error="report"):
     bridge.invocations = Invocations(bridge)
     managed.claim("local", bridge)
 
-    async def invoke(arguments):
+    async def invoke(arguments, *, rejected=False):
         ledger = bridge.invocations
         ledger.begin()
         entry = ledger.produce("mcp__local__touch")
-        await ledger.register(entry, arguments)
+        if rejected:
+            entry.phase = "rejected"
+        else:
+            await ledger.register(entry, arguments)
         ticket = ledger.reserve("native-request", entry.call_id, "before")
         token = dispatch.set(ticket)
         try:
@@ -127,6 +130,18 @@ def claim(tool, scope, on_error="report"):
 
 
 class HandlerOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejected_input_never_runs_the_handler(self):
+        async def business(arguments):
+            self.fail("rejected invocation reached the handler")
+
+        scope = Scope()
+        managed, invoke = claim(SdkMcpTool("touch", "Fixture", {}, business), scope)
+        result = await invoke({}, rejected=True)
+        self.assertTrue(result["is_error"])
+        self.assertFalse(scope.events)
+        self.assertIsNone(managed.bridge.failure)
+        self.assertFalse(managed.bridge.invocations.active)
+
     async def test_claim_metadata_cannot_redirect_registered_policy(self):
         calls = []
 
