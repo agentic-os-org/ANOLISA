@@ -400,7 +400,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Sun Nov 22 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Fri Nov 27 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Add statistics retention, manual pruning, and database compaction
+- Add per-domain RTK routing and command exclusions
+- Compact verbose C/C++ build output and eligible failed command output
+- Fix macOS diagnostic path handling and interactive statistics confirmation
+
+* Sun Nov 22 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.9.7-1
 - Compact recognized CTest, CMake Unix Makefiles, and Ninja output in PostTool
 - Compact Playwright MCP snapshots with element refs and Stash recovery
 - Read literal run directory paths in the L4 reproducibility report

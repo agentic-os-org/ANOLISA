@@ -9,6 +9,29 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-11-27
+
+### Added
+
+- PostTool compacts repeated flags and paths in recognized verbose CMake, Ninja, and GNU Make C/C++ build logs without writing to Stash. Compiler diagnostics and build failures remain visible ([#10710](https://github.com/agentic-os-org/ANOLISA/pull/10710)).
+- On hosts that support output replacement and supply the exit code, PostTool can compress eligible failed shell output while preserving failure diagnostics. Omitting log records requires Stash and a supported recovery path. Protocol v2 callers that send the new optional fields must upgrade Core first or at the same time ([#10711](https://github.com/agentic-os-org/ANOLISA/pull/10711), [#10775](https://github.com/agentic-os-org/ANOLISA/pull/10775)).
+- Configure per-domain RTK routing with `rtk_rollout` and exempt command prefixes from both PreTool rewriting and PostTool compression with `exclude_commands`. The CLI and Python SDK honor the settings in `~/.tokenless/config.json` and their environment overrides ([#10848](https://github.com/agentic-os-org/ANOLISA/pull/10848)).
+- Use `tokenless stats prune` to apply retention manually and `tokenless stats compact` to reclaim database space. `tokenless stats status` reports the effective retention windows and their sources ([#10780](https://github.com/agentic-os-org/ANOLISA/pull/10780)).
+
+### Changed
+
+- Local statistics now expire after 30 days by default, with saved before/after text cleared after 7 days. To keep existing history indefinitely, set `stats_retention_days` and `stats_text_retention_days` to `0` before upgrading. The corresponding `TOKENLESS_STATS_RETENTION_DAYS` and `TOKENLESS_STATS_TEXT_RETENTION_DAYS` overrides also accept `0`. Compaction can truncate the statistics WAL, and large Stash expiry purges can checkpoint the Stash WAL while preserving read-only retrieval ([#10780](https://github.com/agentic-os-org/ANOLISA/pull/10780)).
+- Hermes and DeepSeek Harness disable PreTool RTK block-and-suggest by default. To opt in, set `TOKENLESS_HERMES_PRETOOL_RTK=1` for Hermes or `rtkEnabled: true` for DeepSeek Harness. PostTool no longer emits the separate `[tokenless:env]` attribution hint ([#10775](https://github.com/agentic-os-org/ANOLISA/pull/10775)).
+- **Breaking for unified source installations:** Builds that select AW install Tokenless Core and its AW provider. Select `cosh-ng` alongside them to receive the native Cosh extension. To install the full standalone adapter bundle, select Tokenless without AW ([#9736](https://github.com/agentic-os-org/ANOLISA/pull/9736)).
+
+### Fixed
+
+- `tokenless stats clear` requires terminal input and output for interactive confirmation. Automation can use `--yes` ([#10104](https://github.com/agentic-os-org/ANOLISA/pull/10104)).
+- The Python SDK leaves PreTool arguments unchanged if Core returns an unexpected operation or protocol version ([#10217](https://github.com/agentic-os-org/ANOLISA/pull/10217)).
+- On macOS, `TOKENLESS_SLS_PATH` accepts supported paths under `/tmp`, `/private/tmp`, and `/private/var/log`, and the environment check can report file-read access without Linux's `/proc` ([#10530](https://github.com/agentic-os-org/ANOLISA/pull/10530)).
+- Selective Claw rolls back failed SQLite startup migrations so they can be retried, and avoids reindexing unchanged message text when saving summaries ([#10418](https://github.com/agentic-os-org/ANOLISA/pull/10418), [#10263](https://github.com/agentic-os-org/ANOLISA/pull/10263)).
+- The prebuilt wheel check now requires a single importable native SDK extension for the target platform ([#10847](https://github.com/agentic-os-org/ANOLISA/pull/10847)).
+
 ## [0.9.7] - 2026-11-22
 
 ### Added

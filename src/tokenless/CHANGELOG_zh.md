@@ -9,6 +9,29 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.9.8] - 2026-11-27
+
+### 新增
+
+- PostTool 可压缩可识别的详细模式 CMake、Ninja 和 GNU Make C/C++ 构建日志中的重复参数与路径，无需写入 Stash。编译器诊断和构建失败信息仍然可见（[#10710](https://github.com/agentic-os-org/ANOLISA/pull/10710)）。
+- 宿主支持输出替换并提供退出码时，PostTool 可压缩符合条件的失败 Shell 输出并保留失败诊断。省略日志记录需要 Stash 和受支持的恢复路径。发送新增可选字段的 Protocol v2 调用方须先升级 Core，或同步升级（[#10711](https://github.com/agentic-os-org/ANOLISA/pull/10711)、[#10775](https://github.com/agentic-os-org/ANOLISA/pull/10775)）。
+- 可用 `rtk_rollout` 按命令域配置 RTK 路由，用 `exclude_commands` 按命令前缀同时跳过 PreTool 改写和 PostTool 压缩。CLI 和 Python SDK 都读取 `~/.tokenless/config.json` 中的配置，并支持环境变量覆盖（[#10848](https://github.com/agentic-os-org/ANOLISA/pull/10848)）。
+- 可用 `tokenless stats prune` 手动执行保留策略，用 `tokenless stats compact` 回收数据库空间。`tokenless stats status` 会显示生效的保留期限及其来源（[#10780](https://github.com/agentic-os-org/ANOLISA/pull/10780)）。
+
+### 变更
+
+- 本地统计记录默认保留 30 天，保存的压缩前后正文默认保留 7 天。要长期保留现有历史，请在升级前将 `stats_retention_days` 和 `stats_text_retention_days` 设为 `0`。对应的环境变量 `TOKENLESS_STATS_RETENTION_DAYS` 和 `TOKENLESS_STATS_TEXT_RETENTION_DAYS` 也支持设为 `0`。数据库整理可截断统计 WAL，大批量清理过期 Stash 时可对其 WAL 执行检查点，并保留只读恢复能力（[#10780](https://github.com/agentic-os-org/ANOLISA/pull/10780)）。
+- Hermes 和 DeepSeek Harness 默认关闭 PreTool RTK 的阻止并建议模式。Hermes 可设置 `TOKENLESS_HERMES_PRETOOL_RTK=1`，DeepSeek Harness 可设置 `rtkEnabled: true` 来启用该模式。PostTool 移除了单独的 `[tokenless:env]` 归因提示（[#10775](https://github.com/agentic-os-org/ANOLISA/pull/10775)）。
+- **统一源码安装的破坏性变更：** 选择 AW 时安装 Tokenless Core 及其 AW Provider。同时选择 `cosh-ng` 可安装原生 Cosh 扩展。需要完整的独立适配器时，请单独选择 Tokenless，且不要选择 AW（[#9736](https://github.com/agentic-os-org/ANOLISA/pull/9736)）。
+
+### 修复
+
+- `tokenless stats clear` 的交互确认要求输入和输出均连接终端。自动化可使用 `--yes`（[#10104](https://github.com/agentic-os-org/ANOLISA/pull/10104)）。
+- Core 返回的操作类型或协议版本不符合预期时，Python SDK 保留原始 PreTool 参数（[#10217](https://github.com/agentic-os-org/ANOLISA/pull/10217)）。
+- macOS 上的 `TOKENLESS_SLS_PATH` 接受 `/tmp`、`/private/tmp` 和 `/private/var/log` 下受支持的路径，环境检查无需 Linux 的 `/proc` 即可报告文件读取权限（[#10530](https://github.com/agentic-os-org/ANOLISA/pull/10530)）。
+- Selective Claw 会回滚失败的 SQLite 启动迁移以便重试，保存摘要时会跳过未变更消息正文的重建索引（[#10418](https://github.com/agentic-os-org/ANOLISA/pull/10418)、[#10263](https://github.com/agentic-os-org/ANOLISA/pull/10263)）。
+- 预构建 wheel 校验要求包内仅包含一个与目标平台匹配且可导入的原生 SDK 扩展（[#10847](https://github.com/agentic-os-org/ANOLISA/pull/10847)）。
+
 ## [0.9.7] - 2026-11-22
 
 ### 新增

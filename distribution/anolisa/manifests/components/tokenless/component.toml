@@ -1,6 +1,6 @@
 [component]
 name = "tokenless"
-version = "0.9.7"
+version = "0.9.8"
 layer = "runtime"
 domain = "optimization"
 display_name = "Tokenless"
