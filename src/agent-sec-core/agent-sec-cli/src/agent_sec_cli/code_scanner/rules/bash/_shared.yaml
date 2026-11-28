@@ -2,28 +2,28 @@ sensitive_file_paths:
   - /etc/shadow
   - /etc/gshadow
   - ~/\.ssh
-  - /etc/ssh/
+  - /etc/ssh\b
   - ~/\.gnupg
   - \.env\b
   - /etc/machine-id
   - /etc/passwd
   - /etc/sudoers
-  - /etc/pam\.d/
-  - /etc/security/
+  - /etc/pam\.d\b
+  - /etc/security\b
   - /etc/sysctl\.conf
-  - /etc/sysctl\.d/
-  - /boot/
-  - /usr/lib/systemd/
-  - /etc/systemd/system/
+  - /etc/sysctl\.d\b
+  - /boot\b
+  - /usr/lib/systemd\b
+  - /etc/systemd/system\b
   - /etc/group
   - /etc/hostname
   - /etc/hosts
   - /etc/crontab
-  - /etc/cron\.d/
-  - /var/spool/cron/
+  - /etc/cron\.d\b
+  - /var/spool/cron\b
   - ~/\.bash_history
   - ~/\.zsh_history
-  - /etc/kubernetes/
+  - /etc/kubernetes\b
   - kubeconfig
   # Agent runtime credential and auth state files.
   - ~/\.codex/auth\.json\b
