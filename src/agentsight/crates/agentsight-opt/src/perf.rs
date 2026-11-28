@@ -103,7 +103,7 @@ pub fn compute_stats(trajectory: &AtifTrajectory) -> Result<PerfStats> {
 /// the same wall-clock second and the model/tool/idle split leaves its
 /// 0..wall domain (observed: tool+model = 2× wall on start-less traces).
 /// When all of that previous step's tool completions are recorded, inference
-/// can instead be estimated from their latest result to this step's end.
+/// can resume after both the latest result and the previous step's final content.
 /// Returns (union of inference windows, individual request durations).
 /// Parallel requests consume wall time once but retain their own duration
 /// for per-turn cache analysis.
@@ -120,16 +120,20 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
         if step.is_copied_context == Some(true) {
             continue;
         }
-        let step_end = step.end_ts();
+        let activity_end = step.activity_end_ts();
         if step.is_agent() {
+            let has_calls = !step.calls().is_empty();
+            let step_ts = step.end_ts();
+            let inference_end = if has_calls { step_ts } else { activity_end };
             let start = step
                 .start_ts()
                 .or(if prev_agent_had_calls && !user_intervened {
                     prev_tool_end
                 } else {
                     prev_ts
-                });
-            if let (Some(s), Some(e)) = (start, step_end) {
+                })
+                .or(step_ts);
+            if let (Some(s), Some(e)) = (start, inference_end) {
                 let dur = (e - s).as_seconds_f64();
                 if dur > 0.0 {
                     turns.push(dur);
@@ -139,13 +143,15 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
                     }
                 }
             }
-            prev_agent_had_calls = !step.calls().is_empty();
+            prev_agent_had_calls = has_calls;
             let completions: Option<Vec<_>> = step
                 .calls()
                 .iter()
                 .map(|call| step.tool_result_ts(call))
                 .collect();
-            prev_tool_end = completions.and_then(|timestamps| timestamps.into_iter().max());
+            prev_tool_end = completions
+                .and_then(|timestamps| timestamps.into_iter().max())
+                .map(|end| end.max(activity_end.unwrap_or(end)));
             user_intervened = false;
         } else if step.is_user() {
             user_intervened = true;
@@ -153,7 +159,7 @@ fn compute_model_turn_durations(traj: &AtifTrajectory) -> (f64, Vec<f64>) {
         }
         // Clear prev_ts across steps without a timestamp so an unmeasured user
         // or intermediate gap is never attributed to the next model turn.
-        prev_ts = step_end;
+        prev_ts = activity_end;
     }
 
     let total = busy_window_secs(windows);
@@ -177,7 +183,9 @@ fn detect_idle_gaps(traj: &AtifTrajectory, threshold: f64) -> Vec<IdleGap> {
         if !step.is_agent() || !step.has_text_output() || !step.calls().is_empty() {
             continue;
         }
-        let Some(end) = step.end_ts() else { continue };
+        let Some(end) = step.activity_end_ts() else {
+            continue;
+        };
 
         for (offset, next) in steps[i + 1..].iter().enumerate() {
             if next.is_agent() {
