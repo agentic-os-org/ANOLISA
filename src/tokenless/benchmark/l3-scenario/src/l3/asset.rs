@@ -76,6 +76,9 @@ pub struct Scenario {
     /// Tool schemas sent before the model call, when the scenario has any.
     #[serde(default)]
     pub tools: Option<Vec<Value>>,
+    /// Original critical facts for capability overlays; never added to model-visible messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub critical_facts: Vec<String>,
 }
 
 /// Why a side cannot act on a scenario, or that it can.
@@ -129,44 +132,37 @@ impl Scenario {
             .count()
     }
 
-    /// What tokenless can act on in this scenario, decided from the payload.
+    /// Test-only applicability probe in no-recovery mode; the driver uses recorded entry points.
     ///
-    /// Two entry points are reachable from a committed conversation:
-    /// `compress-schema` over a tools array (its BeforeModel hook) and
-    /// `compress-response` over JSON tool responses (its PostToolUse hook). The
-    /// remaining two compressors are out of scope here by construction — TOON
-    /// is a pipeline step after `compress-response`, and rtk rewrites shell
-    /// commands, which these assets do not carry.
-    pub fn tokenless_applicability(&self) -> Applicability {
-        let mut entry_points = Vec::new();
-        if self.tools.as_ref().is_some_and(|t| !t.is_empty()) {
-            entry_points.push("compress-schema (tools array)".to_string());
+    /// # Errors
+    /// Tokenizer or Runtime failures are errors, never reported as missing capability.
+    #[cfg(test)]
+    pub(crate) fn tokenless_applicability(&self) -> Result<Applicability, L3Error> {
+        let tk = super::tokenizer::Tokenizers::load()?;
+        let result = super::tokenless_side::run(self, &tk)?;
+        if result.entry_points.is_empty() && !result.gap_reasons.is_empty() {
+            return Ok(Applicability::NoEntryPoint {
+                reason: result.gap_reasons.join("; "),
+            });
         }
-        let json_tools = self.json_tool_messages().len();
-        if json_tools > 0 {
-            entry_points.push(format!(
-                "compress-response ({json_tools} JSON tool messages)"
-            ));
-        }
+        Ok(self.applicability_from_entry_points(result.entry_points))
+    }
+
+    /// Explains applicability from entry points already recorded by this run.
+    pub fn applicability_from_entry_points(&self, entry_points: Vec<String>) -> Applicability {
         if !entry_points.is_empty() {
             return Applicability::Applicable { entry_points };
         }
-
-        // Nothing matched: say precisely why, since this is the layer's most
-        // load-bearing finding.
-        let total_tools = self.tool_message_count();
-        let reason = if total_tools > 0 {
-            format!(
-                "{total_tools} tool message(s), none parsing as JSON: tokenless' \
-                 compressors all take structured input, so a raw {} payload has \
-                 no entry point (the CLI reports a JSON parse error and the \
-                 production hook skips)",
-                self.content_type
-            )
+        let reason = if self.tool_message_count() > 0 {
+            "no eligible production PostTool domain under the fixture tool/origin contract; \
+             no recovery path was assumed from role alone"
+                .to_owned()
+        } else if self.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+            "BeforeModel did not select an eligible schema candidate under the current recovery contract".to_owned()
         } else {
             "no tools array and no tool messages: the payload sits in system or \
              user prose, and tokenless ships no prose compressor"
-                .to_string()
+                .to_owned()
         };
         Applicability::NoEntryPoint { reason }
     }
@@ -241,6 +237,7 @@ mod tests {
             model_limit: 200_000,
             messages,
             tools,
+            critical_facts: Vec::new(),
         }
     }
 
@@ -260,8 +257,19 @@ mod tests {
 
     #[test]
     fn json_tool_message_is_applicable() {
-        let s = scenario_with(vec![tool_msg(r#"[{"id":1}]"#)], None);
-        assert!(s.tokenless_applicability().is_applicable());
+        let small = scenario_with(vec![tool_msg(r#"[{"id":1}]"#)], None);
+        assert!(
+            !small.tokenless_applicability().unwrap().is_applicable(),
+            "below the production minimum-size gate"
+        );
+        let payload = serde_json::to_string(
+            &(0..40)
+                .map(|id| serde_json::json!({"id":id, "message":"fixture evidence"}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let s = scenario_with(vec![tool_msg(&payload)], None);
+        assert!(s.tokenless_applicability().unwrap().is_applicable());
         assert_eq!(s.json_tool_messages(), vec![0]);
     }
 
@@ -270,7 +278,7 @@ mod tests {
         // The role says "tool", but the payload is prose — tokenless rejects it.
         // Deciding on the role alone would report a capability gap as 0%.
         let s = scenario_with(vec![tool_msg("The API supports rate limiting.")], None);
-        let applicability = s.tokenless_applicability();
+        let applicability = s.tokenless_applicability().unwrap();
         assert!(!applicability.is_applicable());
         assert_eq!(s.tool_message_count(), 1);
         assert!(s.json_tool_messages().is_empty());
@@ -279,7 +287,7 @@ mod tests {
     #[test]
     fn raw_python_tool_message_has_no_entry_point() {
         let s = scenario_with(vec![tool_msg("def foo(x):\n    return x + 1\n")], None);
-        assert!(!s.tokenless_applicability().is_applicable());
+        assert!(!s.tokenless_applicability().unwrap().is_applicable());
     }
 
     #[test]
@@ -290,7 +298,7 @@ mod tests {
             vec![user_msg("find the retry policy")],
             Some(vec![serde_json::json!({"type": "function"})]),
         );
-        let applicability = s.tokenless_applicability();
+        let applicability = s.tokenless_applicability().unwrap();
         assert!(applicability.is_applicable());
         match applicability {
             Applicability::Applicable { entry_points } => {
@@ -303,7 +311,7 @@ mod tests {
     #[test]
     fn prose_only_conversation_reports_missing_prose_compressor() {
         let s = scenario_with(vec![user_msg("a long document ...")], None);
-        match s.tokenless_applicability() {
+        match s.tokenless_applicability().unwrap() {
             Applicability::NoEntryPoint { reason } => {
                 assert!(reason.contains("prose compressor"), "got: {reason}");
             }
@@ -314,6 +322,6 @@ mod tests {
     #[test]
     fn empty_tools_array_is_not_an_entry_point() {
         let s = scenario_with(vec![user_msg("hi")], Some(vec![]));
-        assert!(!s.tokenless_applicability().is_applicable());
+        assert!(!s.tokenless_applicability().unwrap().is_applicable());
     }
 }

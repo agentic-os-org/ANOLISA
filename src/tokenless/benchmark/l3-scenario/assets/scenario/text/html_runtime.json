@@ -1,0 +1,17 @@
+{
+  "suite": "scenario",
+  "scenario": "html_runtime",
+  "display_name": "HTML capability overlay",
+  "content_type": "text",
+  "size_label": "complete HTML document with content and non-content sections",
+  "source": {"reference": "Tokenless current HTML runtime capability overlay", "headroom_native": false, "headroom_revision": null, "headroom_dirty": null},
+  "model_limit": 200000,
+  "critical_facts": ["required_fact_heading", "required_fact_value", "required_fact_code = 42"],
+  "messages": [
+    {"role": "system", "content": "Answer strictly from the document content, not its navigation."},
+    {"role": "user", "content": "Read the entire web page and its code sample."},
+    {"role": "assistant", "content": null, "tool_calls": [{"id": "html-overlay-call", "type": "function", "function": {"name": "web_fetch", "arguments": "{\"url\":\"https://example.invalid/fixture\"}"}}]},
+    {"role": "tool", "tool_call_id": "html-overlay-call", "content": "<!doctype html><html><head><title>Fixture page</title><style>.nav{color:red}.unused01{padding:1px}.unused02{padding:2px}.unused03{padding:3px}.unused04{padding:4px}.unused05{padding:5px}.unused06{padding:6px}.unused07{padding:7px}.unused08{padding:8px}.unused09{padding:9px}.unused10{padding:10px}.unused11{padding:11px}.unused12{padding:12px}.unused13{padding:13px}.unused14{padding:14px}.unused15{padding:15px}</style></head><body><nav>home products resources support navigation menu catalog login account dashboard help information footer</nav><main><h1>required_fact_heading</h1><p>The original page records required_fact_value as its evidence.</p><pre><code>required_fact_code = 42</code></pre></main></body></html>"},
+    {"role": "user", "content": "State the heading, recorded value and full code sample."}
+  ]
+}

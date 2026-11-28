@@ -284,6 +284,13 @@ test-integration: test-hook-parity test-claude-code-detect test-stale-helper-cle
 test-headroom-pipeline-worker:
 	python3 tests/test_headroom_pipeline_worker_protocol.py
 
+.PHONY: test-benchmark-l3-worker
+L3_TEST_PYTHON ?= python3
+test-benchmark-l3-worker:
+	$(L3_TEST_PYTHON) benchmark/l3-scenario/tests/test_headroom_ccr_evidence.py
+
+test-integration: test-benchmark-l3-worker
+
 # Keep this standalone entry free of Rust/plugin builds. CI runs the shared
 # suites through test-integration and only the installer through test-adapters.
 test-qwenwork: test-qwenwork-hooks test-qwenwork-install

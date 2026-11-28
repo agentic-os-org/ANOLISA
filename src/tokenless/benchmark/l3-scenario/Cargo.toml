@@ -23,6 +23,16 @@
 # working-tree sources next to it.
 [workspace]
 
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tiktoken-rs = "0.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rand = "0.8"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+
 [package]
 name = "tokenless-l3-bench"
 version = "0.7.1"
@@ -35,17 +45,19 @@ description = "L3 scenario-layer benchmark (tokenless vs headroom) over whole-co
 path = "src/lib.rs"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokenless-schema = { path = "../../crates/tokenless-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokenless-runtime = { path = "../../crates/tokenless-runtime" }
+tokenless-protocol = { path = "../../crates/tokenless-protocol" }
+tokenless-ccr = { path = "../../crates/tokenless-ccr" }
 # Same headline token counter as L2, so L2 and L3 numbers are on one scale.
-tiktoken-rs = "0.11"
+tiktoken-rs = { workspace = true }
 # blocking + rustls keeps the probe client free of tokio and OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-rand = "0.8"
-thiserror = "2"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-anyhow = "1"
+reqwest = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
 
 [profile.release]
 opt-level = 3

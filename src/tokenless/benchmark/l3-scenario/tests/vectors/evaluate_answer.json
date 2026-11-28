@@ -1,0 +1,30 @@
+{
+  "description": "evaluate 与 f1 由 Rust 测试逐条执行；non_executed_boundary_examples 仅记录外部短答案边界约定的文档示例，不声称本仓验证这些规则。",
+  "f1": [
+    {"source": "probe.rs::f1_matches_headroom_definition", "prediction": "disk full", "truth": "disk full", "f1": 1.0},
+    {"source": "probe.rs::f1_matches_headroom_definition", "prediction": "", "truth": "disk full", "f1": 0.0},
+    {"source": "probe.rs::f1_matches_headroom_definition", "prediction": "nothing here", "truth": "disk full", "f1": 0.0},
+    {"source": "probe.rs::f1_matches_headroom_definition", "prediction": "the disk is full", "truth": "disk full", "f1": 0.6666666666666666},
+    {"source": "headroom compute_f1 set semantics", "prediction": "full full disk", "truth": "disk full", "f1": 1.0}
+  ],
+  "evaluate": [
+    {"source": "probe.rs::contains_is_the_verdict_not_exact_match", "rust": true, "prediction": "The current date is 2025-01-06.", "truth": "2025-01-06", "contains": true, "exact": false},
+    {"source": "headroom evaluate_answer lowercase+strip", "rust": true, "prediction": "  SEARCH_CODE  ", "truth": "search_code", "contains": true, "exact": true},
+    {"source": "headroom evaluate_answer", "rust": true, "prediction": "The tool is search_code", "truth": "search_code", "contains": true, "exact": false},
+    {"source": "headroom evaluate_answer", "rust": true, "prediction": "UNKNOWN", "truth": "E_TIMEOUT_DEEP", "contains": false, "exact": false},
+    {"source": "plain contains for long keys", "rust": true, "prediction": "deadline exceeded while awaiting upstream response!", "truth": "deadline exceeded while awaiting upstream response", "contains": true, "exact": false}
+  ],
+  "non_executed_boundary_examples": [
+    {"source": "boundary rule: digit inside a larger number", "boundary_rule": true, "prediction": "10", "truth": "1", "contains": false, "exact": false},
+    {"source": "boundary rule: number in a sentence", "boundary_rule": true, "prediction": "The answer is 1.", "truth": "1", "contains": true, "exact": false},
+    {"source": "boundary rule: decimal continuation", "boundary_rule": true, "prediction": "1.5", "truth": "1", "contains": false, "exact": false},
+    {"source": "boundary rule: sign", "boundary_rule": true, "prediction": "-1", "truth": "1", "contains": false, "exact": false},
+    {"source": "boundary rule: digit grouping", "boundary_rule": true, "prediction": "1,000", "truth": "1", "contains": false, "exact": false},
+    {"source": "boundary rule: CJK neighbours are not word characters", "boundary_rule": true, "prediction": "共3条", "truth": "3", "contains": true, "exact": false},
+    {"source": "boundary rule: short word inside a longer one", "boundary_rule": true, "prediction": "yesterday", "truth": "yes", "contains": false, "exact": false},
+    {"source": "boundary rule: short word with punctuation", "boundary_rule": true, "prediction": "Yes.", "truth": "yes", "contains": true, "exact": false},
+    {"source": "boundary rule: multi-digit number", "boundary_rule": true, "prediction": "There are 250 elements", "truth": "250", "contains": true, "exact": false},
+    {"source": "boundary rule: multi-digit number inside a longer one", "boundary_rule": true, "prediction": "2500", "truth": "250", "contains": false, "exact": false},
+    {"source": "boundary rule: punctuation key", "boundary_rule": true, "prediction": "It returns `>>`", "truth": ">>", "contains": true, "exact": false}
+  ]
+}

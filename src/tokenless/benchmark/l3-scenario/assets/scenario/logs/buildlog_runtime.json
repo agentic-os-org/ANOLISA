@@ -1,0 +1,17 @@
+{
+  "suite": "scenario",
+  "scenario": "buildlog_runtime",
+  "display_name": "BuildLog capability overlay",
+  "content_type": "logs",
+  "size_label": "32 compile lines and one diagnostic",
+  "source": {"reference": "Tokenless current BuildLog runtime capability overlay", "headroom_native": false, "headroom_revision": null, "headroom_dirty": null},
+  "model_limit": 200000,
+  "critical_facts": ["required_fact_type_mismatch", "src/required_source.rs:12:4", "expected bool, found String"],
+  "messages": [
+    {"role": "system", "content": "Inspect the tool evidence without inferring missing facts."},
+    {"role": "user", "content": "Explain the compilation diagnostic."},
+    {"role": "assistant", "content": null, "tool_calls": [{"id": "buildlog-overlay-call", "type": "function", "function": {"name": "exec", "arguments": "{\"command\":\"cargo check\"}"}}]},
+    {"role": "tool", "tool_call_id": "buildlog-overlay-call", "content": "   Compiling fixture_dependency_00 v1.0.0\n   Compiling fixture_dependency_01 v1.0.0\n   Compiling fixture_dependency_02 v1.0.0\n   Compiling fixture_dependency_03 v1.0.0\n   Compiling fixture_dependency_04 v1.0.0\n   Compiling fixture_dependency_05 v1.0.0\n   Compiling fixture_dependency_06 v1.0.0\n   Compiling fixture_dependency_07 v1.0.0\n   Compiling fixture_dependency_08 v1.0.0\n   Compiling fixture_dependency_09 v1.0.0\n   Compiling fixture_dependency_10 v1.0.0\n   Compiling fixture_dependency_11 v1.0.0\n   Compiling fixture_dependency_12 v1.0.0\n   Compiling fixture_dependency_13 v1.0.0\n   Compiling fixture_dependency_14 v1.0.0\n   Compiling fixture_dependency_15 v1.0.0\n   Compiling fixture_dependency_16 v1.0.0\n   Compiling fixture_dependency_17 v1.0.0\n   Compiling fixture_dependency_18 v1.0.0\n   Compiling fixture_dependency_19 v1.0.0\n   Compiling fixture_dependency_20 v1.0.0\n   Compiling fixture_dependency_21 v1.0.0\n   Compiling fixture_dependency_22 v1.0.0\n   Compiling fixture_dependency_23 v1.0.0\n   Compiling fixture_dependency_24 v1.0.0\n   Compiling fixture_dependency_25 v1.0.0\n   Compiling fixture_dependency_26 v1.0.0\n   Compiling fixture_dependency_27 v1.0.0\n   Compiling fixture_dependency_28 v1.0.0\n   Compiling fixture_dependency_29 v1.0.0\n   Compiling fixture_dependency_30 v1.0.0\n   Compiling fixture_dependency_31 v1.0.0\nerror[E0308]: required_fact_type_mismatch\n --> src/required_source.rs:12:4\nexpected bool, found String\n"},
+    {"role": "user", "content": "State the diagnostic location and conflicting types from the evidence."}
+  ]
+}

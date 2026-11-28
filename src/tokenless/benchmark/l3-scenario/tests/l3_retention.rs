@@ -61,10 +61,58 @@ fn originals_retain_all_their_own_critical_items() {
     for s in &scenarios {
         let items = retention::critical_items(s);
         let score = retention::check(&items, &s.messages, s.tools.as_deref());
+        if !s.critical_facts.is_empty() {
+            assert!(!s.source.headroom_native);
+            let mut stripped = s.messages.clone();
+            for message in &mut stripped {
+                if message.get("role").and_then(serde_json::Value::as_str) == Some("tool") {
+                    message.insert(
+                        "content".into(),
+                        serde_json::Value::String("empty valid frame".into()),
+                    );
+                }
+            }
+            let reverse = retention::check(&items, &stripped, s.tools.as_deref());
+            assert!(
+                reverse.passed < reverse.total,
+                "{} accepts missing source facts",
+                s.scenario
+            );
+        }
         assert_eq!(
             score.passed, score.total,
             "{} lost items in its own original: {:?}",
             s.scenario, score.missing
         );
     }
+}
+
+/// Reverse control over every real scenario: a conversation whose payloads
+/// were all deleted must fail its checks, so a retention score of 100% cannot
+/// come from the normalized retry matching an empty frame.
+#[test]
+fn deleting_every_payload_fails_the_checks() {
+    let scenarios = asset::load_all(&assets()).expect("assets load");
+    let mut controls = 0;
+    for s in &scenarios {
+        let items = retention::critical_items(s);
+        if items.is_empty() {
+            continue;
+        }
+        let mut stripped = s.messages.clone();
+        for message in &mut stripped {
+            message.insert(
+                "content".into(),
+                serde_json::Value::String("empty valid frame".into()),
+            );
+        }
+        let reverse = retention::check(&items, &stripped, None);
+        assert_eq!(
+            reverse.passed, 0,
+            "{} still matches {:?} after deletion",
+            s.scenario, reverse
+        );
+        controls += 1;
+    }
+    assert!(controls > 0, "no scenario yielded a checkable item");
 }
