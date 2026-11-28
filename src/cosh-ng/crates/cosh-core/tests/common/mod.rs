@@ -9,15 +9,7 @@ const SYSTEM_TELEMETRY_DISABLED_PATH: &str = "/etc/anolisa/.telemetry_disabled";
 /// Resolve the path to the `cosh-core` binary under test.
 #[allow(dead_code)] // not every integration test binary uses this helper
 pub fn binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .expect("current test executable")
-        .parent()
-        .expect("deps directory")
-        .parent()
-        .expect("target profile directory")
-        .to_path_buf();
-    path.push("cosh-core");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_cosh-core"))
 }
 
 /// Build a `Command` for the real `cosh-core` binary with telemetry safely

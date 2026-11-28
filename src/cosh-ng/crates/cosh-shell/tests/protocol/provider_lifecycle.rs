@@ -1566,6 +1566,7 @@ while IFS= read -r prompt; do
       ;;
   esac
   case "$prompt" in
+    *'ask then cancel with EOF'*) exit 0 ;;
     *'ask then cancel with explicit result'*)
       printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"error_code":"turn_cancelled","errors":["user requested cancellation"]}'
       ;;
@@ -1574,7 +1575,11 @@ while IFS= read -r prompt; do
 done"#,
     );
     let adapter = cosh_core_active_adapter(&script);
-    for prompt in ["ask then cancel", "ask then cancel with explicit result"] {
+    for prompt in [
+        "ask then cancel",
+        "ask then cancel with EOF",
+        "ask then cancel with explicit result",
+    ] {
         let mut request = make_request(prompt);
         request.user_input = Some(prompt.into());
         let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);

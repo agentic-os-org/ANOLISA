@@ -129,10 +129,15 @@ auto_persist = false
 
 #[test]
 fn negotiated_cancellation_keeps_the_next_model_request_compatible() {
+    assert_negotiated_cancellation_reuses_process(false);
+    assert_negotiated_cancellation_reuses_process(true);
+}
+
+fn assert_negotiated_cancellation_reuses_process(shell: bool) {
     let tool = json!({"index":0,"id":"question-one","type":"function","function":{
         "name":"ask_user_question","arguments":r#"{"question":"Which branch?","options":[{"label":"main"}]}"#
     }});
-    let (frames, requests) = exchange(tool, false, true);
+    let (frames, requests) = exchange(tool, shell, true);
     assert!(
         frames
             .iter()
@@ -146,6 +151,8 @@ fn negotiated_cancellation_keeps_the_next_model_request_compatible() {
     assert_eq!(results.len(), 2, "{results:?}");
     assert_eq!(results[0]["error_code"], "turn_cancelled");
     assert_eq!(results[1]["subtype"], "success");
+    assert!(results[0]["session_id"].is_string());
+    assert_eq!(results[0]["session_id"], results[1]["session_id"]);
 
     let messages = requests[1]["messages"].as_array().unwrap();
     assert_eq!(messages[0]["role"], "system");

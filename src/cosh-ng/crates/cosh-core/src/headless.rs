@@ -1792,19 +1792,32 @@ mod tests {
             is_error: true, error_code: Some(code), ..
         }) if code == "trial_provider_error"));
 
-        let failure = combine_turn_and_persist(
-            Ok(AgentTurnOutcome::Cancelled),
-            Err(SessionError::Conflict {
-                session_id: "session".into(),
-            }),
-        )
-        .expect_err("persistence failure");
-        let result =
-            failure.interactive_result("session", Some(&trial_failure), true, true, Duration::ZERO);
-        assert!(matches!(result, Some(OutputMessage::Result {
-            is_error: true, error_code: None,
-            session_error_code: Some(code), session_error_phase: Some(phase), ..
-        }) if code == "conflict" && phase == "persist"));
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_at(&temp.path().join("sessions"), temp.path());
+        let mut runtime = runtime_for_store(store);
+        let mut concurrent = runtime.record.clone();
+        runtime
+            .store
+            .as_ref()
+            .unwrap()
+            .persist(&mut concurrent)
+            .unwrap();
+        let failure = combine_turn_and_persist(Ok(AgentTurnOutcome::Cancelled), runtime.commit())
+            .expect_err("persistence failure");
+        for code in ["trial_cancelled", "trial_provider_error"] {
+            trial_failure.code = code.into();
+            let result = failure.interactive_result(
+                "session",
+                Some(&trial_failure),
+                true,
+                true,
+                Duration::ZERO,
+            );
+            assert!(matches!(result, Some(OutputMessage::Result {
+                is_error: true, error_code: None,
+                session_error_code: Some(code), session_error_phase: Some(phase), ..
+            }) if code == "conflict" && phase == "persist"));
+        }
     }
 
     #[test]
