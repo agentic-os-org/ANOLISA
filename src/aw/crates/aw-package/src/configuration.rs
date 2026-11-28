@@ -83,9 +83,27 @@ pub(crate) fn configure_using(
     }
     selection.verify(prefix)?;
     template::verify_files(policy, &selection.packages)?;
-    for path in [*config, *state] {
-        paths::absolute(path)?;
+    paths::absolute(state)?;
+    let socket = state.join("aw.sock");
+    // State is already absolute and symlink-free. Resolve only the destination's
+    // parent: the socket normally does not exist when the config is published.
+    if config.file_name() == socket.file_name() {
+        let aliases_socket = *config == socket
+            || config.parent().is_some_and(|parent| {
+                parent
+                    .join(".")
+                    .canonicalize()
+                    .is_ok_and(|dir| dir == *state)
+            });
+        require(
+            !aliases_socket,
+            format!(
+                "{} is reserved for the daemon socket; choose a different --config filename",
+                socket.display()
+            ),
+        )?;
     }
+    paths::absolute(config)?;
     require(
         !state.starts_with(config) && (!state.exists() || state.is_dir()),
         "state must be a directory distinct from the configuration file",
@@ -106,7 +124,7 @@ pub(crate) fn configure_using(
             ),
         )?;
     }
-    socket_length("AW state", &state.join("aw.sock"))?;
+    socket_length("AW state", &socket)?;
     require(
         qoder.is_some() || openclaw.is_some(),
         "select at least one Agent entrypoint",
