@@ -156,8 +156,9 @@ def _find_latest_trace(task_id: str, dir_pattern: str | None) -> Path | None:
         if dir_pattern and not d.name.startswith(dir_pattern):
             continue
 
-        for f in d.glob(f"*{task_id}*.jsonl"):
-            if f.is_file():
+        for f in d.glob("*.jsonl"):
+            trace_task_id, _, run_id = f.stem.rpartition("_")
+            if trace_task_id == task_id and run_id and f.is_file():
                 candidates.append((f.stat().st_mtime, f))
 
     if not candidates:
