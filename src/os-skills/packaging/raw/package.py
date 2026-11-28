@@ -25,6 +25,13 @@ def sha256(data: bytes) -> str:
 
 
 def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> Path:
+    # The same epoch goes into both the tar metadata and the SBOM. Validate
+    # the stricter SBOM timestamp before replacing any release artifact.
+    try:
+        timestamp = datetime.datetime.fromtimestamp(epoch, datetime.UTC).isoformat()
+    except (OSError, OverflowError, ValueError) as error:
+        raise ValueError("--epoch must be a representable Unix timestamp in seconds") from error
+
     released = read_catalog(source)
     check_payload(source, released)
     source_contract = release_manifest((source / "component.toml").read_text(), released)
@@ -118,7 +125,7 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
         "serialNumber": f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, archive_hash)}",
         "version": 1,
         "metadata": {
-            "timestamp": datetime.datetime.fromtimestamp(epoch, datetime.UTC).isoformat(),
+            "timestamp": timestamp,
             "tools": [{"vendor": "ANOLISA", "name": "os-skills-packager", "version": "1"}],
             "component": {
                 "type": "application",
@@ -151,7 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--target-arch", choices=("x86_64", "aarch64"), required=True)
-    parser.add_argument("--epoch", type=int, required=True)
+    parser.add_argument("--epoch", type=int, required=True, help="Unix timestamp in seconds")
     args = parser.parse_args()
     if args.epoch < 0:
         parser.error("epoch must be non-negative")
