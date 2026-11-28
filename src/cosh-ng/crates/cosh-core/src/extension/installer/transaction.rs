@@ -230,6 +230,9 @@ impl ExtensionInstaller {
             previous_state: previous_state.clone(),
             phase: PendingCommitPhase::PublishedUnvalidated,
         };
+        // The journal must only outlive this call while a live, unvalidated
+        // mutation exists: recovery replays it by restoring this snapshot, so
+        // every clean failure below discards it once the store is restored.
         write_json_atomic(&journal_path, &journal)?;
 
         if expected.action == OperationAction::Update {
@@ -239,54 +242,68 @@ impl ExtensionInstaller {
                 } else if rollback.exists() {
                     rollback.as_path()
                 } else {
+                    remove_file_if_exists(&journal_path)?;
                     return Err(InstallerError::new(
                         "extension_update_recovery_conflict",
                         "both current installation and rollback candidate are missing",
                     ));
                 };
-                validate_current_update(current, expected)?;
+                if let Err(error) = validate_current_update(current, expected) {
+                    remove_file_if_exists(&journal_path)?;
+                    return Err(error);
+                }
                 if !expected.changed {
                     let result = mutation_result(operation_id, expected);
                     return Ok(PendingMutation { result, lock });
                 }
                 if destination.exists() && !rollback.exists() {
-                    fs::rename(&destination, &rollback).map_err(|error| {
-                        InstallerError::new(
+                    if let Err(error) = fs::rename(&destination, &rollback) {
+                        remove_file_if_exists(&journal_path)?;
+                        return Err(InstallerError::new(
                             "extension_update_switch_failed",
                             format!("failed to preserve previous installation: {error}"),
-                        )
-                    })?;
+                        ));
+                    }
                 } else if destination.exists() || !rollback.exists() {
+                    remove_file_if_exists(&journal_path)?;
                     return Err(InstallerError::new(
                         "extension_update_recovery_conflict",
                         "update switch state is ambiguous; keep rollback and operation for doctor",
                     ));
                 }
                 if let Err(error) = fs::rename(&staging, &destination) {
-                    let restore_error = fs::rename(&rollback, &destination).err();
-                    let detail = restore_error.map_or_else(
-                        || format!("failed to publish update: {error}"),
-                        |restore| {
-                            format!(
-                                "failed to publish update: {error}; restore also failed: {restore}"
-                            )
-                        },
-                    );
-                    return Err(InstallerError::new("extension_update_rolled_back", detail));
+                    match fs::rename(&rollback, &destination) {
+                        Ok(()) => {
+                            remove_file_if_exists(&journal_path)?;
+                            return Err(InstallerError::new(
+                                "extension_update_rolled_back",
+                                format!("failed to publish update: {error}"),
+                            ));
+                        }
+                        Err(restore) => {
+                            return Err(InstallerError::new(
+                                "extension_update_rolled_back",
+                                format!(
+                                    "failed to publish update: {error}; restore also failed: {restore}"
+                                ),
+                            ));
+                        }
+                    }
                 }
             }
         } else {
             if !already_published {
-                fs::rename(&staging, &destination).map_err(|error| {
-                    InstallerError::new(
+                if let Err(error) = fs::rename(&staging, &destination) {
+                    remove_file_if_exists(&journal_path)?;
+                    return Err(InstallerError::new(
                         "extension_commit_failed",
                         format!(
                             "failed to publish {} as {}: {error}",
                             staging.display(),
-                            destination.display()
+                            destination.display(),
                         ),
-                    )
-                })?;
+                    ));
+                }
             }
 
             let mut next_state = previous_state.clone();
@@ -298,14 +315,23 @@ impl ExtensionInstaller {
                 },
             );
             if let Err(error) = state::save(&next_state, self.state_dir_override.as_deref()) {
-                let rollback_error = fs::rename(&destination, &staging).err();
-                let detail = match rollback_error {
-                    Some(rollback) => format!(
-                        "failed to persist extension state: {error}; rollback also failed: {rollback}"
-                    ),
-                    None => format!("failed to persist extension state: {error}"),
-                };
-                return Err(InstallerError::new("extension_commit_rolled_back", detail));
+                match fs::rename(&destination, &staging) {
+                    Ok(()) => {
+                        remove_file_if_exists(&journal_path)?;
+                        return Err(InstallerError::new(
+                            "extension_commit_rolled_back",
+                            format!("failed to persist extension state: {error}"),
+                        ));
+                    }
+                    Err(rollback) => {
+                        return Err(InstallerError::new(
+                            "extension_commit_rolled_back",
+                            format!(
+                                "failed to persist extension state: {error}; rollback also failed: {rollback}"
+                            ),
+                        ));
+                    }
+                }
             }
         }
 
@@ -454,12 +480,13 @@ impl ExtensionInstaller {
             phase: UninstallPhase::Rollback,
         };
         write_json_atomic(&journal_path, &journal)?;
-        fs::rename(&installation, &rollback).map_err(|error| {
-            InstallerError::new(
+        if let Err(error) = fs::rename(&installation, &rollback) {
+            remove_file_if_exists(&journal_path)?;
+            return Err(InstallerError::new(
                 "extension_uninstall_failed",
                 format!("failed to stage uninstall for {name}: {error}"),
-            )
-        })?;
+            ));
+        }
 
         let next_state = self.state_without_user_selection(name, &metadata.source_identity)?;
         if let Err(error) = state::save(&next_state, self.state_dir_override.as_deref()) {
