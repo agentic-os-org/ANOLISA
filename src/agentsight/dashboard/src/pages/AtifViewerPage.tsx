@@ -450,6 +450,7 @@ const RoundListItem: React.FC<RoundListItemProps> = ({ round, isActive, onSelect
     <button
       onClick={onSelect}
       aria-current={isActive || undefined}
+      data-round-key={round.key}
       className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${
         isActive
           ? 'bg-blue-50 border-blue-300 shadow-sm'
@@ -1045,6 +1046,7 @@ export const AtifViewerPage: React.FC = () => {
     downloadBlob(blob, `atif-${(doc.session_id ?? 'trajectory').slice(0, 16)}.json`);
   }, [doc]);
 
+  const roundListRef = useRef<HTMLDivElement>(null);
   // Compute metrics (fallback when final_metrics is partial)
   const steps = activeDoc?.steps ?? [];
   const rounds = React.useMemo(() => groupIntoRounds(activeDoc?.steps ?? [], t), [activeDoc, t]);
@@ -1061,7 +1063,20 @@ export const AtifViewerPage: React.FC = () => {
     const count = visibleRounds.length;
     const boundary = direction === 1 ? 0 : count - 1;
     const nextIndex = matchIndex < 0 ? boundary : (matchIndex + direction + count) % count;
-    setSelectedRound(visibleRounds[nextIndex].key);
+    const key = visibleRounds[nextIndex].key;
+    setSelectedRound(key);
+
+    // Scroll only the results pane. Scrolling the row into view through all
+    // ancestors could move the page and take the filter out of view.
+    const list = roundListRef.current;
+    if (!list || list.scrollHeight <= list.clientHeight) return;
+    const row = list.querySelector<HTMLButtonElement>(`[data-round-key="${key}"]`);
+    if (!row) return;
+    const top = list.getBoundingClientRect().top + list.clientTop;
+    const bottom = top + list.clientHeight;
+    const rowBounds = row.getBoundingClientRect();
+    if (rowBounds.top < top) list.scrollTop += rowBounds.top - top;
+    else if (rowBounds.bottom > bottom) list.scrollTop += rowBounds.bottom - bottom;
   }
 
   const activeRound = rounds.find(r => r.key === selectedRound) ?? null;
@@ -1315,8 +1330,8 @@ export const AtifViewerPage: React.FC = () => {
               ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-[minmax(240px,1fr)_2fr_minmax(300px,380px)] gap-4 items-start">
                   {/* Left: round list */}
-                  <div className="space-y-2 lg:max-h-[calc(100vh-200px)] lg:overflow-y-auto lg:sticky lg:top-4 pr-1">
-                    <div className="bg-white rounded-xl border border-gray-200 p-3 space-y-2">
+                  <div className="space-y-2 lg:sticky lg:top-4 lg:flex lg:max-h-[calc(100vh-200px)] lg:flex-col">
+                    <div className="bg-white rounded-xl border border-gray-200 p-3 space-y-2 lg:shrink-0">
                       <input
                         type="search"
                         value={roundFilter}
@@ -1356,15 +1371,17 @@ export const AtifViewerPage: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    {visibleRounds.length === 0 && <p className="p-4 text-sm text-gray-500">{t('atif.noMatchingRounds')}</p>}
-                    {visibleRounds.map(round => (
-                      <RoundListItem
-                        key={round.key}
-                        round={round}
-                        isActive={round.key === selectedRound}
-                        onSelect={() => setSelectedRound(round.key)}
-                      />
-                    ))}
+                    <div ref={roundListRef} className="space-y-2 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+                      {visibleRounds.length === 0 && <p className="p-4 text-sm text-gray-500">{t('atif.noMatchingRounds')}</p>}
+                      {visibleRounds.map(round => (
+                        <RoundListItem
+                          key={round.key}
+                          round={round}
+                          isActive={round.key === selectedRound}
+                          onSelect={() => setSelectedRound(round.key)}
+                        />
+                      ))}
+                    </div>
                   </div>
 
                   {/* Center: selected round detail */}
