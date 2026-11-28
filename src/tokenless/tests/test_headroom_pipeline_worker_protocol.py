@@ -140,14 +140,40 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertIn("bad request json", responses[1]["error"])
         self.assertIs(responses[2]["ok"], True)
 
-    def test_deeply_nested_request_and_followup(self) -> None:
-        # Build the wire text directly so the test's encoder cannot hit its own limit.
-        nested = "[" * 2000 + "0" + "]" * 2000
-        request = '{"messages": [], "extra": ' + nested + "}"
-        responses = self._run_lines([request, json.dumps(self._valid_request())])
-        self.assertIs(responses[1]["ok"], False)
-        self.assertIn("RecursionError", responses[1]["error"])
-        self.assertIs(responses[2]["ok"], True)
+    def test_decoder_recursion_error_and_followup(self) -> None:
+        # Python releases enforce different decoder limits. Inject the error
+        # at the decoder boundary and send both requests to the real worker.
+        bootstrap = """\
+import json
+import runpy
+import sys
+from unittest.mock import patch
+
+loads = json.loads
+
+def decode(text, *args, **kwargs):
+    if text == "decoder error fixture":
+        raise RecursionError("fixture")
+    return loads(text, *args, **kwargs)
+
+with patch.object(json, "loads", side_effect=decode):
+    runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", bootstrap, str(WORKER)],
+            input="decoder error fixture\n" + json.dumps(self._valid_request()) + "\n",
+            capture_output=True,
+            text=True,
+            env=self.env,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ready, failed, followup = map(json.loads, result.stdout.splitlines())
+        self.assertIs(ready["ready"], True)
+        self.assertIs(failed["ok"], False)
+        self.assertIn("RecursionError", failed["error"])
+        self.assertIs(followup["ok"], True)
 
     def test_invalid_result_metadata_and_followup(self) -> None:
         for field in ["transforms_applied", "timing", "warnings"]:
