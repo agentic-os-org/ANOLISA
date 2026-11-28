@@ -805,8 +805,11 @@ The directory is created on demand. Stdout emits one JSON record per exported fi
 Exports use UTF-8 and the existing converter's filtering and truncation rules; they are
 not a lossless backup of raw logs. They contain conversation content, so keep them in a
 local directory intended for that data. Write failures are counted in stderr's summary,
-temporary files are removed, and later files are attempted. As in existing batch analysis,
-a completed batch returns 0 even if its summary includes per-file failures.
+temporary files are removed, and later files are attempted. The batch exits 1 when the
+`Done: ... failed` summary reports at least one failed file, and 0 when the summary
+reports no failed file; intentional `--min-steps` skips are recorded as skipped, not
+failed, and selecting no files at all still exits 0.
+Argument errors still exit 2 through `parser.error` before discovery or export.
 
 ## Related pages
 
