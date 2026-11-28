@@ -9,7 +9,12 @@ const htmlFiles = await walkFiles(buildDir, (file) => file.endsWith('.html'));
 const errors = [];
 
 async function targetFile(urlPath) {
-  let decoded = decodeURIComponent(urlPath).replace(/^\//, '');
+  let decoded;
+  try {
+    decoded = decodeURIComponent(urlPath).replace(/^\//, '');
+  } catch {
+    return null;
+  }
   if (basePath && decoded === basePath) decoded = '';
   else if (basePath && decoded.startsWith(`${basePath}/`)) {
     decoded = decoded.slice(basePath.length + 1);
@@ -55,7 +60,7 @@ for (const htmlFile of htmlFiles) {
     const target = parsed.pathname === currentPath
       ? htmlFile
       : await targetFile(parsed.pathname);
-    if (!(await exists(target))) {
+    if (!target || !(await exists(target))) {
       errors.push(`${path.relative(buildDir, htmlFile)}: broken link ${href}`);
       continue;
     }
