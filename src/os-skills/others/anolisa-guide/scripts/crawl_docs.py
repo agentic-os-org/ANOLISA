@@ -12,25 +12,9 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from doc_manifest import DOC_URLS
 
 BASE_URL = "https://help.aliyun.com"
-
-# ANOLISA 文档 URL 列表
-DOC_URLS = [
-    ("releasenotes", "/zh/alinux/releasenotes"),
-    ("agentic-os", "/zh/alinux/agentic-os"),
-    ("getting-started", "/zh/alinux/agentic-os-getting-started"),
-    ("cosh-usage", "/zh/alinux/how-to-use-alibaba-cloud-linux-4-agentic-edition"),
-    ("configuration", "/zh/alinux/manage-configurations"),
-    ("extensibility", "/zh/alinux/extensibility-for-skill-and-mcp"),
-    ("agentsight", "/zh/alinux/how-to-use-agentsight"),
-    ("agentseccore", "/zh/alinux/how-to-use-agentseccore"),
-    ("tokenless", "/zh/alinux/how-to-use-tokenless"),
-    ("ws-ckpt", "/zh/alinux/how-to-use-ws-ckpt"),
-    ("deploy-openclaw", "/zh/alinux/deploy-openclaw-claude-code-in-one-step"),
-    ("resize-ecs", "/zh/alinux/resize-ecs-online-in-one-sentence"),
-    ("faq", "/zh/alinux/faq"),
-]
 
 def get_page_content(url):
     """获取页面 HTML 内容"""

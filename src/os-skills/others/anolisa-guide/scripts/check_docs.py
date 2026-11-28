@@ -23,6 +23,7 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from doc_manifest import DOC_URLS
 
 
 # 配置
@@ -74,30 +75,31 @@ def check_freshness(directory: Path) -> tuple[bool | None, str]:
     """检查目录中文档的时效性"""
     if not directory.exists():
         return None, "目录不存在"
-    
-    md_files = list(directory.glob("*.md"))
-    if len(md_files) < 13:
-        return None, f"文档不完整（{len(md_files)}/13）"
-    
+
+    md_files = [directory / f"{name}.md" for name, _ in DOC_URLS]
+    missing = [path.name for path in md_files if not path.is_file()]
+    if missing:
+        return None, f"Missing required documents: {', '.join(missing)}"
+
     now = datetime.now()
     threshold = now - timedelta(days=MAX_DAYS)
-    
-    newest_time = None
+
+    oldest_time = None
     for md_file in md_files:
         crawl_time = get_crawl_time(md_file)
         if crawl_time is None:
-            continue
-        if newest_time is None or crawl_time > newest_time:
-            newest_time = crawl_time
-    
-    if newest_time is None:
+            return None, f"Cannot parse crawl timestamp: {md_file.name}"
+        if oldest_time is None or crawl_time < oldest_time:
+            oldest_time = crawl_time
+
+    if oldest_time is None:
         return None, "无法解析时间戳"
-    
-    if newest_time < threshold:
-        days_old = (now - newest_time).days
-        return False, f"文档过期（{newest_time.strftime('%Y-%m-%d')}，已 {days_old} 天）"
-    
-    return True, f"文档时效性良好（{newest_time.strftime('%Y-%m-%d')}）"
+
+    if oldest_time < threshold:
+        days_old = (now - oldest_time).days
+        return False, f"文档过期（{oldest_time.strftime('%Y-%m-%d')}，已 {days_old} 天）"
+
+    return True, f"文档时效性良好（{oldest_time.strftime('%Y-%m-%d')}）"
 
 
 def get_venv_python() -> Path:
