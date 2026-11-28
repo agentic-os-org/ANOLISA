@@ -132,7 +132,7 @@ def test_trial_rows_keep_order_and_summary_cells(
         ],
     ]
     if with_reports:
-        expected[0].append("tool_error | 一;二；三")
+        expected[0].append("tool_error | 一,二，三")
         expected[1].append("N/A")
     assert rows[1:] == expected
     assert len(rows[0]) == 22 if with_reports else len(rows[0]) == 21

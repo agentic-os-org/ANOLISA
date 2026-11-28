@@ -374,9 +374,6 @@ def build_structured_data(data: list, reports: dict, trace_name: str) -> dict:
                 fc = report.get("failure_classification", {})
                 cat = fc.get("category", "")
                 reason = fc.get("key_reason_zh", "")
-                # Replace commas for consistency
-                if reason:
-                    reason = reason.replace(",", ";").replace("，", "；")
                 if cat:
                     trial_entry["failure_category"] = cat
                     failure_dist[cat] = failure_dist.get(cat, 0) + 1
