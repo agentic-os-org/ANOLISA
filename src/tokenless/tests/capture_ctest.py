@@ -11,6 +11,7 @@ import selectors
 import subprocess
 import time
 from pathlib import Path
+from typing import NoReturn
 
 IMAGE_NAME = "tokenless-cpp-capture:ubuntu24.04"
 RUN_TIMEOUT_SECONDS = 1800
@@ -163,6 +164,22 @@ def capture(
     """Preserve raw bytes and record parent pipe receipt order."""
     directory.mkdir()
     started = time.time()
+
+    def expire() -> NoReturn:
+        """Stop the capture and its container, then report the deadline."""
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        proc.kill()
+        # SIGKILL cannot be ignored, but a child in uninterruptible sleep can
+        # still delay reaping. Waiting here is deliberate: skipping it would
+        # leave a zombie process behind.
+        proc.wait()
+        raise TimeoutError(f"{directory.name} exceeded {timeout_seconds}s")
+
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         with selectors.DefaultSelector() as selector:
             assert proc.stdout is not None and proc.stderr is not None
@@ -172,15 +189,7 @@ def capture(
             chunks = []
             while selector.get_map():
                 if time.time() - started > timeout_seconds:
-                    subprocess.run(
-                        ["docker", "rm", "-f", container_name],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                    )
-                    proc.kill()
-                    proc.wait()
-                    raise TimeoutError(f"{directory.name} exceeded {timeout_seconds}s")
+                    expire()
                 for key, _ in selector.select(timeout=1.0):
                     chunk = key.fileobj.read1(65536)
                     if not chunk:
@@ -189,7 +198,19 @@ def capture(
                     chunks.append({"stream": key.data, "bytes": len(chunk)})
                     streams[key.data].extend(chunk)
                     streams["observed"].extend(chunk)
-            status = proc.wait()
+            # Both pipes can reach EOF before the child exits. The deadline is a
+            # budget for the whole capture, so the final wait must be bounded too.
+            # A child that has already exited keeps its record (pre-fix behavior);
+            # only a still-running child is subject to the remaining budget.
+            status = proc.poll()
+            if status is None:
+                remaining = timeout_seconds - (time.time() - started)
+                if remaining <= 0:
+                    expire()
+                try:
+                    status = proc.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    expire()
     duration = round(time.time() - started, 3)
     record: dict[str, object] = {
         "command": recorded_command,

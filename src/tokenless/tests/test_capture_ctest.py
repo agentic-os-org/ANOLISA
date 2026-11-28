@@ -9,8 +9,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TESTS_DIR = Path(__file__).resolve().parent
 COMPONENT_ROOT = TESTS_DIR.parent
@@ -33,6 +35,42 @@ def init_repo(repo: Path, filename: str, content: str) -> str:
     git(repo, "add", filename)
     git(repo, "commit", "--quiet", "-m", f"add {filename}")
     return git(repo, "rev-parse", "HEAD").strip()
+
+
+class _FakeSelectorKey:
+    def __init__(self, fileobj: object, data: object) -> None:
+        self.fileobj = fileobj
+        self.data = data
+
+
+class _FakeSelector:
+    """POSIX-independent selector with level-triggered readiness."""
+
+    def __init__(self) -> None:
+        self._entries: dict[object, object] = {}
+
+    def __enter__(self) -> "_FakeSelector":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def register(self, fileobj: object, _events: int, data: object) -> None:
+        self._entries[fileobj] = data
+
+    def unregister(self, fileobj: object) -> None:
+        del self._entries[fileobj]
+
+    def get_map(self) -> dict[object, object]:
+        return self._entries
+
+    def select(self, timeout: float = 1.0) -> list[tuple[_FakeSelectorKey, int]]:
+        # Level-triggered like the real selector: a registered pipe stays
+        # reported until capture() unregisters it at EOF.
+        return [
+            (_FakeSelectorKey(fileobj, data), 1)
+            for fileobj, data in list(self._entries.items())
+        ]
 
 
 class TestCaptureCtestSourcePinning(unittest.TestCase):
@@ -336,6 +374,111 @@ class TestCaptureCtestSourcePinning(unittest.TestCase):
             self.assertIn(image_id, recorded_cmd)
             img_idx = recorded_cmd.index(image_id)
             self.assertEqual(recorded_cmd[img_idx + 1 :], expected_cmd)
+
+
+class TestCaptureCtestDeadline(unittest.TestCase):
+    def test_final_wait_is_bounded_after_both_pipes_close(self) -> None:
+        # A child that closes both output pipes before exiting used to leave the
+        # selector loop while capture() then waited forever at proc.wait().
+        timeout_seconds = 2
+        script = "import os, time; os.close(1); os.close(2); time.sleep(30)"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                mock.patch.object(
+                    capture_ctest.selectors, "DefaultSelector", _FakeSelector
+                ),
+                mock.patch.object(capture_ctest.subprocess, "run") as cleanup,
+            ):
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError) as ctx:
+                    capture_ctest.capture(
+                        [sys.executable, "-c", script],
+                        ["python", "-c", "<close pipes and sleep>"],
+                        root / "capture",
+                        container_name="tokenless-deadline-test",
+                        timeout_seconds=timeout_seconds,
+                    )
+                elapsed = time.monotonic() - started
+
+            self.assertIn(f"exceeded {timeout_seconds}s", str(ctx.exception))
+            # Far below the child's 30s sleep; the 8s allowance covers startup.
+            self.assertLess(elapsed, timeout_seconds + 8)
+            cleanup.assert_called_once()
+            self.assertEqual(
+                cleanup.call_args.args[0],
+                ["docker", "rm", "-f", "tokenless-deadline-test"],
+            )
+            self.assertFalse((root / "capture" / "capture.json").exists())
+
+    def test_zero_remaining_after_pipes_close_expires(self) -> None:
+        # Drive the clock forward after both pipes reach EOF while the child is
+        # still alive, to cover the explicit remaining <= 0 guard.
+        clock = mock.Mock()
+        clock.time.side_effect = [0.0, 0.0, 5.0]
+        script = "import os, time; os.close(1); os.close(2); time.sleep(30)"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                mock.patch.object(capture_ctest, "time", clock),
+                mock.patch.object(
+                    capture_ctest.selectors, "DefaultSelector", _FakeSelector
+                ),
+                mock.patch.object(capture_ctest.subprocess, "run") as cleanup,
+            ):
+                with self.assertRaises(TimeoutError) as ctx:
+                    capture_ctest.capture(
+                        [sys.executable, "-c", script],
+                        ["python", "-c", "<close pipes and sleep>"],
+                        root / "capture",
+                        container_name="tokenless-zero-budget-test",
+                        timeout_seconds=2,
+                    )
+            self.assertIn("exceeded 2s", str(ctx.exception))
+            cleanup.assert_called_once()
+            self.assertFalse((root / "capture" / "capture.json").exists())
+
+    def test_completed_capture_still_writes_a_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                capture_ctest.selectors, "DefaultSelector", _FakeSelector
+            ):
+                record = capture_ctest.capture(
+                    [sys.executable, "-c", "pass"],
+                    ["python", "-c", "pass"],
+                    root / "capture",
+                    container_name="tokenless-completed-test",
+                    timeout_seconds=10,
+                )
+            capture_dir = root / "capture"
+            self.assertEqual(record["exit_code"], 0)
+            self.assertEqual(record["observed_bytes"], 0)
+            self.assertEqual((capture_dir / "stdout.txt").read_bytes(), b"")
+            self.assertEqual((capture_dir / "stderr.txt").read_bytes(), b"")
+            self.assertTrue((capture_dir / "capture.json").exists())
+
+    def test_child_output_is_recorded_with_level_triggered_selector(self) -> None:
+        # A real selector keeps reporting a registered pipe until EOF. With an
+        # edge-triggered fake, read1() consuming data without unregistering left
+        # capture() spinning until the deadline instead of recording the output.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                capture_ctest.selectors, "DefaultSelector", _FakeSelector
+            ):
+                record = capture_ctest.capture(
+                    [sys.executable, "-c", "print('hello world', end='')"],
+                    ["python", "-c", "print('hello world', end='')"],
+                    root / "capture",
+                    container_name="tokenless-output-test",
+                    timeout_seconds=10,
+                )
+            self.assertEqual(record["exit_code"], 0)
+            self.assertEqual(record["observed_bytes"], 11)
+            stdout = (root / "capture" / "stdout.txt").read_bytes()
+            self.assertEqual(stdout, b"hello world")
+            self.assertTrue((root / "capture" / "capture.json").exists())
 
 
 if __name__ == "__main__":
