@@ -91,6 +91,16 @@ Once installed, OS Skills are available to any ANOLISA-compatible Agent runtime.
 > "Show running containers and their resource usage"
 ```
 
+To locate the ANOLISA handbook after a user install, run:
+
+```bash
+python3 ~/.copilot-shell/skills/anolisa-guide/scripts/check_docs.py
+```
+
+On success, the last line is the directory to read. If a refresh fails, the
+guide looks for `reference/` in its own installation. If you set `SKILLS_DIR`,
+run the script from that collection instead.
+
 ---
 
 ## Skill Categories
