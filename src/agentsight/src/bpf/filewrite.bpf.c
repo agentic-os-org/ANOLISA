@@ -135,12 +135,11 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     // Fill metadata
     event->source = EVENT_SOURCE_FILEWRITE;
     event->timestamp_ns = bpf_ktime_get_ns();
-    // Use the tgid-level ns pid so this event correlates with sslsniff
-    // (which also records the process-group pid). `pid_tgid >> 32` is the
-    // host tgid; the gate above already returned the corresponding ns pid
-    // when the lookup hit the traced map, but we want a consistent value
-    // for cross-probe correlation with the HTTP/SSE pipeline.
-    event->pid = pid;
+    // Report the pid in the observer's namespace (matching sslsniff/filewatch/
+    // procmon) so ResponseSessionMapper correlates writes with HTTP/SSE traffic.
+    // `pid_tgid >> 32` is always the host tgid, and `traced_pid_cgroup_gate_allow`
+    // only returns 1/0.
+    event->pid = current_observer_pid();
     event->tid = (u32)pid_tgid;
     event->uid = bpf_get_current_uid_gid();
     event->write_size = (u32)count;
