@@ -26,6 +26,7 @@ use crate::l2::{Category, GroundTruth, L2Error, SampleRecord};
 use regex::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 /// Maximum dynamically-extracted ground-truth items per sample. Keeps the
 /// retention denominator comparable across samples of very different sizes.
@@ -73,6 +74,15 @@ pub struct CommandSpec {
     /// Always `"dynamic"` — kept explicit in the asset so a future static
     /// spec is a deliberate schema change, not an accident.
     pub ground_truth_source: String,
+    /// A non-zero exit is this sample's expected result (failed build or test), not a collection failure.
+    #[serde(default)]
+    pub expect_failure: bool,
+    /// Leaf name inside a new private temporary directory, referenced as `{{fresh_dir}}`; never a user path.
+    #[serde(default)]
+    pub fresh_dir: Option<String>,
+    /// Why this host cannot run the sample (for example an unset `${VAR}`); recorded as a degradation.
+    #[serde(skip)]
+    pub unavailable: Option<String>,
 }
 
 impl CommandSpec {
@@ -81,14 +91,32 @@ impl CommandSpec {
     pub fn rtk_invocation(&self) -> &[String] {
         self.rtk_argv.as_deref().unwrap_or(&self.argv)
     }
-}
 
-impl CommandSpec {
-    /// Parses this spec's category string.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`L2Error::InvalidSample`] for unknown category names.
+    /// Command line the model actually issues: `argv` for ordinary samples; a sample with
+    /// `rtk_argv` is an explicit RTK entry (not a PreTool rewrite), run via the `tokenless rtk` subcommand.
+    pub fn host_command(&self, rtk_bin: &Path) -> String {
+        match &self.rtk_argv {
+            Some(rtk_argv) => std::iter::once(rtk_bin.display().to_string())
+                .chain(std::iter::once("rtk".to_owned()))
+                .chain(rtk_argv.iter().cloned())
+                .map(|word| shell_quote(&word))
+                .collect::<Vec<_>>()
+                .join(" "),
+            None => self
+                .argv
+                .iter()
+                .map(|word| shell_quote(word))
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    /// Whether the row measures an explicit RTK entry rather than the default path.
+    pub fn is_explicit_rtk(&self) -> bool {
+        self.rtk_argv.is_some()
+    }
+
+    /// Parses the sample category.
     pub fn parsed_category(&self) -> Result<Category, L2Error> {
         Category::parse(&self.category).ok_or_else(|| {
             L2Error::InvalidSample(format!(
@@ -97,6 +125,61 @@ impl CommandSpec {
             ))
         })
     }
+}
+
+/// Accepts one safe leaf name; rejects absolute paths, dot components, separators and expanded escapes.
+pub fn validate_fresh_leaf(leaf: &str) -> Result<(), L2Error> {
+    if leaf.is_empty()
+        || leaf.len() > 64
+        || !leaf
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+    {
+        return Err(L2Error::InvalidSample(format!(
+            "fresh_dir must be a non-empty leaf name (letters, digits, '-' or '_'), got {leaf:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// POSIX single-quote quoting, leaving plain words readable.
+fn shell_quote(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_./=:+,@%".contains(&byte))
+    {
+        return word.to_owned();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// Expands `${NAME}` and `${NAME:-default}`; an unset variable without a default is an error.
+fn expand_env(word: &str) -> Result<String, L2Error> {
+    let mut out = String::new();
+    let mut rest = word;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 2..];
+        let end = tail
+            .find('}')
+            .ok_or_else(|| L2Error::InvalidSample(format!("unterminated ${{ in {word:?}")))?;
+        let expression = &tail[..end];
+        let (name, default) = expression
+            .split_once(":-")
+            .map_or((expression, None), |(name, default)| (name, Some(default)));
+        let value = std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| default.map(str::to_owned))
+            .ok_or_else(|| {
+                L2Error::InvalidSample(format!("command spec needs environment variable {name}"))
+            })?;
+        out.push_str(&value);
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// One semantic-probe question with its literal answer check.
@@ -126,6 +209,26 @@ pub fn load_json_samples(l2_dir: &Path) -> Result<Vec<SampleRecord>, L2Error> {
 /// Fails on unreadable/malformed asset files or samples missing content.
 pub fn load_code_samples(l2_dir: &Path) -> Result<Vec<SampleRecord>, L2Error> {
     load_static(l2_dir, "samples/source_code.json", Category::Code)
+}
+
+/// Loads fixed raw-byte samples for the new domains without a JSON envelope.
+pub fn load_domain_samples(
+    l2_dir: &Path,
+    category: Category,
+) -> Result<Vec<SampleRecord>, L2Error> {
+    if !matches!(
+        category,
+        Category::BuildLog | Category::Tabular | Category::Search | Category::Html
+    ) {
+        return Err(L2Error::InvalidSample(format!(
+            "not a content-domain fixture category: {category}"
+        )));
+    }
+    load_static(
+        l2_dir,
+        &format!("samples/{}.json", category.name()),
+        category,
+    )
 }
 
 fn load_static(l2_dir: &Path, rel: &str, expect: Category) -> Result<Vec<SampleRecord>, L2Error> {
@@ -196,7 +299,26 @@ pub fn load_command_specs(l2_dir: &Path) -> Result<Vec<CommandSpec>, L2Error> {
     let path = l2_dir.join("samples/command_specs.json");
     let text = std::fs::read_to_string(&path)
         .map_err(|e| L2Error::InvalidSample(format!("cannot read {}: {e}", path.display())))?;
-    Ok(serde_json::from_str(&text)?)
+    let mut specs: Vec<CommandSpec> = serde_json::from_str(&text)?;
+    for spec in &mut specs {
+        let mut expanded = || -> Result<(), L2Error> {
+            for word in spec
+                .argv
+                .iter_mut()
+                .chain(spec.rtk_argv.iter_mut().flatten())
+            {
+                *word = expand_env(word)?;
+            }
+            if let Some(dir) = &mut spec.fresh_dir {
+                *dir = expand_env(dir)?;
+            }
+            Ok(())
+        };
+        if let Err(error) = expanded() {
+            spec.unavailable = Some(error.to_string());
+        }
+    }
+    Ok(specs)
 }
 
 /// Loads the probe question set for one category from `probes/<name>.json`.
@@ -282,16 +404,21 @@ pub fn probe_file_stem(category: Category) -> Option<&'static str> {
         Category::Command => Some("command_output"),
         Category::Grep => Some("grep_search"),
         Category::Code => Some("source_code"),
-        Category::Diff => None,
+        Category::Diff
+        | Category::BuildLog
+        | Category::Tabular
+        | Category::Search
+        | Category::Html => None,
     }
 }
 
 /// Extracts ground truth from live command output.
 ///
 /// Patterns per category (first `MAX_DYNAMIC_ITEMS` hits, deduplicated):
-/// * `command` — commit hashes at line start (`git log --oneline`,
-///   `git show`), so retention asserts the hashes the agent would act on;
-/// * `grep` — `file:line` prefixes from `rg -n` output;
+/// * `command` — content facts by `COMMAND_FACT_FAMILIES` priority: commit hashes, test results,
+///   rustc diagnostics and locations, pytest results, git status paths, `ls -l` entries, docker names, path lists;
+///   hits are sampled from the start, middle and end, so tail truncation is still detected;
+/// * `grep` — raw records binding file, line and match; grouping only changes presentation;
 /// * `diff` — **content-level facts from changed lines** (see
 ///   `extract_diff_ground_truth`): identifiers and code fragments that a
 ///   `+`/`-` line actually introduces or removes, not the `diff --git` file
@@ -309,27 +436,149 @@ pub fn extract_dynamic_ground_truth(
     category: Category,
     raw_output: &str,
 ) -> Result<Vec<GroundTruth>, L2Error> {
-    let pattern = match category {
-        Category::Command => r"(?m)^(?:commit )?([0-9a-f]{7,40})\b",
-        Category::Grep => r"(?m)^([^:\s][^:\n]*:\d+)[:-]",
-        Category::Diff => return extract_diff_ground_truth(raw_output),
-        Category::Json | Category::Code => return Ok(Vec::new()),
-    };
-    let re = Regex::new(pattern)?;
-    let mut seen = std::collections::HashSet::new();
-    let mut items = Vec::new();
-    for cap in re.captures_iter(raw_output) {
-        if let Some(m) = cap.get(1) {
-            let s = m.as_str().to_string();
-            if seen.insert(s.clone()) {
-                items.push(GroundTruth::Substring(s));
-                if items.len() >= MAX_DYNAMIC_ITEMS {
-                    break;
+    match category {
+        Category::Command => extract_command_ground_truth(raw_output),
+        Category::Grep => {
+            let records = crate::l2::retention::normalized_search_records(raw_output);
+            let mut seen = std::collections::HashSet::new();
+            Ok(records
+                .lines()
+                .filter(|line| seen.insert(*line))
+                .take(MAX_DYNAMIC_ITEMS)
+                .map(|line| GroundTruth::Substring(line.to_owned()))
+                .collect())
+        }
+        Category::Diff => extract_diff_ground_truth(raw_output),
+        Category::Json
+        | Category::Code
+        | Category::BuildLog
+        | Category::Tabular
+        | Category::Search
+        | Category::Html => Ok(Vec::new()),
+    }
+}
+
+/// Command-output fact families in priority order; the first family with hits supplies the facts.
+///
+/// Each pattern captures one fact. Using a single family per sample keeps one
+/// payload from being scored against a mix of unrelated line kinds (a test run's
+/// compiler warnings would otherwise crowd out the test outcomes it exists for).
+const COMMAND_FACT_FAMILIES: [&[&str]; 8] = [
+    // Docker NAMES are more specific than generic commit/hash facts, so they match first.
+    &[r"(?m)^[0-9a-f]{12}\s{2,}\S.*\s{2,}(\S+)$"],
+    // git log / git show
+    &[r"(?m)^(?:commit )?([0-9a-f]{7,40})\b"],
+    // cargo test outcomes
+    &[
+        r"(?m)^test (\S+) \.\.\. (?:ok|FAILED|ignored)",
+        r"(?m)^(test result: \w+)",
+    ],
+    // rustc diagnostics and their primary locations
+    &[
+        r"(?m)^((?:error|warning)(?:\[[A-Z]\d{4}\])?: \S[^\n]*)$",
+        r"(?m)^\s*--> (\S+:\d+:\d+)",
+    ],
+    // pytest outcomes
+    &[r"(?m)^FAILED (\S+)", r"(\d+ (?:passed|failed))"],
+    // git status (long format and untracked lists)
+    &[r"(?m)^\t(?:(?:modified|new file|deleted|renamed):\s+)?(\S+)$"],
+    // ls -l entries
+    &[r"(?m)^[-dlcbps][rwxsStT-]{9}[.+@]?\s+\d+\s+\S+\s+\S+\s+\d+\s+\S+\s+\d+\s+[\d:]+\s+(\S.*)$"],
+    // path lists (find)
+    &[r"(?m)^(\.?/?[\w@.+-]+(?:/[\w@.+-]+)+)$"],
+];
+
+/// Extracts command facts, sampling hits from the start, middle and end of the sequence.
+///
+/// Spread selection matters for list-like output: a filter that keeps the head
+/// and drops the tail would pass a first-N check while losing the tail.
+fn extract_command_ground_truth(raw_output: &str) -> Result<Vec<GroundTruth>, L2Error> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_output) {
+        let mut facts = Vec::new();
+        json_content_facts(&value, raw_output, &mut facts);
+        let mut seen = std::collections::HashSet::new();
+        facts.retain(|fact| seen.insert(fact.clone()));
+        return Ok(spread(&facts, MAX_DYNAMIC_ITEMS)
+            .into_iter()
+            .map(GroundTruth::Substring)
+            .collect());
+    }
+    let families = COMPILED_COMMAND_FACTS
+        .as_ref()
+        .map_err(|error| L2Error::InvalidSample(format!("built-in command fact regex: {error}")))?;
+    for family in families {
+        let mut hits: Vec<(usize, String)> = Vec::new();
+        for re in family {
+            for cap in re.captures_iter(raw_output) {
+                if let Some(m) = cap.get(1) {
+                    hits.push((m.start(), m.as_str().trim_end().to_string()));
                 }
             }
         }
+        if hits.is_empty() {
+            continue;
+        }
+        hits.sort_by_key(|(offset, _)| *offset);
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<String> = hits
+            .into_iter()
+            .map(|(_, fact)| fact)
+            .filter(|fact| !fact.is_empty() && seen.insert(fact.clone()))
+            .collect();
+        return Ok(spread(&unique, MAX_DYNAMIC_ITEMS)
+            .into_iter()
+            .map(GroundTruth::Substring)
+            .collect());
     }
-    Ok(items)
+    Ok(Vec::new())
+}
+
+static COMPILED_COMMAND_FACTS: LazyLock<Result<Vec<Vec<Regex>>, String>> = LazyLock::new(|| {
+    COMMAND_FACT_FAMILIES
+        .iter()
+        .map(|family| {
+            family
+                .iter()
+                .map(|pattern| Regex::new(pattern).map_err(|error| error.to_string()))
+                .collect()
+        })
+        .collect()
+});
+
+fn json_content_facts(value: &serde_json::Value, raw: &str, facts: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                json_content_facts(value, raw, facts);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                json_content_facts(value, raw, facts);
+            }
+        }
+        serde_json::Value::String(value) if value.len() >= 3 && raw.contains(value) => {
+            facts.push(value.clone())
+        }
+        _ => {}
+    }
+}
+
+/// Up to `k` items spread evenly over `items`, always keeping the first and last.
+fn spread(items: &[String], k: usize) -> Vec<String> {
+    if items.len() <= k {
+        return items.to_vec();
+    }
+    if k < 2 {
+        return items.iter().take(k).cloned().collect();
+    }
+    let last = items.len() - 1;
+    let mut indices: Vec<usize> = (0..k).map(|i| (i * last + (k - 1) / 2) / (k - 1)).collect();
+    indices.dedup();
+    indices
+        .into_iter()
+        .map(|index| items[index].clone())
+        .collect()
 }
 
 /// Whether a token is ordinary English prose rather than a code fact.

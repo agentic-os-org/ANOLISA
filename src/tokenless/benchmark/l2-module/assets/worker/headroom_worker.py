@@ -10,7 +10,8 @@ JSON protocol over stdin/stdout:
   request  (one line):   {"id": "s1", "content": "...", "context": ""}
   response (one line):   {"id": "s1", "compressed": "...", "strategy_used": "...",
                           "wall_time_s": 0.0123,
-                          "hr_tokens_before": 123, "hr_tokens_after": 45}
+                          "hr_tokens_before": 123, "hr_tokens_after": 45,
+                          "ccr": [{"key": "<hash>", "original": "..."}]}
   shutdown:              stdin EOF
 
 The handshake reports the revision of the headroom package that was actually
@@ -22,19 +23,76 @@ compression, not JSON framing. hr_tokens_before/after are headroom's own
 token counts (RouterCompressionResult.total_original_tokens /
 total_compressed_tokens) — cross-check evidence only; the authoritative token
 counts are taken on the Rust side with tiktoken-rs.
+
+`ccr` lists the originals behind the CCR markers in the output, read back from
+Headroom's own compression store so a retrieval-enabled semantic test can serve
+them. It reads the store backend directly: `CompressionStore.retrieve()` records
+access and feeds TOIN in real time, which would change later compressions in
+this same worker and so the measurement itself.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import re
 import subprocess
 import sys
+import tempfile
 import time
 
 
+# Upstream notices must not corrupt protocol stdout; the L3 worker uses the same isolation.
+_PROTOCOL_OUT = sys.stdout
+sys.stdout = sys.stderr
+os.environ["HEADROOM_BEACON"] = "off"
+os.environ["DO_NOT_TRACK"] = "1"
+# TOIN otherwise accumulates in ~/.headroom/toin.json across runs. Each worker starts empty,
+# so repeated hashes stay comparable; an explicit HEADROOM_TOIN_PATH is preserved.
+_TOIN_DIRECTORY = None
+if "HEADROOM_TOIN_PATH" not in os.environ:
+    _TOIN_DIRECTORY = tempfile.TemporaryDirectory(prefix="headroom-toin-")
+    atexit.register(_TOIN_DIRECTORY.cleanup)
+    os.environ["HEADROOM_TOIN_PATH"] = os.path.join(_TOIN_DIRECTORY.name, "toin.json")
+
+
 def _emit(obj: dict) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
-    sys.stdout.flush()
+    _PROTOCOL_OUT.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+    _PROTOCOL_OUT.flush()
+
+
+# Marker forms Headroom emits (`headroom/cache/prefix_tracker.py` uses the same pattern);
+# JSON quotes, escapes and line breaks may terminate a marker inside routed output.
+_CCR_HASH_RE = re.compile(
+    r'(?:Retrieve (?:more|original): hash=|<<ccr:)([0-9a-f]{12,24})(?![0-9a-f])(?=[.\],>"\\\s]|$)'
+)
+
+
+def _ccr_entries(compressed: str) -> list[dict]:
+    """Originals behind each CCR marker, without touching retrieval feedback."""
+    keys = list(dict.fromkeys(_CCR_HASH_RE.findall(compressed)))
+    if not keys:
+        return []
+    from headroom.cache.compression_store import get_compression_store
+
+    backend = get_compression_store()._backend
+    entries = []
+    for key in keys:
+        entry = backend.get(key)
+        entries.append({"key": key, "original": None if entry is None else entry.original_content})
+    return entries
+
+
+def _ccr_evidence(compressed: str) -> tuple[list[dict], list[str]]:
+    try:
+        entries = _ccr_entries(compressed)
+        warnings = []
+        if ("Retrieve more:" in compressed or "Retrieve original:" in compressed or "<<ccr:" in compressed) and not _CCR_HASH_RE.search(compressed):
+            warnings.append("CCR marker syntax not recognized; recovery evidence unavailable")
+        return entries, warnings
+    except Exception as exc:
+        return [], [f"CCR evidence unavailable: {type(exc).__name__}"]
 
 
 def _provenance(module) -> tuple[str | None, bool | None, int | None]:
@@ -143,6 +201,9 @@ def main() -> int:
                 req.get("content", ""), context=req.get("context", "")
             )
             elapsed = time.perf_counter() - start
+            if not isinstance(result.compressed, str):
+                raise TypeError("Headroom returned a non-text compressed payload")
+            ccr, warnings = _ccr_evidence(result.compressed)
             _emit(
                 {
                     "id": req_id,
@@ -155,6 +216,8 @@ def main() -> int:
                     "hr_tokens_after": getattr(
                         result, "total_compressed_tokens", None
                     ),
+                    "ccr": ccr,
+                    "warnings": warnings,
                 }
             )
         except Exception as exc:  # noqa: BLE001 - keep the loop alive

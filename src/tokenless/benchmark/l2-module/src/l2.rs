@@ -31,6 +31,7 @@ pub mod probe;
 pub mod report;
 pub mod retention;
 pub mod rtk_side;
+pub mod runtime_side;
 pub mod samples;
 pub mod stats;
 pub mod task_sim;
@@ -50,7 +51,7 @@ pub enum L2Error {
     /// The headroom worker failed to start or refused the handshake.
     #[error("headroom worker unavailable: {0}")]
     HeadroomUnavailable(String),
-    /// No runnable tokenless was found ($TOKENLESS_BIN, release build, PATH).
+    /// No runnable rtk binary was found ($RTK_BIN, vendored build, PATH).
     #[error("rtk unavailable: {0}")]
     RtkUnavailable(String),
     /// The worker replied with something outside the line-JSON protocol.
@@ -96,16 +97,24 @@ pub enum Category {
     Grep,
     Code,
     Diff,
+    BuildLog,
+    Tabular,
+    Search,
+    Html,
 }
 
 impl Category {
     /// All categories in report order.
-    pub const ALL: [Category; 5] = [
+    pub const ALL: [Category; 9] = [
         Category::Json,
         Category::Command,
         Category::Grep,
         Category::Code,
         Category::Diff,
+        Category::BuildLog,
+        Category::Tabular,
+        Category::Search,
+        Category::Html,
     ];
 
     /// Stable lowercase name used in CLI flags, sample files and reports.
@@ -116,6 +125,10 @@ impl Category {
             Category::Grep => "grep",
             Category::Code => "code",
             Category::Diff => "diff",
+            Category::BuildLog => "buildlog",
+            Category::Tabular => "tabular",
+            Category::Search => "search",
+            Category::Html => "html",
         }
     }
 
@@ -127,6 +140,10 @@ impl Category {
             "grep" => Some(Category::Grep),
             "code" => Some(Category::Code),
             "diff" => Some(Category::Diff),
+            "buildlog" | "build-log" => Some(Category::BuildLog),
+            "tabular" => Some(Category::Tabular),
+            "search" => Some(Category::Search),
+            "html" => Some(Category::Html),
             _ => None,
         }
     }
@@ -134,35 +151,6 @@ impl Category {
     /// True for categories whose content is produced by running a command.
     pub fn is_dynamic(self) -> bool {
         matches!(self, Category::Command | Category::Grep | Category::Diff)
-    }
-
-    /// Whether both sides receive byte-identical input for this category.
-    ///
-    /// tokenless' `JsonCompressor` only accepts JSON text, so a non-JSON
-    /// static payload must be wrapped in a `{"content": ...}` envelope before it
-    /// reaches the engine, while headroom receives the raw text. That makes the
-    /// two sides' "before" bytes — and therefore their compressor behaviour —
-    /// different, so the paired gap is not a like-for-like comparison and the
-    /// report marks the category accordingly.
-    ///
-    /// `json` payloads are already compact JSON on both sides, and dynamic
-    /// categories hand both sides the same captured command output.
-    pub fn has_symmetric_inputs(self) -> bool {
-        !matches!(self, Category::Code)
-    }
-
-    /// Why this category's sides are not byte-comparable, for the report.
-    pub fn input_asymmetry_reason(self) -> Option<&'static str> {
-        if self.has_symmetric_inputs() {
-            return None;
-        }
-        Some(
-            "tokenless compresses this payload inside a {\"content\": ...} JSON \
-             envelope (its engine only accepts JSON values) while headroom \
-             receives the raw text, so the two sides' original token counts and \
-             compressor behaviour differ; the per-side rates stand on their own \
-             but the cross-side gap is not like-for-like",
-        )
     }
 
     /// Per-category p99 latency budget in milliseconds (quality gate).
@@ -173,7 +161,13 @@ impl Category {
         match self {
             Category::Json => 2.0,
             Category::Code => 5.0,
-            Category::Command | Category::Grep | Category::Diff => 10.0,
+            Category::Command
+            | Category::Grep
+            | Category::Diff
+            | Category::BuildLog
+            | Category::Tabular
+            | Category::Search
+            | Category::Html => 10.0,
         }
     }
 }

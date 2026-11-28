@@ -66,11 +66,39 @@ impl PairedRun {
 /// Returns [`L2Error::RtkUnavailable`] when nothing runnable is found —
 /// callers degrade the command/grep/diff categories rather than abort.
 pub fn locate_tokenless() -> Result<PathBuf, L2Error> {
-    find_tokenless_binary().ok_or_else(|| {
-        L2Error::RtkUnavailable(
-            "no tokenless via $TOKENLESS_BIN, the Tokenless release build, or PATH".to_string(),
-        )
+    find_tokenless_binary()
+        .and_then(|candidate| resolve_launcher(&candidate, std::env::var_os("PATH").as_deref()))
+        .ok_or_else(|| {
+            L2Error::RtkUnavailable(
+                "no tokenless via $TOKENLESS_BIN, the Tokenless release build, or PATH".to_string(),
+            )
+        })
+}
+
+fn resolve_launcher(candidate: &Path, search_path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if candidate.components().count() > 1 || candidate.is_absolute() {
+        return candidate.canonicalize().ok().filter(|path| path.is_file());
+    }
+    std::env::split_paths(search_path?).find_map(|directory| {
+        directory
+            .join(candidate)
+            .canonicalize()
+            .ok()
+            .filter(|path| executable_file(path))
     })
+}
+
+fn executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// Runs `argv` raw and then `rtk_argv` through `<tokenless> rtk`, both under `cwd`.
@@ -160,4 +188,64 @@ pub fn merge_streams(stdout: &[u8], stderr: &[u8]) -> String {
         text.push_str(&String::from_utf8_lossy(stderr));
     }
     text
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    #[test]
+    fn path_discovery_pins_the_absolute_launcher() {
+        let directory = tempfile::tempdir().unwrap();
+        let launcher = directory.path().join("tokenless");
+        std::fs::write(&launcher, "#!/bin/sh\nprintf 'stub output\\n'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let search = std::env::join_paths([directory.path()]).unwrap();
+        let resolved = resolve_launcher(Path::new("tokenless"), Some(&search)).unwrap();
+        assert_eq!(resolved, launcher.canonicalize().unwrap());
+        assert!(resolved.is_absolute() && resolved.is_file());
+        assert!(resolve_launcher(Path::new("missing"), Some(&search)).is_none());
+        #[cfg(unix)]
+        {
+            use crate::l2::runtime_side::{Mode, RawCapture, run_command};
+            use tokenless_protocol::PreToolAction;
+            let raw = RawCapture {
+                text: "native baseline".into(),
+                wall_s: 0.0,
+                success: true,
+            };
+            let bare = run_command(
+                "git log --oneline -50",
+                &raw,
+                directory.path(),
+                (Path::new("tokenless"), directory.path()),
+                Mode::Default,
+                "bare",
+            )
+            .unwrap();
+            let pinned = run_command(
+                "git log --oneline -50",
+                &raw,
+                directory.path(),
+                (&resolved, directory.path()),
+                Mode::Default,
+                "pinned",
+            )
+            .unwrap();
+            assert_eq!(
+                bare.evidence.pre_tool_action,
+                Some(PreToolAction::Passthrough)
+            );
+            assert_eq!(
+                pinned.evidence.pre_tool_action,
+                Some(PreToolAction::ReplaceArguments)
+            );
+            assert_eq!(bare.post_tool_input.as_deref(), Some("native baseline"));
+            assert_eq!(pinned.post_tool_input.as_deref(), Some("stub output\n"));
+        }
+    }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "fixture_fail"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+dep01 = { path = "../cargo_ws/deps/dep01" }
+dep02 = { path = "../cargo_ws/deps/dep02" }
+dep03 = { path = "../cargo_ws/deps/dep03" }
+dep04 = { path = "../cargo_ws/deps/dep04" }
