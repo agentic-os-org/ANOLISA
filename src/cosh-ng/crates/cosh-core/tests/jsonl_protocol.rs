@@ -3,6 +3,8 @@ use std::process::Stdio;
 
 use serde_json::Value;
 
+#[path = "jsonl_protocol/cancellation.rs"]
+mod cancellation;
 mod common;
 #[path = "jsonl_protocol/trial_access.rs"]
 mod trial_access;

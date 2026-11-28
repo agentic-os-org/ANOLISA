@@ -121,7 +121,19 @@ ID and a `control_response`:
 ```
 
 Other Core requests include `ask_user`, `auth_required`, and the optional
-`shell_evidence` request. A frontend can interrupt or stop the process with:
+`shell_evidence` request. Send `interrupt` to cancel the current request while
+Core is waiting for an approval required by the tool policy before execution,
+an answer to `ask_user`, or a `shell_evidence` response.
+
+```json
+{"type":"control_request","request_id":"interrupt-1","request":{"subtype":"interrupt"}}
+```
+
+Set `request.capabilities.can_handle_turn_cancelled` to `true` in
+`initialize` to receive a `result` with `error_code: "turn_cancelled"`
+when one of these waits is interrupted. Wait for that result before sending
+the next user request on the same process. To close the process, send
+`shutdown` at the idle boundary.
 
 ```json
 {"type":"control_request","request_id":"stop-1","request":{"subtype":"shutdown"}}
@@ -152,9 +164,10 @@ Successful turns end with a result like:
 
 The optional `result` field is omitted on success.
 
-Failures use `is_error: true` and include `errors`; session load and persistence
-failures also include `session_error_code` and `session_error_phase`. Invalid
+Check for `error_code: "turn_cancelled"` before handling generic error results.
+Failure results use `is_error: true` and include `errors`. Session load and
+persistence failures also include `session_error_code` and `session_error_phase`. Invalid
 JSONL input produces an error result and exits with a non-zero status. Keep
 stdout reserved for protocol messages; diagnostics are logged separately.
 
-For the complete schema, see the developer [IPC protocol reference](../../../../../src/cosh-ng/docs/design/en/ipc-protocol.md).
+See the developer [IPC protocol reference](../../../../../src/cosh-ng/docs/design/en/ipc-protocol.md#cosh-core-headless-jsonl-cancellation) for the result frame and v1 compatibility behavior.

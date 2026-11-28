@@ -126,6 +126,11 @@ pub(super) fn render_summary_input(
     let mut used_tokens = estimate_text_tokens(&rendered);
     let mut rendered_messages = 0;
     for message in prefix {
+        if super::boundary::is_cancelled_run_marker(message) {
+            // The cut still indexes the original transcript.
+            rendered_messages += 1;
+            continue;
+        }
         let mut text = message.content.as_text();
         for call in message.tool_calls.iter().flatten() {
             text.push_str(&format!(

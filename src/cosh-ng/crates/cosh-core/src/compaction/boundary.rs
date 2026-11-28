@@ -1,14 +1,22 @@
 //! Safe Agent-run grouping and compaction split-point selection.
 //!
 //! Compaction may only cut the transcript at complete semantic boundaries: a
-//! full Agent run spans one user prompt through its final assistant response,
-//! and an assistant tool call is indivisible from all of its tool results.
+//! full Agent run spans one user prompt through its final assistant response
+//! or explicit cancellation. A tool call is indivisible from its result.
 //! Any malformed tool-protocol structure fails closed.
 
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::provider::Message;
+use crate::provider::{Message, MessageContent};
+
+/// System message persisted after a cancelled run's paired tool results.
+pub(crate) const CANCELLED_RUN_MARKER: &str = "[Agent run cancelled by the user.]";
+
+pub(super) fn is_cancelled_run_marker(message: &Message) -> bool {
+    message.role == "system"
+        && matches!(&message.content, MessageContent::Text(text) if text == CANCELLED_RUN_MARKER)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Malformed tool-protocol structure detected while grouping a transcript.
@@ -168,14 +176,18 @@ fn transcript_ends_with_complete_agent_run(messages: &[Message], run: RunSpan) -
     messages[run.start..run.end]
         .iter()
         .rev()
-        .find(|message| matches!(message.role.as_str(), "user" | "assistant" | "tool"))
-        .is_some_and(|message| {
-            message.role == "assistant"
-                && message
+        .find_map(|message| match message.role.as_str() {
+            "user" | "tool" => Some(false),
+            "assistant" => Some(
+                message
                     .tool_calls
                     .as_ref()
-                    .is_none_or(|calls| calls.is_empty())
+                    .is_none_or(|calls| calls.is_empty()),
+            ),
+            _ if is_cancelled_run_marker(message) => Some(true),
+            _ => None,
         })
+        .unwrap_or(false)
 }
 
 /// Reports whether the transcript's last Agent run is still in flight.

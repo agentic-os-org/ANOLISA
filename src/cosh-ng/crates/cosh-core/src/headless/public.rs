@@ -203,6 +203,7 @@ async fn run_task(
             engine.shutdown_extension_runtime().await;
             return Ok(answer);
         }
+        Some(Ok(Ok(AgentTurnOutcome::Cancelled))) => Failure::new("cancelled", "task cancelled", 1),
         Some(Ok(Ok(AgentTurnOutcome::MaxTurns { limit }))) => Failure::new(
             "max_turns",
             format!("agent exceeded max turns ({limit})"),

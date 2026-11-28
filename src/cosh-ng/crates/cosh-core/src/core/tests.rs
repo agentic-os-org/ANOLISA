@@ -2512,6 +2512,540 @@ async fn approval_flow_rejects_host_executed_for_non_shell_tool() {
     }
 }
 
+const CONTROL_WAIT_QUESTION: &str = r#"{"question":"Which branch?","options":[{"label":"main"}]}"#;
+const CONTROL_WAIT_INTERRUPT: &str =
+    "{\"type\":\"control_request\",\"request_id\":\"interrupt-1\",\"request\":{\"subtype\":\"interrupt\"}}\n";
+
+fn control_wait_tool_events(calls: &[(&str, &str, &str)]) -> Vec<GenerateEvent> {
+    let mut events = Vec::new();
+    for (index, &(id, name, arguments)) in calls.iter().enumerate() {
+        let index = index as u32;
+        events.extend([
+            GenerateEvent::ToolCallStart {
+                index,
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index,
+                arguments_delta: arguments.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index },
+        ]);
+    }
+    events.push(GenerateEvent::MessageEnd);
+    events
+}
+
+fn control_wait_core(first_turn: Vec<GenerateEvent>, tools: ToolRegistry) -> CoshCore {
+    let provider = MockProvider::new(vec![
+        first_turn,
+        vec![
+            GenerateEvent::TextDelta("Provider continued.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = ApprovalMode::Trust;
+    let mut core = CoshCore::new_legacy(config, Box::new(provider), tools.with_shell_evidence());
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    core
+}
+
+#[cfg(unix)]
+async fn respond_after_control_request(
+    core: &mut CoshCore,
+    expected_subtype: &str,
+    response: &str,
+) -> Vec<serde_json::Value> {
+    use tokio::io::AsyncWriteExt;
+
+    let (mut writer, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut output = BufReader::new(tokio::net::UnixStream::from_std(peer).unwrap()).lines();
+    let (stdin, mut client) = tokio::io::duplex(512);
+    let mut reader = BufReader::new(stdin).lines();
+    let shell = async {
+        let mut messages = Vec::new();
+        let mut response = Some(response);
+        while let Some(line) = output.next_line().await.unwrap() {
+            let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if message["type"] == "control_request"
+                && message["request"]["subtype"] == expected_subtype
+            {
+                if let Some(response) = response.take() {
+                    client.write_all(response.as_bytes()).await.unwrap();
+                    client.shutdown().await.unwrap();
+                }
+            }
+            messages.push(message);
+        }
+        messages
+    };
+    let turn = async {
+        core.handle_user_message("Run the tools", &mut reader, &mut writer)
+            .await
+            .unwrap();
+        drop(writer);
+    };
+    let ((), messages) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(turn, shell) })
+            .await
+            .expect("Core and Shell should complete the control exchange");
+    assert!(messages.iter().any(|message| {
+        message["type"] == "control_request" && message["request"]["subtype"] == expected_subtype
+    }));
+    messages
+}
+
+fn assert_control_wait_cancelled(core: &CoshCore) {
+    assert_eq!(core.metrics.api_requests, 1, "the model must not resume");
+    let events = core.audit.captured_events();
+    let terminals: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event_type.as_str(), "turn.failed" | "turn.completed"))
+        .collect();
+    assert_eq!(terminals.len(), 1, "{terminals:?}");
+    assert_eq!(terminals[0].outcome.status, AuditOutcomeStatus::Cancelled);
+    assert_eq!(terminals[0].data()["reason_code"], "interrupted");
+    assert_eq!(events.last().unwrap().event_type.as_str(), "turn.failed");
+}
+
+#[cfg(unix)]
+async fn assert_control_wait_batch_interrupt(name: &str, arguments: &str, subtype: &str) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::with_defaults_for_test();
+    tools.register(Box::new(CountingMcpTool {
+        calls: Arc::clone(&calls),
+    }));
+    let mut core = control_wait_core(
+        control_wait_tool_events(&[
+            ("prior", "mcp__remote__search", "{"),
+            ("interrupted", name, arguments),
+            ("skipped", "mcp__remote__search", "{}"),
+            (
+                "unopened-question",
+                "ask_user_question",
+                CONTROL_WAIT_QUESTION,
+            ),
+        ]),
+        tools,
+    );
+
+    let protocol = respond_after_control_request(&mut core, subtype, CONTROL_WAIT_INTERRUPT).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the pending tool ran");
+    assert_control_wait_cancelled(&core);
+    let assistant = core
+        .messages
+        .iter()
+        .find(|message| message.role == "assistant")
+        .unwrap();
+    let declared: Vec<_> = assistant
+        .tool_calls
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|call| call.id.as_str())
+        .collect();
+    assert_eq!(
+        declared,
+        ["prior", "interrupted", "skipped", "unopened-question"]
+    );
+    let tool_results: Vec<_> = core
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .collect();
+    assert_eq!(
+        tool_results
+            .iter()
+            .map(|message| message.tool_call_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        declared,
+    );
+    assert!(tool_results[0]
+        .content
+        .as_text()
+        .contains("arguments rejected"));
+    assert!(tool_results[1]
+        .content
+        .as_text()
+        .to_ascii_lowercase()
+        .contains("interrupt"));
+    for result in &tool_results[2..] {
+        assert!(result
+            .content
+            .as_text()
+            .contains("was not executed: an earlier tool call"));
+    }
+    assert!(crate::compaction::has_new_compactable_prefix(&core.messages, 1, 0).is_ok());
+    let requests: Vec<_> = protocol
+        .iter()
+        .filter(|message| message["type"] == "control_request")
+        .collect();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let shell_tool_results: Vec<_> = protocol
+        .iter()
+        .filter_map(|message| message["message"]["content"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "tool_result")
+        .filter_map(|block| block["tool_use_id"].as_str())
+        .collect();
+    let expected_shell_results = if subtype == "ask_user" {
+        vec!["prior", "skipped"]
+    } else {
+        vec!["prior", "interrupted", "skipped"]
+    };
+    assert_eq!(shell_tool_results, expected_shell_results);
+
+    assert_compaction_crosses_cancelled_run(&mut core).await;
+}
+
+#[cfg(unix)]
+async fn assert_compaction_crosses_cancelled_run(core: &mut CoshCore) {
+    use crate::compaction::{compact_session, run_context_preflight, CompactionTrigger};
+    use crate::session::{PersistedSession, ProviderSessionId, SessionStore};
+
+    let cancelled_run_end = core.messages.len();
+    core.config.session.compaction.model_context_window = Some(100_000);
+    let mut reader = empty_reader().await;
+    core.handle_user_message(
+        &"diagnostic output ".repeat(7_000),
+        &mut reader,
+        &mut Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        core.messages.last().unwrap().content.as_text(),
+        "Provider continued."
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = SessionStore::for_test_workspace(
+        temp.path().join("sessions").to_str().unwrap(),
+        temp.path(),
+    )
+    .unwrap();
+    let model = "mock-model";
+    let mut session = PersistedSession::new(
+        ProviderSessionId::new(),
+        store.workspace_scope().to_string(),
+        model.to_string(),
+        core.messages.clone(),
+    );
+    store.persist(&mut session).unwrap();
+    let mut config = CoreConfig::default();
+    config.session.compaction.model_context_window = Some(40_000);
+    let summary = "## Objective and constraints\n- keep diagnosing";
+    let manual = compact_session(
+        &store,
+        &session.session_id,
+        &MockProvider::repeat_text(summary),
+        &config,
+        1_000,
+        None,
+        CompactionTrigger::Manual,
+        None,
+    )
+    .await;
+    let reloaded = store.load(&session.session_id).unwrap();
+    let mut emergency = CompactionRuntime::default();
+    let preflight = run_context_preflight(
+        &mut emergency,
+        &reloaded.messages,
+        &MockProvider::repeat_text(summary),
+        model,
+        &config,
+        1_000,
+        &mut Vec::new(),
+    )
+    .await;
+    assert!(
+        manual.is_ok() && preflight.is_ok(),
+        "manual: {:?}, emergency: {preflight:?}, emergency cut: {:?}",
+        manual.as_ref().err(),
+        emergency.state().map(|state| state.compacted_through)
+    );
+    let (_, compacted) = manual.unwrap();
+    assert!(compacted.compaction.unwrap().compacted_through > cancelled_run_end);
+    assert!(emergency.state().unwrap().compacted_through > cancelled_run_end);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_trial_native_question_interrupt_records_both_stops() {
+    let inner = Arc::new(MockProvider::with_tool_call(
+        "ask_user_question",
+        "trial-question",
+        CONTROL_WAIT_QUESTION,
+    ));
+    let context = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "shell_session_id": "trial-question",
+        "intent": "user_initiated",
+        "auto_use_allowed": true
+    }))
+    .unwrap();
+    let (provider, access) = provider_access::wrap_with_check(inner, context, Arc::new(|| true));
+    let mut core = CoshCore::new_legacy(
+        CoreConfig::default(),
+        provider,
+        ToolRegistry::with_defaults_for_test(),
+    );
+    core.trial_access = Some(Arc::clone(&access));
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+
+    let frames = respond_after_control_request(&mut core, "ask_user", CONTROL_WAIT_INTERRUPT).await;
+
+    assert_control_wait_cancelled(&core);
+    assert_eq!(access.failure().unwrap().code, "trial_cancelled");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| { frame["type"] == "ecs_trial_state" && frame["phase"] == "terminated" }),
+        "{frames:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_native_question_interrupt_skips_batch() {
+    assert_control_wait_batch_interrupt("ask_user_question", CONTROL_WAIT_QUESTION, "ask_user")
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_shell_evidence_interrupt_skips_batch() {
+    assert_control_wait_batch_interrupt(
+        "cosh_shell_evidence",
+        r#"{"action":"list_commands"}"#,
+        "shell_evidence",
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_last_tool_interrupt_allows_next_request() {
+    let mut core = control_wait_core(
+        control_wait_tool_events(&[("only", "ask_user_question", CONTROL_WAIT_QUESTION)]),
+        ToolRegistry::with_defaults_for_test(),
+    );
+
+    respond_after_control_request(&mut core, "ask_user", CONTROL_WAIT_INTERRUPT).await;
+
+    assert_control_wait_cancelled(&core);
+    assert_eq!(
+        core.messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.tool_call_id.as_deref()),
+        Some("only"),
+    );
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+    core.handle_user_message("A new request", &mut reader, &mut output)
+        .await
+        .unwrap();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("Provider continued."));
+    assert_eq!(
+        crate::compaction::has_new_compactable_prefix(&core.messages, 1, 0),
+        Ok(true),
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_in_band_question_interrupt_reports_cancellation() {
+    let mut core = control_wait_core(
+        vec![
+            GenerateEvent::TextDelta(format!("COSH_QUESTION:{CONTROL_WAIT_QUESTION}")),
+            GenerateEvent::MessageEnd,
+        ],
+        ToolRegistry::with_defaults_for_test(),
+    );
+
+    respond_after_control_request(&mut core, "ask_user", CONTROL_WAIT_INTERRUPT).await;
+
+    assert_control_wait_cancelled(&core);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_eof_is_a_tool_error_and_allows_model_to_continue() {
+    for (name, arguments, subtype, error) in [
+        (
+            "ask_user_question",
+            CONTROL_WAIT_QUESTION,
+            "ask_user",
+            "User did not answer",
+        ),
+        (
+            "cosh_shell_evidence",
+            r#"{"action":"list_commands"}"#,
+            "shell_evidence",
+            "response was not received",
+        ),
+    ] {
+        let mut core = control_wait_core(
+            control_wait_tool_events(&[("wait", name, arguments)]),
+            ToolRegistry::with_defaults_for_test(),
+        );
+        respond_after_control_request(&mut core, subtype, "").await;
+
+        assert_eq!(core.metrics.api_requests, 2, "{name}");
+        let result = core
+            .messages
+            .iter()
+            .find(|message| message.role == "tool")
+            .unwrap();
+        assert!(result.content.as_text().contains(error), "{result:?}");
+        assert!(core
+            .audit
+            .captured_events()
+            .iter()
+            .all(|event| event.outcome.status != AuditOutcomeStatus::Cancelled));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_approval_interrupt_keeps_loop_warning_after_all_results() {
+    let search_calls = Arc::new(AtomicUsize::new(0));
+    let shell_calls = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::with_defaults_for_test();
+    tools.register(Box::new(CountingMcpTool {
+        calls: Arc::clone(&search_calls),
+    }));
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&shell_calls),
+    }));
+    let mut core = control_wait_core(
+        control_wait_tool_events(&[
+            ("first", "mcp__remote__search", "{}"),
+            ("second", "mcp__remote__search", "{}"),
+            ("third", "mcp__remote__search", "{}"),
+            ("approval", "shell", r#"{"command":"echo approval"}"#),
+            ("pending", "shell", r#"{"command":"echo pending"}"#),
+        ]),
+        tools,
+    );
+    core.client_capabilities = fully_capable_client();
+
+    respond_after_control_request(&mut core, "can_use_tool", CONTROL_WAIT_INTERRUPT).await;
+
+    assert_eq!(search_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(shell_calls.load(Ordering::SeqCst), 0);
+    assert_control_wait_cancelled(&core);
+    let tool_results: Vec<_> = core
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect();
+    assert_eq!(
+        tool_results,
+        ["first", "second", "third", "approval", "pending"]
+    );
+    let roles: Vec<_> = core
+        .messages
+        .iter()
+        .map(|message| message.role.as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "tool",
+            "tool",
+            "tool",
+            "system",
+            "system"
+        ]
+    );
+    assert_eq!(
+        core.messages[roles.len() - 2..]
+            .iter()
+            .map(|message| message.content.as_text())
+            .collect::<Vec<_>>(),
+        [
+            LoopDetector::loop_warning(),
+            crate::compaction::CANCELLED_RUN_MARKER,
+        ]
+    );
+    assert!(crate::compaction::has_new_compactable_prefix(&core.messages, 1, 0).is_ok());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn control_wait_ignores_mismatched_responses_and_handles_matched_responses() {
+    for (name, arguments, subtype, payload, expected) in [
+        (
+            "ask_user_question",
+            CONTROL_WAIT_QUESTION,
+            "ask_user",
+            serde_json::json!({"answer":"main"}),
+            "main",
+        ),
+        (
+            "ask_user_question",
+            CONTROL_WAIT_QUESTION,
+            "ask_user",
+            serde_json::json!({}),
+            "User did not answer",
+        ),
+        (
+            "cosh_shell_evidence",
+            r#"{"action":"list_commands"}"#,
+            "shell_evidence",
+            serde_json::json!({"behavior":"shell_evidence","result":{"llmContent":"command index"}}),
+            "command index",
+        ),
+        (
+            "cosh_shell_evidence",
+            r#"{"action":"list_commands"}"#,
+            "shell_evidence",
+            serde_json::json!({"behavior":"shell_evidence"}),
+            "response missing result",
+        ),
+    ] {
+        let mut core = control_wait_core(
+            control_wait_tool_events(&[("wait", name, arguments)]),
+            ToolRegistry::with_defaults_for_test(),
+        );
+        let response = |request_id, response| {
+            serde_json::json!({
+                "type":"control_response",
+                "response":{"subtype":"success","request_id":request_id,"response":response}
+            })
+        };
+        let wrong = response("req-wrong", serde_json::json!({"answer":"wrong"}));
+        let matched = response("req-0", payload);
+        respond_after_control_request(&mut core, subtype, &format!("{wrong}\n{matched}\n")).await;
+
+        assert_eq!(core.metrics.api_requests, 2, "{name}");
+        let result = core
+            .messages
+            .iter()
+            .find(|message| message.role == "tool")
+            .unwrap();
+        assert!(result.content.as_text().contains(expected), "{result:?}");
+        assert!(core
+            .audit
+            .captured_events()
+            .iter()
+            .all(|event| event.outcome.status != AuditOutcomeStatus::Cancelled));
+    }
+}
+
 #[tokio::test]
 async fn ask_user_question_flow() {
     let provider = MockProvider::new(vec![
@@ -2900,7 +3434,10 @@ async fn cosh_shell_evidence_already_delivered_is_not_error() {
     let input = format!("{response}\n");
     let mut reader = BufReader::new(input.as_bytes()).lines();
 
-    let result = core.wait_for_shell_evidence("req-0", &mut reader).await;
+    let result = core
+        .wait_for_shell_evidence("req-0", &mut reader)
+        .await
+        .result;
 
     assert!(!result.is_error, "{}", result.output);
     assert!(result.output.contains("excerpt_status: already_delivered"));
@@ -3026,7 +3563,8 @@ async fn cosh_shell_evidence_rejects_read_output_without_output_id() {
             &mut reader,
             &mut output,
         )
-        .await;
+        .await
+        .result;
 
     assert!(result.is_error);
     assert!(result.output.contains("missing required output_id"));
@@ -3049,7 +3587,8 @@ async fn cosh_shell_evidence_rejects_list_commands_read_output_fields() {
             &mut reader,
             &mut output,
         )
-        .await;
+        .await
+        .result;
 
     assert!(result.is_error);
     assert!(result.output.contains("accepts only limit and cursor"));
@@ -3075,7 +3614,8 @@ async fn cosh_shell_evidence_list_commands_ignores_direction_hint() {
             &mut reader,
             &mut output,
         )
-        .await;
+        .await
+        .result;
 
     assert!(!result.is_error, "{}", result.output);
     assert!(result.output.contains("ShellEvidenceCommandIndex"));
@@ -3098,7 +3638,8 @@ async fn cosh_shell_evidence_rejects_invalid_limit_type() {
             &mut reader,
             &mut output,
         )
-        .await;
+        .await
+        .result;
 
     assert!(result.is_error);
     assert!(result.output.contains("limit must be an integer"));
@@ -3122,7 +3663,8 @@ async fn cosh_shell_evidence_rejects_invalid_bypass_recent_filter_type() {
             &mut reader,
             &mut output,
         )
-        .await;
+        .await
+        .result;
 
     assert!(result.is_error);
     assert!(result
@@ -4240,7 +4782,8 @@ async fn evidence_emit_failure_never_waits_for_a_response() {
             &mut reader,
             &mut writer,
         )
-        .await;
+        .await
+        .result;
 
     assert!(result.is_error);
     assert!(
@@ -4272,7 +4815,8 @@ async fn question_emit_failure_never_waits_for_an_answer() {
             &mut reader,
             &mut writer,
         )
-        .await;
+        .await
+        .result;
 
     assert!(result.is_error);
     assert!(
@@ -4482,9 +5026,9 @@ fn trust_shell_core(calls: Arc<AtomicUsize>, provider: MockProvider) -> CoshCore
 
 fn fully_capable_client() -> ClientControlCapabilities {
     ClientControlCapabilities {
-        can_handle_ecs_trial_v1: false,
         can_handle_can_use_tool: true,
         can_handle_host_executed_shell: true,
+        ..Default::default()
     }
 }
 
@@ -4515,9 +5059,8 @@ fn trust_classify_keeps_shell_local_without_full_capabilities() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut core = trust_shell_core(calls, MockProvider::new(vec![]));
     core.client_capabilities = ClientControlCapabilities {
-        can_handle_ecs_trial_v1: false,
         can_handle_can_use_tool: true,
-        can_handle_host_executed_shell: false,
+        ..Default::default()
     };
     assert!(matches!(
         core.classify_tool("shell", &params),

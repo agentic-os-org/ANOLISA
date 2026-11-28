@@ -190,6 +190,36 @@ cargo test --locked -p cosh-types test_request_bincode_variant_index
 cargo test --locked -p cosh-platform -- checkpoint
 ```
 
+## cosh-core Headless JSONL Cancellation
+
+A persistent headless client opts into request-level cancellation results by
+sending the following v1 initialization frame.
+
+```json
+{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","protocol_version":1,"capabilities":{"can_handle_turn_cancelled":true}}}
+```
+
+`interrupt` ends the current request while Core is waiting for an approval
+required by the tool policy before execution, an answer to `ask_user`, or a
+`shell_evidence` response. Core pairs the tool results and performs session
+persistence before emitting the request's terminal frame.
+
+```json
+{"type":"result","subtype":"error","is_error":true,"error_code":"turn_cancelled","result":"user requested cancellation","errors":["user requested cancellation"],"session_id":"..."}
+```
+
+Clients recognize this frame by `type: "result"` and
+`error_code: "turn_cancelled"`. A separate Trial failure still reports its
+provider error code. A persistence failure reports `session_error_code` and
+`session_error_phase: "persist"`. The negotiated cancellation result leaves
+the Core process available for further requests. An idle `shutdown` request
+ends the process without emitting a turn result.
+
+The capability defaults to false. An older Shell transport relies on its
+local cancellation state and EOF, so Core closes that process after a
+successful cancellation. Other persistent v1 clients that omit the capability
+receive the legacy success envelope after a successful cancellation.
+
 ## cosh-core Session Management JSON Protocol
 
 `cosh-core --session-control` is the stable internal boundary used by

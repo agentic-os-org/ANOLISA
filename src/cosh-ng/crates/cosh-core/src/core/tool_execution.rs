@@ -24,7 +24,7 @@ use crate::tool::ask_user_question::{
 };
 use crate::tool::ToolResult;
 
-use super::{CoshCore, PendingToolCall};
+use super::{ControlWaitResult, CoshCore, PendingToolCall};
 
 /// Marker introducing an in-band question inside assistant text.
 const IN_BAND_MARKER: &str = "COSH_QUESTION:";
@@ -351,7 +351,7 @@ impl CoshCore {
         tool_kind: &str,
         reader: &mut tokio::io::Lines<R>,
         writer: &mut W,
-    ) -> Result<Option<ToolResult>, String>
+    ) -> Result<Option<ControlWaitResult>, String>
     where
         W: Write,
         R: AsyncBufReadExt + Unpin,
@@ -411,9 +411,10 @@ impl CoshCore {
         self.audit
             .record_tool_execution_started(scope, &call.name, &tool_data)?;
         let tool_start = Instant::now();
-        let result = self
+        let wait = self
             .handle_ask_user(&params, Some(&call.id), reader, writer)
             .await;
+        let result = &wait.result;
         let duration_ms = tool_start.elapsed().as_millis() as u64;
         self.audit.record_tool_terminal(
             scope,
@@ -426,7 +427,7 @@ impl CoshCore {
         // Counted like any other tool call so a single rejection cannot make the
         // question tool look like it always fails.
         self.note_tool_call_metrics(result.is_error, duration_ms);
-        Ok(Some(result))
+        Ok(Some(wait))
     }
 
     /// Record one completed tool call in the per-turn metrics.
@@ -536,7 +537,7 @@ impl CoshCore {
         tool_use_id: Option<&str>,
         reader: &mut tokio::io::Lines<R>,
         writer: &mut W,
-    ) -> ToolResult
+    ) -> ControlWaitResult
     where
         W: Write,
         R: AsyncBufReadExt + Unpin,
@@ -574,13 +575,11 @@ impl CoshCore {
             return ToolResult::error(format!(
                 "question was not answered: delivery could not be confirmed ({})",
                 error.class()
-            ));
+            ))
+            .into();
         }
 
-        match self.wait_for_answer(&request_id, reader).await {
-            Some(answer) => ToolResult::success(answer),
-            None => ToolResult::error("User did not answer (interrupted or disconnected)"),
-        }
+        self.wait_for_answer(&request_id, reader).await
     }
 }
 

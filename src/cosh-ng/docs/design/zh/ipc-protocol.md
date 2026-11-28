@@ -190,6 +190,24 @@ cargo test --locked -p cosh-types test_request_bincode_variant_index
 cargo test --locked -p cosh-platform -- checkpoint
 ```
 
+## cosh-core Headless JSONL 取消
+
+持久 headless 客户端发送下面的 v1 初始化消息，声明可以识别请求级取消结果。
+
+```json
+{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","protocol_version":1,"capabilities":{"can_handle_turn_cancelled":true}}}
+```
+
+Core 等待执行工具前由工具策略要求的审批、`ask_user` 的回答或 `shell_evidence` 的响应时，`interrupt` 会结束当前请求。Core 补齐工具结果并执行会话持久化，然后发出请求的终态消息。
+
+```json
+{"type":"result","subtype":"error","is_error":true,"error_code":"turn_cancelled","result":"user requested cancellation","errors":["user requested cancellation"],"session_id":"..."}
+```
+
+客户端根据 `type: "result"` 和 `error_code: "turn_cancelled"` 识别取消结果。独立的 Trial 失败仍会报告对应的 Provider 错误码。持久化失败会报告 `session_error_code` 和 `session_error_phase: "persist"`。发出协商后的取消结果后，Core 进程仍可接收后续请求。空闲时收到 `shutdown` 会结束进程，无需发出轮次结果。
+
+该能力默认为 false。旧版 Shell 根据本地取消状态和 EOF 收尾，因此成功取消后 Core 会关闭该进程。省略该能力的其他持久 v1 客户端在成功取消后仍会收到旧版成功消息。
+
 ## cosh-core 会话管理 JSON 协议
 
 `cosh-core --session-control` 是 cosh-shell 用于发现、验证和清理 provider
