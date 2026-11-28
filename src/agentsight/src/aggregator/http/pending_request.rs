@@ -100,7 +100,10 @@ impl HttpConnectionAggregator {
                     self.insert(id, state);
                 }
             }
-            Ok(Some(request)) => self.process_request(request),
+            Ok(Some(request)) => {
+                self.connections.pop(&id);
+                self.process_request(request);
+            }
             Err(reason) => self.abandon(&id, reason),
         }
         true
@@ -138,6 +141,74 @@ mod tests {
             buf: bytes.to_vec(),
             is_handshake: false,
             ssl_ptr: id,
+        }
+    }
+
+    #[test]
+    fn completing_request_headers_is_a_transition_not_a_replacement() {
+        for rw in [0, 1] {
+            for coalesced_body in [false, true] {
+                let recorder =
+                    metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+                let handle = recorder.handle();
+                metrics::with_local_recorder(&recorder, || {
+                    let mut http = HttpConnectionAggregator::with_capacity(1);
+                    let mut prefix = event(1, b"PO");
+                    prefix.rw = rw;
+                    assert!(http.process_raw_body_data(&prefix).is_none());
+
+                    let mut bytes = b"ST / HTTP/1.1\r\nContent-Length: 2\r\n\r\n".to_vec();
+                    if coalesced_body {
+                        bytes.extend_from_slice(b"{}");
+                    }
+                    let mut tail = event(1, &bytes);
+                    tail.rw = rw;
+                    assert!(http.process_raw_body_data(&tail).is_none());
+                    let id = ConnectionId::from_ssl_event(&prefix);
+                    match http.connections.peek(&id) {
+                        Some(ConnectionState::RequestPending { request }) if coalesced_body => {
+                            assert_eq!(request.body(), b"{}");
+                        }
+                        Some(ConnectionState::RequestBodyPending { body_buffer, .. })
+                            if !coalesced_body =>
+                        {
+                            assert!(body_buffer.is_empty());
+                        }
+                        state => panic!("expected completed request headers, got {state:?}"),
+                    }
+                    assert_eq!(http.metrics().pending_connection_count, 1);
+                    assert!(http.metrics().connection_cache_bytes > 0);
+                    assert!(http.take_ready().is_empty());
+                    let snapshot = handle.render();
+                    assert!(
+                        !snapshot.lines().any(|line| {
+                            line.starts_with("agentsight_http_conn_removed_total{")
+                                && line.contains("reason=\"replaced\"")
+                        }),
+                        "successful header assembly must not report replacement: {snapshot}"
+                    );
+
+                    let mut new_request =
+                        event(1, b"POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
+                    new_request.rw = rw;
+                    let ParsedHttpMessage::Request(request) =
+                        HttpParser::new().parse(Rc::new(new_request)).unwrap()
+                    else {
+                        panic!("expected a request");
+                    };
+                    http.process_request(request);
+                    let snapshot = handle.render();
+                    assert!(snapshot.lines().any(|line| {
+                        line.starts_with("agentsight_http_conn_removed_total{")
+                            && line.contains("reason=\"replaced\"")
+                            && line.ends_with(" 1")
+                    }));
+                    assert_eq!(http.metrics().pending_connection_count, 1);
+                    http.abandon(&id, RemoveReason::PidExited);
+                    assert_eq!(http.metrics().pending_connection_count, 0);
+                    assert_eq!(http.metrics().connection_cache_bytes, 0);
+                });
+            }
         }
     }
 
