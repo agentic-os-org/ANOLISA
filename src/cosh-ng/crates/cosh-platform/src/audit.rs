@@ -62,6 +62,41 @@ impl AuditTestDir {
     }
 }
 
+#[cfg(test)]
+struct TestLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(test)]
+impl std::io::Write for TestLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs one test body with a thread-local subscriber that captures every
+/// warn-or-louder `tracing` event, formatted like the shipped log files,
+/// into the buffer handed to the body.
+#[cfg(test)]
+pub(crate) fn capture_logs<T>(
+    test: impl FnOnce(std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> T,
+) -> T {
+    let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer({
+            let logs = std::sync::Arc::clone(&logs);
+            move || TestLogWriter(std::sync::Arc::clone(&logs))
+        })
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    test(logs)
+}
+
 /// Call-site identity captured for a policy audit event.
 #[derive(Debug, Clone)]
 pub struct CallerInfo {
