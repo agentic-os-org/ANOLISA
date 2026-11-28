@@ -79,6 +79,11 @@ pub(crate) async fn reconcile_from_fs(
     changed |= !absent.is_empty();
     index.prune_chain(&absent);
     index.snapshots.retain(|id, _| !absent.contains(id));
+    let orphans_before = index.recovered_orphans.len();
+    index
+        .recovered_orphans
+        .retain(|id| !absent.contains(id) && index.snapshots.contains_key(id));
+    changed |= index.recovered_orphans.len() != orphans_before;
     for (id, meta) in recovered.snapshots {
         // A retained receipt must never identify an unverified orphan as the
         // original guarded checkpoint. Orphans require explicit deletion.
@@ -408,5 +413,74 @@ mod tests {
             .contains_key("abcdef1234567890abcdef1234567890abcdef12"));
         assert!(index.snapshots.contains_key("msg1-step0"));
         assert!(index.snapshots.contains_key("my-snapshot"));
+    }
+
+    fn make_meta(pinned: bool) -> SnapshotMeta {
+        SnapshotMeta {
+            message: None,
+            metadata: None,
+            pinned,
+            created_at: chrono::Utc::now(),
+            missing: false,
+            parent_id: None,
+            child_ids: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_prunes_absent_and_dangling_recovered_orphans_while_preserving_retained() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("surviving-orphan")).unwrap();
+
+        let mut index = SnapshotIndex::new(PathBuf::from("/ws"));
+        index
+            .snapshots
+            .insert("surviving-orphan".into(), make_meta(false));
+        index
+            .snapshots
+            .insert("gone-unpinned-orphan".into(), make_meta(false));
+        index
+            .snapshots
+            .insert("gone-pinned-orphan".into(), make_meta(true));
+        index.recovered_orphans.extend([
+            "surviving-orphan".into(),
+            "gone-unpinned-orphan".into(),
+            "gone-pinned-orphan".into(),
+            "dangling-orphan".into(),
+        ]);
+
+        assert!(reconcile_from_fs(dir.path(), &mut index).await.unwrap());
+        assert!(!index.snapshots.contains_key("gone-unpinned-orphan"));
+        assert!(!index.recovered_orphans.contains("gone-unpinned-orphan"));
+        assert!(!index.recovered_orphans.contains("dangling-orphan"));
+
+        assert!(index.snapshots.contains_key("surviving-orphan"));
+        assert!(!index.snapshots["surviving-orphan"].missing);
+        assert!(index.recovered_orphans.contains("surviving-orphan"));
+
+        assert!(index.snapshots.contains_key("gone-pinned-orphan"));
+        assert!(index.snapshots["gone-pinned-orphan"].missing);
+        assert!(index.recovered_orphans.contains("gone-pinned-orphan"));
+
+        assert!(!reconcile_from_fs(dir.path(), &mut index).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reconcile_reports_changed_when_only_dangling_recovered_orphan_is_pruned() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("surviving-orphan")).unwrap();
+
+        let mut index = SnapshotIndex::new(PathBuf::from("/ws"));
+        index
+            .snapshots
+            .insert("surviving-orphan".into(), make_meta(true));
+        index
+            .recovered_orphans
+            .extend(["surviving-orphan".into(), "dangling-only".into()]);
+
+        assert!(reconcile_from_fs(dir.path(), &mut index).await.unwrap());
+        assert!(!index.recovered_orphans.contains("dangling-only"));
+        assert!(index.recovered_orphans.contains("surviving-orphan"));
+        assert!(!reconcile_from_fs(dir.path(), &mut index).await.unwrap());
     }
 }
