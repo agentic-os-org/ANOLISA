@@ -47,7 +47,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可多行组稿。运行 cosh guide 打开配置向导与使用入门。"
         }
         MessageId::PromptSoftNewlineTip => {
-            "提示：以 ?? 开头可组稿多行 prompt（Shift+Enter 换行）。"
+            "提示：以 ?? 开头可编写多行 prompt（Shift+Enter 换行）。"
         }
         MessageId::PromptDraftTitle => "Prompt 草稿",
         MessageId::PromptDraftFooterEditing => {
