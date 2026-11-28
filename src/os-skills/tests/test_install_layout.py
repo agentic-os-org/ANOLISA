@@ -691,6 +691,30 @@ class InstallLayoutTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.installed(directory) / "example").exists())
 
+    def test_install_excludes_python_bytecode_caches(self) -> None:
+        scripts = self.source / "category/example/scripts"
+        pycache = scripts / "__pycache__"
+        pycache.mkdir(parents=True)
+        (scripts / "helper.py").write_text("#!/usr/bin/env python3\nprint('ok')\n")
+        (scripts / "helper.py").chmod(0o755)
+        (pycache / "helper.cpython-311.pyc").write_bytes(b"compiled")
+        (scripts / "legacy.pyc").write_bytes(b"compiled-pyc")
+        (scripts / "legacy.pyo").write_bytes(b"compiled-pyo")
+
+        directory = self.root / "custom skills"
+        skill = self.assert_install(directory, SKILLS_DIR=directory)
+        installed_paths = {
+            path.relative_to(skill).as_posix() for path in skill.rglob("*")
+        }
+        self.assertIn("scripts/helper.py", installed_paths)
+        self.assertFalse(
+            any(
+                "__pycache__" in item or item.endswith((".pyc", ".pyo"))
+                for item in installed_paths
+            ),
+            f"Python bytecode caches leaked into installed skill: {installed_paths}",
+        )
+
     def test_rejects_invalid_layout_before_copying(self) -> None:
         for values in (
             {"INSTALL_PROFILE": "unknown"},

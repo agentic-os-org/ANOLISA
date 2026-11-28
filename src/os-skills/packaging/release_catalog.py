@@ -9,6 +9,7 @@ from typing import List
 
 
 CATALOG = Path("packaging/released-skills.txt")
+BYTECODE_PATTERNS = ("__pycache__", "*.pyc", "*.pyo")
 SKILL_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*")
 TABLE = re.compile(r"(?m)^[ \t]*\[")
 ADAPTER_SKILL = re.compile(r"\[\[adapters\.(openclaw|hermes)\.skills\]\][ \t]*(?:#.*)?")
@@ -119,13 +120,18 @@ def release_manifest(text: str, released: List[Path]) -> str:
     return "".join(output)
 
 
+def is_bytecode_cache(relative: Path) -> bool:
+    return "__pycache__" in relative.parts or relative.suffix in (".pyc", ".pyo")
+
+
 def stage(source: Path, destination: Path, released: List[Path], layout: str) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink() or any(destination.iterdir()):
         raise ValueError(f"OS Skills staging destination must be empty: {destination}")
+    ignore = shutil.ignore_patterns(*BYTECODE_PATTERNS)
     for path in released:
         target = destination / (path if layout == "source" else path.name)
-        shutil.copytree(source / path, target)
+        shutil.copytree(source / path, target, ignore=ignore)
 
 
 def check_payload(source: Path, released: List[Path]) -> None:
@@ -137,6 +143,8 @@ def check_payload(source: Path, released: List[Path]) -> None:
                 raise ValueError(
                     f"released Skill payload contains a symlink: {child.relative_to(source)}"
                 )
+            if is_bytecode_cache(child.relative_to(folder)):
+                continue
             if child.name == "SKILL.md" and child.parent != folder:
                 raise ValueError(
                     f"released Skill payload contains another Skill: {child.relative_to(source)}"
