@@ -71,6 +71,38 @@ pub fn compile_with_options(
     availability: Availability,
     options: CompileOptions,
 ) -> Result<DeploymentDescriptor, DescriptorError> {
+    compile_at(bytes, target, capabilities, availability, options, None)
+}
+
+/// Compiles configured SDK profiles for the endpoint already resolved by the launcher.
+///
+/// # Errors
+/// Returns compilation errors for invalid configuration, capability or endpoint.
+pub fn compile_for_endpoint(
+    bytes: &[u8],
+    target: &str,
+    capabilities: AdapterCapabilities,
+    availability: Availability,
+    endpoint: &Path,
+) -> Result<DeploymentDescriptor, DescriptorError> {
+    compile_at(
+        bytes,
+        target,
+        capabilities,
+        availability,
+        CompileOptions::default(),
+        Some(endpoint),
+    )
+}
+
+fn compile_at(
+    bytes: &[u8],
+    target: &str,
+    capabilities: AdapterCapabilities,
+    availability: Availability,
+    options: CompileOptions,
+    resolved_endpoint: Option<&Path>,
+) -> Result<DeploymentDescriptor, DescriptorError> {
     let candidate = AdmissionEngine::new()?.preflight(bytes, target, capabilities)?;
     let config = candidate.configuration();
     let spec = &config.as_value()["spec"];
@@ -88,8 +120,18 @@ pub fn compile_with_options(
     let endpoint = daemon["endpoint"]
         .as_str()
         .ok_or(DescriptorError::Endpoint)?;
-    let (_, endpoint) = aw_config::service_paths::resolve(Path::new(state), Path::new(endpoint))
+    let state = if state == "auto" && endpoint == "auto" {
+        resolved_endpoint
+            .and_then(Path::parent)
+            .ok_or(DescriptorError::Endpoint)?
+    } else {
+        Path::new(state)
+    };
+    let (_, endpoint) = aw_config::service_paths::resolve(state, Path::new(endpoint))
         .map_err(|_| DescriptorError::Endpoint)?;
+    if resolved_endpoint.is_some_and(|expected| expected != endpoint) {
+        return Err(DescriptorError::Endpoint);
+    }
     let profile = candidate.capabilities();
     let mut value = json!({
         "version": VERSION,
@@ -106,6 +148,12 @@ pub fn compile_with_options(
     });
     if aw_config::direct_model_transport(&spec["agents"][target]) {
         value["model_transport"] = serde_json::json!("direct");
+    }
+    let configured = aw_config::instrumentation::profiles(target, &spec["agents"][target])
+        .map_err(AdmissionError::Configuration)?;
+    if let Some(source) = crate::instrumentation::source(&configured, &profile.adapter)? {
+        value["instrumentation_profiles"] =
+            json!(crate::instrumentation::binding(&configured, &source)?);
     }
     let hosts = aw_config::plaintext_http_hosts(&spec["agents"][target]);
     if !hosts.is_empty() {

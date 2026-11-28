@@ -164,6 +164,18 @@ Profile 纯函数编译为 `python` 或 `js` 类型的 `SourceCapability`，供�
   `result` 及其子路径的 `security.violation` 控制门时，必须声明带 `buffer: true`
   的有界 `stream` 配置。
 
+`adapter: sdk` 目标通过 `sdk.profiles` 选择 AW 构建中内置的 Profile ID。
+配置校验拒绝未知 ID、重复项、混用运行时和重叠接点。离线求解与运行时预检使用同一套
+SDK 协议能力投影。同一事件由多个 Profile 声明时，效果与失败动作取交集。
+Descriptor 将该能力上限与 Profile ID、规范化 JSON 的 SHA-256 摘要绑定。
+SDK 启用前验证绑定，Service 拒绝超出能力上限的注册声明。旧 Descriptor 可继续省略该字段。
+
+托管启动和协作式准备复用公共 SDK 准入与 Scope 协议。语言插桩支持
+`session.start`、`session.end`、`input.submit`、`turn.stop`、`tool.before` 和
+`tool.after`。当前生产构建的内置目录为空，测试构建提供双语言 Profile。
+部署配置中的自定义 Profile 和其余七个可插桩事件归入 M3。
+参见 [SDK 部署](../../../../../docs/developer-guide/zh/aw/deployment/native-sdk.md#内置插桩-profile)。
+
 ## 不可变 Scope 路由编译与缓存
 
 `aw_core::routes` 独立于 `Core::prepare/execute`，将 `AdmittedStep` 切片与精确 `u64`

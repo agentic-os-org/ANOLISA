@@ -7,6 +7,10 @@ description = "Versioned AW capability contracts and offline conformance validat
 repository = "https://github.com/alibaba/anolisa"
 publish = false
 
+[features]
+# Compiled seams for integration tests. Release builds carry no fixture profiles.
+profile-fixtures = []
+
 [dependencies]
 jsonschema = { workspace = true }
 serde = { workspace = true }

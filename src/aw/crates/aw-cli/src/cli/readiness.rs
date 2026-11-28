@@ -94,27 +94,9 @@ fn wait(
 }
 
 pub(super) fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
-    let metadata = match std::fs::symlink_metadata(&ready.path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
+    let Some(value) = matching_receipt(ready, &ready.path, pid)? else {
+        return Ok(false);
     };
-    // A receipt is same-user installation evidence, not a privileged attestation.
-    if !metadata.is_file()
-        || metadata.mode() & 0o7777 != 0o600
-        || metadata.uid() != unsafe { libc::geteuid() }
-    {
-        return Err("unsafe native startup receipt".into());
-    }
-    let value: Value = serde_json::from_slice(&read_file(&ready.path, 4096)?)?;
-    if value["version"] != 1
-        || value["adapter"] != ready.adapter
-        || value["token"] != ready.token
-        || value["hooks"].as_u64() != Some(ready.hooks as u64)
-        || value["pid"].as_u64() != Some(u64::from(pid))
-    {
-        return Err("native startup receipt does not match this launch".into());
-    }
     let suffix = match value.get("degraded") {
         None => "",
         Some(reason)
@@ -132,6 +114,35 @@ pub(super) fn receipt(ready: &Readiness, pid: u32) -> Result<bool> {
         eprintln!("AW {} native hooks ready{suffix}", ready.adapter);
     }
     Ok(true)
+}
+
+pub(super) fn matching_receipt(
+    ready: &Readiness,
+    path: &std::path::Path,
+    pid: u32,
+) -> Result<Option<Value>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    // A receipt is same-user installation evidence, not a privileged attestation.
+    if !metadata.is_file()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err("unsafe native startup receipt".into());
+    }
+    let value: Value = serde_json::from_slice(&read_file(path, 4096)?)?;
+    if value["version"] != 1
+        || value["adapter"] != ready.adapter
+        || value["token"] != ready.token
+        || value["hooks"].as_u64() != Some(ready.hooks as u64)
+        || value["pid"].as_u64() != Some(u64::from(pid))
+    {
+        return Err("native startup receipt does not match this launch".into());
+    }
+    Ok(Some(value))
 }
 
 #[cfg(test)]

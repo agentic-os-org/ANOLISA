@@ -31,7 +31,7 @@
 | 统一用户入口 | `aw-cli` | CLI 解析、呈现、兼容与命令编排 |
 | 本地运行时 | `aw-service` | Client、绑定、事件、期限、取消和审计 |
 | Hook 执行 | `aw-host`、`aw-exec` | 准备 Provider、执行步骤、约束进程寿命并清理 |
-| 共享校验 | `aw-config`、`aw-provider`、`aw-contracts` | 配置、Provider 协议/View、schema 和记录校验 |
+| 共享校验 | `aw-config`、`aw-provider`、`aw-contracts` | 配置、通过合同目录查找内置 Profile、Provider 协议/View、schema 和记录校验 |
 | 准入、计划 API 与日志 | `aw-core` | Hook 策略准入、独立计划执行 API 与 FileJournal |
 
 Hook 路径为 Adapter → Service → Host → executor → Provider 进程，结果返回 Adapter

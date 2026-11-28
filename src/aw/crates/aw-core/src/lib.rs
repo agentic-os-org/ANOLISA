@@ -9,6 +9,7 @@
 
 pub mod admission;
 pub mod descriptor;
+pub mod instrumentation;
 pub mod journal;
 pub mod ports;
 pub mod resolver;

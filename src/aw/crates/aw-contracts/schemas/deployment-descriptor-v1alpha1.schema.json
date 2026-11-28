@@ -71,6 +71,42 @@
         "native_fallback"
       ]
     },
+    "instrumentation_profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "profiles", "events", "failure_actions"],
+      "properties": {
+        "runtime": { "enum": ["python", "js"] },
+        "profiles": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 16,
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 128,
+            "not": { "pattern": "[^a-zA-Z0-9._-]" }
+          },
+          "additionalProperties": { "$ref": "#/properties/configuration_sha256" }
+        },
+        "events": {
+          "type": "object",
+          "propertyNames": {
+            "enum": ["session.start", "turn.stop", "session.end", "input.submit", "tool.before", "tool.after"]
+          },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "enum": ["observe", "block", "replace_input", "replace_result"] }
+          }
+        },
+        "failure_actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "tool.after": { "const": ["withhold_result"] } }
+        }
+      }
+    },
     "model_transport": {
       "type": "string",
       "enum": ["relay", "direct"]

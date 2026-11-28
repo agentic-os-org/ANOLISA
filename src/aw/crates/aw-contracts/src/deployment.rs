@@ -1,11 +1,39 @@
 //! Validated deployment hints for SDK startup, without runtime admission proof.
 
-use crate::{canonical, Error, Registry};
+use crate::{canonical, instrumentation::Runtime, Error, Registry};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 /// Version of the deployment hint document understood by this build.
 pub const VERSION: &str = "aw-deployment/v1alpha1";
+
+/// Version of the public semantic SDK callbacks.
+pub const SDK_PROTOCOL: &str = "aw-hook-source/v1";
+/// Entrypoint for application-owned SDK callbacks.
+pub const SDK_ENTRYPOINT: &str = "application";
+/// Maximum semantic effects carried by public SDK callbacks.
+pub const SDK_EVENTS: &[(&str, &[&str])] = &[
+    ("session.start", &["observe"]),
+    ("turn.stop", &["observe", "block"]),
+    ("session.end", &["observe"]),
+    ("input.submit", &["observe", "block"]),
+    ("tool.before", &["observe", "block", "replace_input"]),
+    ("tool.after", &["observe", "replace_result"]),
+];
+
+/// Canonical profile digests and the resulting SDK capability ceiling.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstrumentationBinding {
+    /// Language runtime of the process binding.
+    pub runtime: Runtime,
+    /// SHA-256 of each profile's canonical JSON bytes, indexed by builtin ID.
+    pub profiles: BTreeMap<String, String>,
+    /// Supported effects per semantic Hook.
+    pub events: BTreeMap<String, Vec<String>>,
+    /// Additional failure actions (blocking and reporting use event effects).
+    pub failure_actions: BTreeMap<String, Vec<String>>,
+}
 
 /// Service availability behavior selected by the integration profile and policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +82,8 @@ struct Fields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_transport: Option<String>,
     availability: Availability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instrumentation_profiles: Option<InstrumentationBinding>,
 }
 
 impl DeploymentDescriptor {
@@ -69,9 +99,32 @@ impl DeploymentDescriptor {
             .map_err(|_| Error::InvalidSchema("deployment-descriptor-v1alpha1".into()))?;
         let value = canonical::parse(bytes)?;
         registry.validate("deployment-descriptor-v1alpha1", &value)?;
-        serde_json::from_value(value)
-            .map(Self)
-            .map_err(|_| Error::SchemaMismatch("deployment-descriptor-v1alpha1".into()))
+        let fields: Fields = serde_json::from_value(value)
+            .map_err(|_| Error::SchemaMismatch("deployment-descriptor-v1alpha1".into()))?;
+        if let Some(binding) = &fields.instrumentation_profiles {
+            if fields.profile.adapter != "sdk"
+                || fields.profile.version != SDK_PROTOCOL
+                || fields.profile.entrypoint != SDK_ENTRYPOINT
+                || binding.events.iter().any(|(event, effects)| {
+                    !effects.iter().any(|effect| effect == "observe")
+                        || !SDK_EVENTS.iter().any(|(name, allowed)| {
+                            *name == event
+                                && effects
+                                    .iter()
+                                    .all(|effect| allowed.contains(&effect.as_str()))
+                        })
+                })
+                || binding
+                    .failure_actions
+                    .keys()
+                    .any(|event| !binding.events.contains_key(event))
+            {
+                return Err(Error::Invariant(
+                    "invalid SDK instrumentation descriptor binding",
+                ));
+            }
+        }
+        Ok(Self(fields))
     }
 
     /// Exact version of the deployment hint contract.
@@ -107,6 +160,11 @@ impl DeploymentDescriptor {
     /// Whether the selected target requests session-start observation.
     pub fn observe_session_start(&self) -> bool {
         self.0.observe_session_start
+    }
+
+    /// Optional builtin profile binding for SDK startup.
+    pub fn instrumentation_profiles(&self) -> Option<&InstrumentationBinding> {
+        self.0.instrumentation_profiles.as_ref()
     }
 
     /// Existing service availability contract selected during compilation.

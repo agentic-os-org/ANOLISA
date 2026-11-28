@@ -228,7 +228,7 @@ class GateTests(GateFixture):
             (
                 "aw-config",
                 self.root / "crates/aw-config",
-                ["jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"],
+                ["aw-contracts", "jsonschema", "serde", "serde_json", "serde_yaml_ng", "thiserror"],
             ),
             (
                 "aw-provider",
@@ -362,7 +362,7 @@ class GateTests(GateFixture):
             gate.structure(invalid, self.root)
         for package, dependency in (
             (0, "aw-core"), (1, "tokio"), (1, "semver"), (1, "aw-host"), (1, "aw-service"),
-            (1, "aw-exec"), (1, "aw-adapter"), (2, "aw-core"), (2, "aw-contracts"),
+            (1, "aw-exec"), (1, "aw-adapter"), (2, "aw-core"), (2, "aw-adapter"),
             (3, "aw-core"), (4, "aw-core"), (4, "aw-provider"), (4, "aw-config"),
             (5, "aw-contracts"), (5, "aw-service"), (5, "aw-adapter"), (5, "libc"),
             (6, "aw-contracts"), (6, "tokio"), (6, "aw-provider-tokenless"),

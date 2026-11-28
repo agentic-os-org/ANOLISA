@@ -3,6 +3,7 @@ import { constants, promises as fs } from "node:fs";
 import { open, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute } from "node:path";
+import { sourceCapabilities } from "./source-profile.mjs";
 import { AwError } from "./transport.mjs";
 
 const limit = 4 * 1024 * 1024;
@@ -34,7 +35,7 @@ async function checkFilesystem(file) {
   if (!supportedFilesystems.has(info.type)) throw new Error();
 }
 
-async function readFile(path) {
+async function readOwned(path) {
   if (
     typeof path !== "string" ||
     !isAbsolute(path) ||
@@ -96,7 +97,7 @@ async function readFile(path) {
       !ownedDirectory(await parent.stat({ bigint: true }))
     )
       throw new Error();
-    return bytes.subarray(0, count);
+    return { bytes: bytes.subarray(0, count), mode: info.mode };
   } catch {
     throw new AwError("sdk_descriptor_file_invalid");
   } finally {
@@ -105,7 +106,7 @@ async function readFile(path) {
   }
 }
 
-// The descriptor grammar needs only objects, strings and booleans. Parse keys
+// The descriptor grammar needs only arrays, objects, strings and booleans. Parse keys
 // before building objects so JSON.parse cannot erase duplicate declarations.
 function parse(text) {
   let position = 0;
@@ -126,7 +127,7 @@ function parse(text) {
   };
   const object = (depth) => {
     whitespace();
-    if (depth > 2 || text[position++] !== "{") throw new Error();
+    if (depth > 4 || text[position++] !== "{") throw new Error();
     const result = Object.create(null);
     const keys = new Set();
     whitespace();
@@ -141,6 +142,20 @@ function parse(text) {
         let value;
         if (text[position] === '"') value = string();
         else if (text[position] === "{") value = object(depth + 1);
+        else if (text[position] === "[") {
+          position++;
+          value = [];
+          whitespace();
+          if (text[position] !== "]") {
+            while (true) {
+              value.push(string());
+              whitespace();
+              if (text[position] !== ",") break;
+              position++;
+            }
+          }
+          if (text[position++] !== "]") throw new Error();
+        }
         else if (text.startsWith("true", position)) {
           value = true;
           position += 4;
@@ -176,7 +191,7 @@ export async function loadDescriptor({
   target,
   requiresService = false,
 }) {
-  const bytes = await readFile(descriptorFile);
+  const { bytes, mode } = await readOwned(descriptorFile);
   let value;
   try {
     value = parse(
@@ -192,6 +207,7 @@ export async function loadDescriptor({
         "wait_for_input_submit",
         ...(Object.hasOwn(value, "observe_session_start") ? ["observe_session_start"] : []),
         "availability",
+        ...(Object.hasOwn(value, "instrumentation_profiles") ? ["instrumentation_profiles"] : []),
       ]) ||
       !fields(value.profile, ["adapter", "version", "entrypoint"]) ||
       value.version !== "aw-deployment/v1alpha1" ||
@@ -211,6 +227,8 @@ export async function loadDescriptor({
       )
     )
       throw new Error();
+    if (Object.hasOwn(value, "instrumentation_profiles"))
+      validateInstrumentation(value.instrumentation_profiles, value.profile);
   } catch {
     throw new AwError("sdk_descriptor_invalid");
   }
@@ -222,11 +240,13 @@ export async function loadDescriptor({
     (requiresService && value.availability !== "required")
   )
     throw new AwError("sdk_descriptor_profile_mismatch");
+  if (value.instrumentation_profiles && (mode & 0o222n))
+    throw new AwError("sdk_descriptor_read_only_required");
   if (target != null && target !== value.target)
     throw new AwError("sdk_descriptor_target_mismatch");
   if (
     createHash("sha256")
-      .update(await readFile(configFile))
+      .update((await readOwned(configFile)).bytes)
       .digest("hex") !== value.configuration_sha256
   )
     throw new AwError("sdk_descriptor_stale");
@@ -236,5 +256,50 @@ export async function loadDescriptor({
     inputEnabled: value.wait_for_input_submit,
     ...(value.observe_session_start ? { sessionStartEnabled: true } : {}),
     availability: value.availability,
+    ...(value.instrumentation_profiles
+      ? { instrumentationProfiles: value.instrumentation_profiles } : {}),
   };
+}
+
+function validateInstrumentation(binding, profile) {
+  if (
+    profile.adapter !== "sdk" ||
+    profile.version !== "aw-hook-source/v1" ||
+    profile.entrypoint !== "application" ||
+    !fields(binding, ["runtime", "profiles", "events", "failure_actions"]) ||
+    !["python", "js"].includes(binding.runtime)
+  ) throw new Error();
+  const record = (value) =>
+    value && typeof value === "object" && !Array.isArray(value);
+  const { profiles, events, failure_actions: actions } = binding;
+  if (!record(profiles) || !record(events) || !record(actions))
+    throw new Error();
+  const entries = Object.entries(profiles);
+  if (
+    entries.length < 1 || entries.length > 16 ||
+    entries.some(([id, digest]) =>
+      !/^[a-zA-Z0-9._-]{1,128}$/.test(id) ||
+      typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))
+  ) throw new Error();
+  const names = Object.keys(events);
+  if (names.length) {
+    const allowed = sourceCapabilities(names, {
+      replaceInput: names.includes("tool.before"),
+      replaceResult: names.includes("tool.after"),
+    }).events;
+    for (const [name, effects] of Object.entries(events)) {
+      if (
+        !Array.isArray(effects) ||
+        !effects.includes("observe") ||
+        effects.length !== new Set(effects).size ||
+        effects.some((effect) => !allowed[name].includes(effect))
+      ) throw new Error();
+    }
+  }
+  if (
+    Object.keys(actions).length &&
+    (!fields(actions, ["tool.after"]) || !Object.hasOwn(events, "tool.after") ||
+      !Array.isArray(actions["tool.after"]) ||
+      actions["tool.after"].length !== 1 || actions["tool.after"][0] !== "withhold_result")
+  ) throw new Error();
 }

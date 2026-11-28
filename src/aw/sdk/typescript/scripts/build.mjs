@@ -25,6 +25,7 @@ for (const file of [
   "profile-eval.mjs",
   "profile-loader.mjs",
   "profile-patch.mjs",
+  "profile-set.mjs",
   "profile-callable.mjs",
   "profile-connection.mjs",
   "profile-worker.mjs",

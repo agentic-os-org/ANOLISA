@@ -120,6 +120,7 @@ pub fn preflight(
             )?;
         }
     }
+    let source = crate::instrumentation::admitted_source(agent, target, capabilities)?;
     let mut candidates = Vec::new();
     for requirement in aw_config::requirements::project(config, target)? {
         let event_name = requirement.event;
@@ -153,6 +154,10 @@ pub fn preflight(
         }
         let handoff = admitted_handoff(&requirement, capabilities)?;
         for step in enabled {
+            require(
+                source.is_none() || step.configuration().get("native").is_none(),
+                "native hook step is required",
+            )?;
             let mut admitted = preflight_step(spec, gate, step, effects, capabilities)?;
             admitted.post_permission = handoff == Some(step.step_id);
             candidates.push(admitted);

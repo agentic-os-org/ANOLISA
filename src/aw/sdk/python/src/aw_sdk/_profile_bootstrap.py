@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from aw_sdk.deployment import load_descriptor, read_file
+import hashlib
+
+from aw_sdk._profile_eval import parse_profile
+from aw_sdk.deployment import SDK_PROFILE, load_descriptor, read_file
 from aw_sdk.profile_source import ProfileSource, SessionIdentity
-from aw_sdk.sources import SOURCE_PROTOCOL
+from aw_sdk.transport import AwError
 
 
 async def bootstrap_profile(
@@ -29,14 +32,19 @@ async def bootstrap_profile(
     descriptor = load_descriptor(
         config_file,
         descriptor_file,
-        {"adapter": "sdk", "version": SOURCE_PROTOCOL, "entrypoint": "application"},
+        SDK_PROFILE,
         target,
     )
+    document = read_file(profile_file)
+    if "instrumentation_profiles" in descriptor:
+        profile = parse_profile(document)
+        configured_payload({profile["id"]: document.decode()}, descriptor)
     source = ProfileSource.probe(
-        read_file(profile_file),
+        document,
         availability=descriptor["availability"],
         session_id_context=session_id_context,
     )
+    verify_capabilities(source, descriptor)
     source.install()
     source.verify()
     await source.activate(
@@ -46,3 +54,35 @@ async def bootstrap_profile(
         timeout_ms=timeout_ms,
     )
     return source
+
+
+def configured_payload(documents: object, descriptor: dict) -> tuple[str, ...]:
+    binding = descriptor.get("instrumentation_profiles")
+    if (
+        not binding
+        or binding["runtime"] != "python"
+        or not isinstance(documents, dict)
+        or documents.keys() != binding["profiles"].keys()
+    ):
+        raise AwError("source_profile_binding_mismatch")
+    for name, document in documents.items():
+        if (
+            not isinstance(document, str)
+            or hashlib.sha256(document.encode()).hexdigest()
+            != binding["profiles"][name]
+        ):
+            raise AwError("source_profile_binding_mismatch")
+        profile = parse_profile(document)
+        if profile["id"] != name or profile["origin"] != "builtin":
+            raise AwError("source_profile_binding_mismatch")
+    return tuple(documents[name] for name in sorted(documents))
+
+
+def verify_capabilities(source: ProfileSource, descriptor: dict) -> None:
+    if binding := descriptor.get("instrumentation_profiles"):
+        for key in ("events", "failure_actions"):
+            if {event: set(effects) for event, effects in binding[key].items()} != {
+                event: set(effects)
+                for event, effects in source._capabilities.get(key, {}).items()
+            }:
+                raise AwError("source_profile_binding_mismatch")

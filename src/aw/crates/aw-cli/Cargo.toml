@@ -29,5 +29,6 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+aw-contracts = { workspace = true, features = ["profile-fixtures"] }
 reqwest = { workspace = true }
 serde_yaml_ng = { workspace = true }

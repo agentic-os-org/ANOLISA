@@ -9,7 +9,7 @@ import {
 } from "./sources.mjs";
 
 export async function openProfileConnection(
-  { capabilities, connection, session, cooperative },
+  { capabilities, connection, session, cooperative, waitForAttach },
   signal,
 ) {
   const instance = new Instance({
@@ -18,23 +18,38 @@ export async function openProfileConnection(
     install: (routes) => confirmSourceRoutes(capabilities, routes),
   });
   const source = new LanguageSource(instance, { ownsInstance: true });
-  const active = source.session(session);
+  const wait = AbortSignal.any([signal, AbortSignal.timeout(session.timeoutMs)]);
   try {
-    const wait = AbortSignal.any([
-      signal,
-      AbortSignal.timeout(active.admission.options.timeoutMs),
-    ]);
-    if (cooperative) source.listen();
+    if (cooperative) {
+      source.listen();
+      if (waitForAttach) {
+        while (instance.state !== "ready") {
+          wait.throwIfAborted();
+          if (instance.lastError && !instance.lastError.unavailable)
+            throw instance.lastError;
+          await delay(10, undefined, { signal: wait });
+        }
+      }
+      return {
+        source,
+        async acquire(signal) {
+          const active = source.session(session);
+          try {
+            await active.prepare(signal);
+            return active;
+          } catch (error) {
+            await active.close();
+            throw error;
+          }
+        },
+      };
+    }
+    const active = source.session(session);
     while (instance.state !== "ready") {
       wait.throwIfAborted();
-      if (cooperative) {
-        if (instance.lastError && !instance.lastError.unavailable)
-          throw instance.lastError;
-      } else {
-        await source.connect();
-        if (instance.state === "ready" || instance.lastError?.unavailable)
-          break;
-      }
+      await source.connect();
+      if (instance.state === "ready" || instance.lastError?.unavailable)
+        break;
       await delay(10, undefined, { signal: wait });
     }
     await active.prepare(signal);

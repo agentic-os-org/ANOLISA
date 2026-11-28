@@ -67,6 +67,7 @@ dependencies = [
 name = "aw-config"
 version = "0.2.2"
 dependencies = [
+ "aw-contracts",
  "jsonschema",
  "serde",
  "serde_json",

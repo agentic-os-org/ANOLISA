@@ -8,6 +8,7 @@ repository = "https://github.com/alibaba/anolisa"
 publish = false
 
 [dependencies]
+aw-contracts = { workspace = true }
 jsonschema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
