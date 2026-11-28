@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -1525,16 +1528,176 @@ fn validate_file_config(fc: &FileConfig, path: &Path) -> Result<(), WsCkptError>
     Ok(())
 }
 
-/// Validates and saves config to a TOML file, creating parent directories as
-/// needed. Nothing is created or written when validation fails.
-pub fn save_config_file(path: &Path, config: &FileConfig) -> Result<(), WsCkptError> {
-    validate_file_config(config, path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+fn config_target(path: &Path) -> io::Result<PathBuf> {
+    let mut target = path.to_owned();
+    for hops in 0..=40 {
+        if target.file_name().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "missing config filename",
+            ));
+        }
+        match fs::symlink_metadata(&target) {
+            Ok(meta) if meta.is_symlink() => {
+                if hops == 40 {
+                    break;
+                }
+                let link = fs::read_link(&target)?;
+                target.pop();
+                target.push(link);
+            }
+            Ok(_) => return Ok(target),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(target),
+            Err(e) => return Err(e),
+        }
     }
+    Err(io::Error::other("too many symlinks in config path"))
+}
+
+struct ConfigTemp {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for ConfigTemp {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn restore_ownership(file: &fs::File, target_uid: u32, target_gid: u32) -> io::Result<()> {
+    restore_ownership_with(file, target_uid, target_gid, |f, uid, gid| {
+        std::os::unix::fs::fchown(f, uid, gid)
+    })
+}
+
+#[cfg(unix)]
+fn restore_ownership_with<F>(
+    file: &fs::File,
+    target_uid: u32,
+    target_gid: u32,
+    mut fchown_fn: F,
+) -> io::Result<()>
+where
+    F: FnMut(&fs::File, Option<u32>, Option<u32>) -> io::Result<()>,
+{
+    use std::os::unix::fs::MetadataExt;
+
+    let temp_meta = file.metadata()?;
+    let want_uid = (target_uid != temp_meta.uid()).then_some(target_uid);
+    let want_gid = (target_gid != temp_meta.gid()).then_some(target_gid);
+    if want_uid.is_some() || want_gid.is_some() {
+        fchown_fn(file, want_uid, want_gid)?;
+    }
+    Ok(())
+}
+
+/// Validates and atomically replaces the config TOML, following config
+/// symlinks. On Unix, staged files are created with mode `0o600` (so new
+/// configs default to `0o600` and staged writes are never briefly exposed);
+/// when replacing an existing target, original owner, group, and mode are
+/// restored on the open descriptor via `fchown` and `fchmod` before
+/// `sync_all`/`rename`.
+pub fn save_config_file(path: &Path, config: &FileConfig) -> Result<(), WsCkptError> {
+    #[cfg(unix)]
+    {
+        save_config_file_with(path, config, restore_ownership, |src, dst| {
+            fs::rename(src, dst)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        save_config_file_with(
+            path,
+            config,
+            |_, _, _| Ok(()),
+            |src, dst| fs::rename(src, dst),
+        )
+    }
+}
+
+fn save_config_file_with<C, R>(
+    path: &Path,
+    config: &FileConfig,
+    chown_fn: C,
+    rename_fn: R,
+) -> Result<(), WsCkptError>
+where
+    C: FnOnce(&fs::File, u32, u32) -> io::Result<()>,
+    R: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    validate_file_config(config, path)?;
     let content = toml::to_string_pretty(config)
         .map_err(|e| WsCkptError::Config(format!("serialize config: {}", e)))?;
-    std::fs::write(path, content)?;
+    let target = config_target(path)?;
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let existing = match fs::metadata(&target) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Stage privately so serialized config bytes are never world-readable
+        // before ownership and final permissions are applied.
+        options.mode(0o600);
+    }
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let (mut file, mut temp) = loop {
+        let seq = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        // A fixed prefix also fits when the destination name is already NAME_MAX bytes.
+        let path = dir.join(format!(".ws-ckpt.{}.{seq}.tmp", std::process::id()));
+        if path.file_name() == target.file_name() {
+            continue;
+        }
+        match options.open(&path) {
+            Ok(file) => break (file, ConfigTemp { path, armed: true }),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    file.write_all(content.as_bytes())?;
+    if let Some(meta) = existing {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Restore ownership on the open descriptor before setting mode so
+            // fchown cannot clear mode bits and restricted targets never change
+            // owner or group silently.
+            chown_fn(&file, meta.uid(), meta.gid())?;
+        }
+        #[cfg(not(unix))]
+        let _ = chown_fn;
+        file.set_permissions(meta.permissions())?;
+    } else {
+        let _ = chown_fn;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    file.sync_all()?;
+    drop(file);
+    rename_fn(&temp.path, &target)?;
+    temp.armed = false;
+    if let Err(e) = persist::fsync_dir(dir) {
+        tracing::warn!(
+            "renamed config {} but parent directory fsync failed: {e:#}",
+            target.display()
+        );
+    }
     Ok(())
 }
 
@@ -3230,6 +3393,316 @@ mod tests {
         };
         save_config_file(&path, &fc).unwrap();
         assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_config_write_preserves_original() {
+        const CHILD: &str = "WS_CKPT_TEST_LIMIT_CONFIG_SIZE";
+        let path = Path::new("config.toml");
+        if std::env::var_os(CHILD).is_some() {
+            let mut config = FileConfig::default();
+            config.backend.btrfs_base = Some(BtrfsBaseConfig {
+                btrfs_mount: Some(Path::new("/").join("x".repeat(4096))),
+            });
+            assert!(toml::to_string_pretty(&config).unwrap().len() > 2048);
+            assert!(matches!(
+                save_config_file(path, &config),
+                Err(WsCkptError::Io(e)) if e.kind() == io::ErrorKind::FileTooLarge
+            ));
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(path);
+        let original = b"# retain this comment too\nauto_cleanup = true\n";
+        fs::write(&target, original).unwrap();
+        let expected = load_config_file(&target).unwrap();
+        let output = std::process::Command::new("bash")
+            .args(["-c", r#"trap "" XFSZ && ulimit -f 1 && exec "$@""#, "bash"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::failed_config_write_preserves_original"])
+            .env(CHILD, "1")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert_eq!(load_config_file(&target).unwrap(), expected);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_save_follows_live_and_dangling_symlinks() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link.toml");
+        let target = dir.path().join("real.toml");
+        symlink("real.toml", &link).unwrap();
+        fs::write(&target, "").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        let before = fs::metadata(&target).unwrap();
+        let config = FileConfig {
+            auto_cleanup: Some(true),
+            ..Default::default()
+        };
+        save_config_file(&link, &config).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("real.toml"));
+        assert_eq!(load_config_file(&target).unwrap(), config);
+        let after = fs::metadata(&target).unwrap();
+        assert_eq!(after.uid(), before.uid());
+        assert_eq!(after.gid(), before.gid());
+        assert_eq!(after.permissions().mode() & 0o7777, 0o640);
+
+        fs::remove_file(&target).unwrap();
+        symlink("nested/config.toml", &target).unwrap();
+        save_config_file(&link, &config).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("real.toml"));
+        assert_eq!(
+            fs::read_link(&target).unwrap(),
+            Path::new("nested/config.toml")
+        );
+        let dangling_target = dir.path().join("nested/config.toml");
+        assert_eq!(load_config_file(&dangling_target).unwrap(), config);
+        assert_eq!(
+            fs::metadata(&dangling_target).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+
+        let loop_a = dir.path().join("loop-a.toml");
+        let loop_b = dir.path().join("loop-b.toml");
+        symlink("loop-b.toml", &loop_a).unwrap();
+        symlink("loop-a.toml", &loop_b).unwrap();
+        assert!(matches!(
+            save_config_file(&loop_a, &config),
+            Err(WsCkptError::Io(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_save_preserves_ownership_and_stages_privately() {
+        use std::os::unix::fs::{fchown, MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh.toml");
+        let config = FileConfig {
+            auto_cleanup: Some(true),
+            ..Default::default()
+        };
+        save_config_file(&fresh, &config).unwrap();
+        assert_eq!(
+            fs::metadata(&fresh).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+
+        let target = dir.path().join("restricted.toml");
+        let original = b"auto_cleanup = false\n";
+        fs::write(&target, original).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+
+        // If the process runs as root, verify real uid/gid preservation and
+        // kernel-enforced group-reader access (member can read, outsider
+        // gets EACCES). Otherwise, if the process belongs to a supplementary
+        // group distinct from its primary gid, exercise real `fchown` group
+        // preservation end-to-end.
+        let before = fs::metadata(&target).unwrap();
+        if before.uid() == 0 {
+            use std::os::unix::process::CommandExt;
+
+            let reader_dir = tempfile::tempdir_in("/tmp").unwrap();
+            fs::set_permissions(reader_dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            let restricted = reader_dir.path().join("config.toml");
+            fs::write(&restricted, original).unwrap();
+            let f = fs::File::open(&restricted).unwrap();
+            fchown(&f, Some(0), Some(65534)).unwrap();
+            fs::set_permissions(&restricted, fs::Permissions::from_mode(0o640)).unwrap();
+
+            save_config_file(&restricted, &config).unwrap();
+            let after = fs::metadata(&restricted).unwrap();
+            assert_eq!(after.uid(), 0);
+            assert_eq!(after.gid(), 65534);
+            assert_eq!(after.permissions().mode() & 0o7777, 0o640);
+
+            let mut member_cmd = std::process::Command::new("cat");
+            member_cmd.arg(&restricted).uid(65533).gid(65534);
+            let member_out = member_cmd.output().unwrap();
+            assert!(
+                member_out.status.success(),
+                "group member should still read saved 0640 config: {member_out:?}"
+            );
+            assert_eq!(
+                toml::from_str::<FileConfig>(&String::from_utf8(member_out.stdout).unwrap())
+                    .unwrap(),
+                config
+            );
+
+            let mut outsider_cmd = std::process::Command::new("cat");
+            outsider_cmd.arg(&restricted).uid(65533).gid(65533);
+            let outsider_out = outsider_cmd.output().unwrap();
+            assert!(
+                !outsider_out.status.success(),
+                "non-member should not read saved 0640 config: {outsider_out:?}"
+            );
+        } else if let Some(supp_gid) =
+            fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Groups:"))
+                        .and_then(|groups| {
+                            groups
+                                .split_whitespace()
+                                .filter_map(|g| g.parse::<u32>().ok())
+                                .find(|&g| g != before.gid())
+                        })
+                })
+        {
+            let f = fs::File::open(&target).unwrap();
+            fchown(&f, None, Some(supp_gid)).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+            save_config_file(&target, &config).unwrap();
+            let after = fs::metadata(&target).unwrap();
+            assert_eq!(after.uid(), before.uid());
+            assert_eq!(after.gid(), supp_gid);
+            assert_eq!(after.permissions().mode() & 0o7777, 0o640);
+            assert_eq!(load_config_file(&target).unwrap(), config);
+            // Reset original content and mode for the failure checks below.
+            fs::write(&target, original).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+
+        // Verify `restore_ownership_with` calls fchown only for differing uid/gid.
+        let probe = fs::File::open(&target).unwrap();
+        let probe_meta = probe.metadata().unwrap();
+        let mut called = false;
+        restore_ownership_with(&probe, probe_meta.uid(), probe_meta.gid(), |_, _, _| {
+            called = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!called);
+
+        let mut recorded_gid = None;
+        restore_ownership_with(
+            &probe,
+            probe_meta.uid(),
+            probe_meta.gid().wrapping_add(1),
+            |_file, uid, gid| {
+                recorded_gid = Some((uid, gid));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            recorded_gid,
+            Some((None, Some(probe_meta.gid().wrapping_add(1))))
+        );
+
+        let mut recorded = None;
+        restore_ownership_with(
+            &probe,
+            probe_meta.uid().wrapping_add(1),
+            probe_meta.gid().wrapping_add(2),
+            |_file, uid, gid| {
+                recorded = Some((uid, gid));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            recorded,
+            Some((
+                Some(probe_meta.uid().wrapping_add(1)),
+                Some(probe_meta.gid().wrapping_add(2))
+            ))
+        );
+
+        // Verify temp file stays mode 0600 during write and an fchown EPERM
+        // aborts the save without altering the live file or leaving temp files.
+        let before_err = fs::metadata(&target).unwrap();
+        let mut staged_mode_before_chown = None;
+        let err = save_config_file_with(
+            &target,
+            &config,
+            |file, uid, gid| {
+                assert_eq!((uid, gid), (before_err.uid(), before_err.gid()));
+                staged_mode_before_chown = Some(file.metadata()?.permissions().mode() & 0o7777);
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated CAP_CHOWN failure",
+                ))
+            },
+            |src, dst| fs::rename(src, dst),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, WsCkptError::Io(ref e) if e.kind() == io::ErrorKind::PermissionDenied),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(staged_mode_before_chown, Some(0o600));
+        assert_eq!(fs::read(&target).unwrap(), original);
+        let after_err = fs::metadata(&target).unwrap();
+        assert_eq!(
+            (
+                after_err.uid(),
+                after_err.gid(),
+                after_err.permissions().mode() & 0o7777
+            ),
+            (before_err.uid(), before_err.gid(), 0o640)
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_failure_after_sync_preserves_original_and_cleans_temp() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        let original = b"# keep original intact\nauto_cleanup = false\n";
+        fs::write(&target, original).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        let before = fs::metadata(&target).unwrap();
+
+        let updated = FileConfig {
+            auto_cleanup: Some(true),
+            ..Default::default()
+        };
+        let mut saw_staged = false;
+        let err = save_config_file_with(&target, &updated, restore_ownership, |tmp, dst| {
+            assert_eq!(dst, target);
+            assert_eq!(load_config_file(tmp).unwrap(), updated);
+            let tmp_meta = fs::metadata(tmp).unwrap();
+            assert_eq!(tmp_meta.uid(), before.uid());
+            assert_eq!(tmp_meta.gid(), before.gid());
+            assert_eq!(tmp_meta.permissions().mode() & 0o7777, 0o640);
+            assert_eq!(fs::read(dst).unwrap(), original);
+            saw_staged = true;
+            Err(io::Error::other("injected rename failure"))
+        })
+        .unwrap_err();
+        assert!(saw_staged);
+        assert!(matches!(err, WsCkptError::Io(_)), "unexpected: {err:?}");
+        assert_eq!(fs::read(&target).unwrap(), original);
+        let after = fs::metadata(&target).unwrap();
+        assert_eq!(
+            (
+                after.uid(),
+                after.gid(),
+                after.permissions().mode() & 0o7777
+            ),
+            (before.uid(), before.gid(), 0o640)
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
