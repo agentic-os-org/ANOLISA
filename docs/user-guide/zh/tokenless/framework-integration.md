@@ -22,6 +22,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](../../../
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | V1 插件透传 |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 | QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
+| Trae | `trae` | 已硬关闭 | 替换 RunCommand 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 
 “—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
 
@@ -60,6 +61,9 @@ OpenClaw 恢复授权来自当前历史中的 Marker 和刚交付的压缩结果
 `additionalContext` 是追加型 Hook 字段。共享 Hook 不会把压缩副本放入其中，否则原文
 仍然可见，总 Context 反而增加。统计记录只能证明压缩候选
 内容变小了，不能单独证明宿主已经从模型请求中移除原文。
+
+Trae 当前使用下文说明的随附生命周期脚本，本版本尚未把它注册到
+`anolisa adapter enable` 的驱动集合。
 
 ## Adapter 处理规则
 
@@ -618,6 +622,21 @@ SDK Wheel；0.7.14 Wheel 不提供这些 API。工作目录与 QwenPaw 本身的
 透传。QwenPaw 自己的工具结果裁剪在 Tokenless 之后运行，且保留结果头部（最近两条工具结果 50000 字节，更早的 3000
 字节，溢出部分写入 `tool_results/`），因此压缩结果末尾的恢复指令只在结果未超出该预算时可见；被省略的内容仍可用
 `tokenless retrieve` 从 Stash 取回。统计记录默认按 QwenPaw 工作区写入 `<workspace>/.tokenless`。可在 QwenPaw 环境中设置绝对路径 `TOKENLESS_DATA_DIR` 覆盖此位置；相对路径会被拒绝。运行 `tokenless stats list --data-dir` 时指向实际使用的目录。
+
+### Trae
+
+Trae（TraeCode）没有面向 Hook 的插件系统。随附的生命周期脚本会把 Tokenless Hook 组合并进每个已安装 Trae 版本的全局 `hooks.json`（国内版为 `~/.trae-cn/hooks.json`，国际版为 `~/.trae/hooks.json`）：
+
+```bash
+# 先通过 `make -C src/tokenless install`（或 RPM）安装 Adapter 资源，然后：
+make -C src/tokenless trae-install
+# 或直接运行脚本：
+bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/install.sh
+# 移除：
+bash ~/.local/share/anolisa/adapters/tokenless/trae/scripts/uninstall.sh
+```
+
+用户已有的 Hook 配置会被保留；卸载脚本只移除 Tokenless 自己的条目。已有的 `hooks.json` 会保持原有访问权限，由 dotfiles 管理的符号链接也会保持链接目标不变，因为两个脚本都就地写入解析后的真实文件。只有整条命令与安装脚本写入的形式完全一致才算 Tokenless 条目，因此仅在命令中提到 `TOKENLESS_AGENT_ID=trae` 的用户 Hook 在合并与卸载两条路径上都不会被误删。Hook 功能在国内版 Trae 3.3.66、国际版 3.5.66 引入。适配器 manifest 每个目标只承载一个版本范围，而两个版本的编号体系彼此独立，因此声明保守的共享下限 `>=3.5.66`——它绝不会把任一中缺少 Hook 能力的版本列为兼容；国内版 3.3.66 至 3.5.65 其实已支持 Hook，这里只是少声明。上述数字来自公开发布日志的下限，并非 IDE 内实测冒烟结果，后者另行跟踪。Trae 将终端工具名标准化为 `RunCommand`，因此命令重写 Hook 匹配该名称。由于 Trae 的 PostToolUse 不支持替换工具输出，响应 Hook 保留原始输出：只在识别出环境失败时追加 `additionalContext`，不会追加压缩副本（那会让模型可见内容变大）。安装或移除后请重启 Trae。
 
 ## AgentScope 框架集成
 
