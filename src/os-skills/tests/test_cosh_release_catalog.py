@@ -57,6 +57,33 @@ class CoshReleaseCatalogTest(unittest.TestCase):
                 {"name": "fixture", "version": "1.0.0", "skills": ["released"]},
             )
 
+    def test_sync_validates_all_manifests_before_writing(self) -> None:
+        for category_data in (None, b'{"skills":', b"[]"):
+            with self.subTest(category_data=category_data), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory)
+                (source / "packaging").mkdir()
+                (source / "packaging" / "released-skills.txt").write_text(
+                    "devops/released\n", encoding="utf-8"
+                )
+                skill = source / "devops" / "released" / "SKILL.md"
+                skill.parent.mkdir(parents=True)
+                skill.write_text("# Released\n", encoding="utf-8")
+                root_manifest = source / "cosh-extension.json"
+                original = b'{"name":"fixture","skills":[]}\n'
+                root_manifest.write_bytes(original)
+                category = source / "devops" / "cosh-extension.json"
+                if category_data is not None:
+                    category.write_bytes(category_data)
+
+                with self.assertRaises((OSError, ValueError)) as failure:
+                    sync_manifests(source, write=True)
+                self.assertEqual(root_manifest.read_bytes(), original)
+                self.assertIn(str(category), str(failure.exception))
+                if category_data is not None:
+                    self.assertEqual(category.read_bytes(), category_data)
+                else:
+                    self.assertFalse(category.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
