@@ -212,7 +212,10 @@ IDs absent from the selected dataset do not match any instance.
 ### Resume and Rerun
 
 By default, runner checks `<output>/run/results/*.json` and skips instances that
-already have result files. Use `--redo` to force a rerun:
+already have result files. Successful results that produced a patch also need
+their prediction in `preds.json`. An instance whose prediction is missing is
+retried. Failed attempts and older result files keep their existing resume
+behavior. Use `--redo` to force a rerun:
 
 ```bash
 swe-runner run --agent cosh --subset lite --redo

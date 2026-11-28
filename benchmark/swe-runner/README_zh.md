@@ -205,8 +205,9 @@ swe-runner run --agent cosh --instances-file selected-instances.txt
 
 ### 续跑与重跑
 
-默认情况下，runner 会检查 `<output>/run/results/*.json`，跳过已经有
-result 文件的实例。需要重新运行时使用：
+默认情况下，runner 会检查 `<output>/run/results/*.json`，跳过已有结果的实例。
+成功且产生补丁的结果还需要在 `preds.json` 中包含对应预测，缺失时会重试该实例。
+失败的尝试和旧版结果文件仍按已有结果续跑。需要重新运行时使用：
 
 ```bash
 swe-runner run --agent cosh --subset lite --redo

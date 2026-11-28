@@ -32,14 +32,22 @@ logger = logging.getLogger(__name__)
 _PREDICTIONS_FILE = "preds.json"
 _RESULTS_DIR = "results"
 _RUN_METADATA_FILE = "run_metadata.json"
-_predictions_lock = threading.Lock()
+_predictions_lock = threading.RLock()
+
+
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    """Replace a file while retaining its previous bytes if publication fails."""
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    try:
+        tmp_path.write_bytes(content)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
     """Replace *path* with *payload* without leaving a truncated file behind."""
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    os.replace(tmp_path, path)
+    _write_bytes_atomic(path, json.dumps(payload, indent=2).encode("utf-8"))
 
 
 class RunOutputStore:
@@ -111,7 +119,7 @@ class RunOutputStore:
         self.results_dir.mkdir(parents=True, exist_ok=True)
         summary = build_instance_result_summary(result)
         result_file = self.results_dir / f"{result.instance.instance_id}.json"
-        result_file.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        _write_json_atomic(result_file, summary)
 
         logger.info(
             "OUTPUT_WRITE_INSTANCE_RESULT instance=%s success=%s patch_produced=%s file=%s",
@@ -127,22 +135,31 @@ class RunOutputStore:
             logger.info("OUTPUT_LOAD_ATTEMPTED_IDS instance=global count=0 output_dir=%s", self.output_dir)
             return set()
 
-        ids: set[str] = set()
-        for result_file in self.results_dir.glob("*.json"):
-            try:
-                data = json.loads(result_file.read_text(encoding="utf-8"))
-                instance_id = data.get("instance_id") if isinstance(data, dict) else None
-                if isinstance(instance_id, str) and instance_id:
-                    ids.add(instance_id)
-            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-                # UnicodeDecodeError keeps the read strict: a results/*.json
-                # file that is not valid UTF-8 is skipped (and left byte-for-
-                # byte unchanged) like any other unreadable file, instead of
-                # aborting the whole batch resume.
-                logger.warning("OUTPUT_LOAD_ATTEMPTED_IDS_SKIP file=%s", result_file)
+        with _predictions_lock:
+            ids: set[str] = set()
+            predictions: dict[str, Any] | None = None
+            for result_file in self.results_dir.glob("*.json"):
+                try:
+                    data = json.loads(result_file.read_text(encoding="utf-8"))
+                    instance_id = data.get("instance_id") if isinstance(data, dict) else None
+                    if isinstance(instance_id, str) and instance_id:
+                        # Older writes could publish a successful result before its prediction.
+                        if data.get("success") is True and data.get("patch_produced") is True:
+                            if predictions is None:
+                                predictions = self._load_predictions()
+                            if instance_id not in predictions:
+                                logger.warning("OUTPUT_RESUME_MISSING_PREDICTION instance=%s", instance_id)
+                                continue
+                        ids.add(instance_id)
+                except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                    # UnicodeDecodeError keeps the read strict: a results/*.json
+                    # file that is not valid UTF-8 is skipped (and left byte-for-
+                    # byte unchanged) like any other unreadable file, instead of
+                    # aborting the whole batch resume.
+                    logger.warning("OUTPUT_LOAD_ATTEMPTED_IDS_SKIP file=%s", result_file)
 
-        logger.info("OUTPUT_LOAD_ATTEMPTED_IDS instance=global count=%s results_dir=%s", len(ids), self.results_dir)
-        return ids
+            logger.info("OUTPUT_LOAD_ATTEMPTED_IDS instance=global count=%s results_dir=%s", len(ids), self.results_dir)
+            return ids
 
     def save_instance_result(self, result: InstanceResult) -> None:
         """Persist one instance result and its prediction when present."""
@@ -153,9 +170,29 @@ class RunOutputStore:
             result.prediction is not None,
             self.output_dir,
         )
-        self.write_instance_result_file(result)
-        if result.prediction:
-            self.write_prediction(result.prediction)
+        # Hold the same lock through rollback so another instance's update is retained.
+        with _predictions_lock:
+            previous_predictions = None
+            if result.prediction:
+                if self.predictions_path.exists():
+                    previous_predictions = self.predictions_path.read_bytes()
+                self.write_prediction(result.prediction)
+            try:
+                # A result file is the resume marker, published after its prediction.
+                self.write_instance_result_file(result)
+            except BaseException:
+                if result.prediction:
+                    try:
+                        if previous_predictions is None:
+                            self.predictions_path.unlink(missing_ok=True)
+                        else:
+                            _write_bytes_atomic(self.predictions_path, previous_predictions)
+                    except BaseException:
+                        # Failed rollback must not leave a successful resume marker.
+                        result_file = self.results_dir / f"{result.instance.instance_id}.json"
+                        result_file.unlink(missing_ok=True)
+                        raise
+                raise
         logger.info("OUTPUT_SAVE_END instance=%s", result.instance.instance_id)
 
     def _load_existing_run_metadata(self) -> dict[str, Any] | None:
