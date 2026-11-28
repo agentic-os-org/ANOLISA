@@ -20,6 +20,8 @@ pub(crate) mod readonly_compound;
 mod readonly_compound_tests;
 pub(crate) mod readonly_interceptor;
 pub(crate) mod readonly_pipeline;
+#[cfg(test)]
+mod readonly_pipeline_tests;
 pub(crate) mod readonly_rules;
 mod temp_output;
 
