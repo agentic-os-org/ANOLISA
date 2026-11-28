@@ -731,7 +731,7 @@ fn retry_rejects_planned_or_uncertain_execution() {
 
     let mut cancelled_uncertain = before_uncertain_retry.clone();
     let uncertain_run_id = cancelled_uncertain.active_run_id().unwrap().clone();
-    assert!(!cancelled_uncertain.active_run_can_be_cancelled(&uncertain_run_id));
+    assert!(cancelled_uncertain.active_run_can_be_cancelled(&uncertain_run_id));
     cancelled_uncertain
         .apply(&envelope(
             &task_id,
@@ -743,9 +743,8 @@ fn retry_rejects_planned_or_uncertain_execution() {
             },
         ))
         .unwrap();
-    let before_uncertain_cancel = cancelled_uncertain.clone();
-    assert!(matches!(
-        cancelled_uncertain.apply(&envelope(
+    cancelled_uncertain
+        .apply(&envelope(
             &task_id,
             &actor_id,
             7,
@@ -753,10 +752,208 @@ fn retry_rejects_planned_or_uncertain_execution() {
                 run_id: uncertain_run_id,
                 stage: CancellationStage::Execution,
             },
-        )),
-        Err(AggregateError::InvalidTransition { .. })
-    ));
-    assert_eq!(cancelled_uncertain, before_uncertain_cancel);
+        ))
+        .unwrap();
+    assert_eq!(cancelled_uncertain.state(), TaskState::Suspended);
+    cancelled_uncertain
+        .apply(&envelope(&task_id, &actor_id, 8, TaskEvent::TaskCancelled))
+        .unwrap();
+    assert_eq!(cancelled_uncertain.state(), TaskState::Cancelled);
+}
+
+#[test]
+fn uncertain_execution_task_can_be_terminated_by_cancellation() {
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let mut aggregate = running(&task_id, &actor_id, &run_id);
+    let execution_id = plan_execution(&mut aggregate, &task_id, &actor_id, 4);
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            5,
+            TaskEvent::ExecutionUncertain {
+                execution_id,
+                reason: UncertaintyCode::TransportLost,
+            },
+        ))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Suspended);
+    assert!(aggregate.active_run_can_be_cancelled(&run_id));
+
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            6,
+            TaskEvent::CancellationRequested {
+                run_id: run_id.clone(),
+                cause: CancelReason::UserRequested,
+            },
+        ))
+        .unwrap();
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            7,
+            TaskEvent::RunCancelled {
+                run_id: run_id.clone(),
+                stage: CancellationStage::Execution,
+            },
+        ))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Suspended);
+
+    aggregate
+        .apply(&envelope(&task_id, &actor_id, 8, TaskEvent::TaskCancelled))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Cancelled);
+}
+
+#[test]
+fn post_uncertain_aggregate_reaches_a_terminal_event() {
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let mut aggregate = running(&task_id, &actor_id, &run_id);
+    let execution_id = plan_execution(&mut aggregate, &task_id, &actor_id, 4);
+    for event in [
+        envelope(
+            &task_id,
+            &actor_id,
+            5,
+            TaskEvent::ExecutionUncertain {
+                execution_id,
+                reason: UncertaintyCode::TransportLost,
+            },
+        ),
+        envelope(
+            &task_id,
+            &actor_id,
+            6,
+            TaskEvent::CancellationRequested {
+                run_id: run_id.clone(),
+                cause: CancelReason::UserRequested,
+            },
+        ),
+    ] {
+        aggregate.apply(&event).unwrap();
+    }
+    assert_eq!(aggregate.state(), TaskState::Suspended);
+
+    let uncertain_error = || {
+        ContractError::new(
+            "uncertain_execution",
+            ErrorCategory::Conflict,
+            false,
+            "execution outcome is uncertain",
+        )
+        .unwrap()
+    };
+    let revision = aggregate.revision() + 1;
+    let terminal = [
+        TaskEvent::RunCancelled {
+            run_id: run_id.clone(),
+            stage: CancellationStage::Runtime,
+        },
+        TaskEvent::TaskCancelled,
+        TaskEvent::RunFailed {
+            run_id: run_id.clone(),
+            error: uncertain_error(),
+        },
+        TaskEvent::RunRetryQueued {
+            previous_run_id: run_id.clone(),
+            next_run_id: RunId::new(),
+        },
+        TaskEvent::TaskSucceeded,
+        TaskEvent::TaskFailed {
+            error: uncertain_error(),
+        },
+    ];
+    let mut reachable = 0;
+    for event in terminal {
+        let mut probe = aggregate.clone();
+        if probe
+            .apply(&envelope(&task_id, &actor_id, revision, event))
+            .is_ok()
+        {
+            reachable += 1;
+        }
+    }
+    assert!(
+        reachable >= 1,
+        "at least one terminal event must be reachable from Suspended with an uncertain Run"
+    );
+}
+
+#[test]
+fn cancelled_then_retryable_failed_run_is_re_cancellable() {
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let mut aggregate = running(&task_id, &actor_id, &run_id);
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            4,
+            TaskEvent::CancellationRequested {
+                run_id: run_id.clone(),
+                cause: CancelReason::UserRequested,
+            },
+        ))
+        .unwrap();
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            5,
+            TaskEvent::RunFailed {
+                run_id: run_id.clone(),
+                error: ContractError::new(
+                    "retryable_runtime_failure",
+                    ErrorCategory::RuntimeUnavailable,
+                    true,
+                    "Runtime is temporarily unavailable",
+                )
+                .unwrap(),
+            },
+        ))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Suspended);
+    assert!(aggregate.cancellation_requested());
+    assert!(aggregate.active_run_can_be_cancelled(&run_id));
+
+    // The coordinator re-cancel replays its guarded triple verbatim; the
+    // durable request must reduce instead of wedging the Task forever.
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            6,
+            TaskEvent::CancellationRequested {
+                run_id: run_id.clone(),
+                cause: CancelReason::UserRequested,
+            },
+        ))
+        .unwrap();
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            7,
+            TaskEvent::RunCancelled {
+                run_id: run_id.clone(),
+                stage: CancellationStage::Runtime,
+            },
+        ))
+        .unwrap();
+    aggregate
+        .apply(&envelope(&task_id, &actor_id, 8, TaskEvent::TaskCancelled))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Cancelled);
 }
 
 #[test]
