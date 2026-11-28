@@ -385,8 +385,9 @@ def main(argv: list[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 2
     if args.cleanup_only:
-        print(json.dumps(runner.cleanup(), indent=2))
-        return 0
+        cleanup = runner.cleanup()
+        print(json.dumps(cleanup, indent=2))
+        return int(cleanup["status"] == "FAIL")
     if not runner.cosh.is_file() or not os.access(runner.cosh, os.X_OK):
         print(f"installed cosh launcher is not executable: {runner.cosh}", file=sys.stderr)
         runner.cleanup()
