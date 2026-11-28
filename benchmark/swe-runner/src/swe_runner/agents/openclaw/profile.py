@@ -67,8 +67,11 @@ class OpenClawCaseProfileManager:
         self._base_config_path = base_config_path
         self._profile_link_root = profile_link_root or Path.home()
 
-    def prepare(self, instance_id: str) -> OpenClawCaseProfile:
-        profile_dir = self._output_dir / _PROFILE_ROOT_DIRNAME / _safe_profile_component(instance_id)
+    def prepare(self, instance_id: str, *, attempt_id: str | None = None) -> OpenClawCaseProfile:
+        component = _safe_profile_component(instance_id)
+        if attempt_id is not None:
+            component = f"{component}-{_safe_profile_component(attempt_id)}"
+        profile_dir = self._output_dir / _PROFILE_ROOT_DIRNAME / component
         profile_name = _profile_name(instance_id, profile_dir)
         link_path = self._profile_link_root / f".openclaw-{profile_name}"
         config_path = profile_dir / "openclaw.json"
