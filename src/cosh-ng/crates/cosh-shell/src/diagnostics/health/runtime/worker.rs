@@ -291,11 +291,13 @@ fn run_worker() -> Result<(), ProtocolError> {
                         let (_, volume_sample) = volume_sample.get_or_init(|| {
                             (
                                 now_millis(),
-                                collectors::read_volume_sample(&request.config),
+                                collectors::read_volume_sample(
+                                    &request.config,
+                                    root_enabled,
+                                    mounts_enabled,
+                                ),
                             )
                         });
-                        let volume_proven =
-                            volume_sample.volumes.iter().any(|volume| volume.proven());
                         match sample {
                             Ok(facts) => {
                                 facts.record(&mut builder, 0);
@@ -307,7 +309,9 @@ fn run_worker() -> Result<(), ProtocolError> {
                                 );
                                 builder.add_check_done(spec.id);
                             }
-                            Err(reason) if volume_proven => {
+                            Err(reason)
+                                if collectors::volume_proven_for_check(volume_sample, spec.id) =>
+                            {
                                 tracing::debug!(
                                     target: "cosh_health",
                                     reason = ?reason,

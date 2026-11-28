@@ -122,6 +122,34 @@ pub(super) fn write(root: &Path, exposures: &HealthExposures) -> Result<(), Erro
     private_state::atomic_write(&root.join(FILE), &bytes, MAX_BYTES).map_err(Error::from)
 }
 
+/// Raw copies of both exposure files, captured before a claim writes them so a
+/// failed delivery can restore the previous records instead of leaving a
+/// half-written exposure behind.
+pub(super) struct Backup {
+    current: Option<Vec<u8>>,
+    legacy: Option<Vec<u8>>,
+}
+
+pub(super) fn backup(root: &Path) -> Result<Backup, Error> {
+    Ok(Backup {
+        current: private_state::read_bounded(&root.join(FILE), MAX_BYTES)?,
+        legacy: private_state::read_bounded(&root.join(LEGACY_FILE), MAX_BYTES)?,
+    })
+}
+
+pub(super) fn restore(root: &Path, backup: &Backup) -> Result<(), Error> {
+    restore_file(root, FILE, backup.current.as_deref())?;
+    restore_file(root, LEGACY_FILE, backup.legacy.as_deref())
+}
+
+fn restore_file(root: &Path, file: &str, bytes: Option<&[u8]>) -> Result<(), Error> {
+    let path = root.join(file);
+    match bytes {
+        Some(bytes) => private_state::atomic_write(&path, bytes, MAX_BYTES).map_err(Error::from),
+        None => private_state::remove_owner_file(&path).map_err(Error::from),
+    }
+}
+
 pub(super) fn paired<'a>(
     exposures: &'a HealthExposures,
     claim: &super::ClaimEntry,

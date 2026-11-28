@@ -178,7 +178,7 @@ library_tests! {
     }
 
     #[test]
-    fn event_metadata_write_failure_keeps_the_claim_without_display() {
+    fn event_metadata_write_failure_records_neither_a_claim_nor_an_exposure() {
         let (_temp, store, runtime) = fixture();
         let snapshot = store.snapshot(Some(&runtime)).unwrap();
         let current_path = store.root.join("health-exposures-v3.json");
@@ -202,12 +202,9 @@ library_tests! {
             )
             .unwrap();
         assert!(matches!(decision, ClaimDecision::Suppressed));
-        assert_eq!(store.read_claims().unwrap().entries.len(), 1);
-        let legacy: serde_json::Value =
-            serde_json::from_slice(&fs::read(store.root.join("health-exposures-v2.json")).unwrap())
-                .unwrap();
-        assert_eq!(legacy["entries"].as_array().unwrap().len(), 1);
-        assert!(legacy["entries"][0].get("event").is_none());
+        assert!(store.read_claims().unwrap().entries.is_empty());
+        assert!(!store.root.join("health-exposures-v2.json").exists());
+        assert!(!store.root.join("health-exposures-v3.json").is_file());
         assert!(current_path.is_dir());
     }
 }
@@ -1396,7 +1393,7 @@ fn unreadable_v2_sidecar_suppresses_before_commit() {
 }
 
 #[test]
-fn v2_capacity_overflow_suppresses_after_v1_commit() {
+fn v2_capacity_overflow_rolls_back_the_v1_claim() {
     let (_temp, store, runtime) = fixture();
     let snapshot = store.snapshot(Some(&runtime)).unwrap();
     let digest = "a".repeat(64);
@@ -1423,9 +1420,12 @@ fn v2_capacity_overflow_suppresses_after_v1_commit() {
         )
         .unwrap();
     assert!(matches!(decision, ClaimDecision::Suppressed));
-    let claims = fs::read_to_string(store.root.join("claims.json")).unwrap();
     assert!(
-        claims.contains("login_health"),
-        "v1 claim committed before v2 failure"
+        !store.root.join("claims.json").exists(),
+        "a suppressed delivery must not leave a claim behind"
     );
+    let legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.root.join("health-exposures-v2.json")).unwrap())
+            .unwrap();
+    assert_eq!(legacy["entries"].as_array().unwrap().len(), 256);
 }

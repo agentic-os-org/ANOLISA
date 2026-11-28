@@ -34,5 +34,12 @@ pub(super) fn prepare(
 /// Record the delivery and persist; failure suppresses the claim fail-closed.
 pub(super) fn commit(mut claim: EpisodeClaim, now_ms: u64) -> bool {
     episode::record_delivery(&mut claim.ledger, &claim.candidate, now_ms);
-    episode::write(&claim.path, &claim.ledger).is_ok()
+    if episode::write(&claim.path, &claim.ledger).is_ok() {
+        return true;
+    }
+    // A rename that already landed leaves the new ledger readable even when
+    // the parent-directory sync fails afterwards. Keeping the claim then
+    // matches what the next load reads; rolling it back would spend the
+    // cooldown of a card that was shown.
+    episode::load(&claim.path).is_some_and(|landed| landed == claim.ledger)
 }
