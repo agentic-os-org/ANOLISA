@@ -115,6 +115,236 @@ fn moving_a_skill_into_an_existing_directory_matches_fresh_discovery() {
     }
 }
 
+#[test]
+fn hidden_directory_publication_matches_fresh_discovery() {
+    skip_if_no_fuse!();
+
+    for in_place in [false, true] {
+        for restore in [false, true] {
+            for cold in [false, true] {
+                let source = tempfile::tempdir().expect("source tempdir");
+                let mountpoint = tempfile::tempdir().expect("mount tempdir");
+                if restore {
+                    std::fs::create_dir(source.path().join("web")).unwrap();
+                    std::fs::write(
+                        source.path().join("web/SKILL.md"),
+                        "---\nname: web\ndescription: restored\n---\nrestored body\n",
+                    )
+                    .unwrap();
+                }
+                let mut initial = SkillStore::new();
+                initial.load_from_directory(source.path(), &ParseConfig::default());
+                let store: SharedSkillStore = Arc::new(RwLock::new(initial));
+                let mount_path = if in_place {
+                    source.path()
+                } else {
+                    mountpoint.path()
+                };
+                let handle = mount_background_configured(
+                    mount_path,
+                    source.path(),
+                    store.clone(),
+                    MountOptions::default(),
+                    in_place,
+                    MountConfig::default(),
+                )
+                .unwrap();
+                let root = if in_place {
+                    mount_path.to_path_buf()
+                } else {
+                    mount_path.join("skills")
+                };
+                let hidden = root.join(".draft");
+                let visible = root.join("web");
+                if restore {
+                    std::fs::rename(&visible, &hidden).unwrap();
+                } else {
+                    std::fs::create_dir(&hidden).unwrap();
+                    std::fs::write(
+                        hidden.join("SKILL.md"),
+                        "---\nname: draft\ndescription: published\n---\npublished body\n",
+                    )
+                    .unwrap();
+                }
+                if cold {
+                    // Entry replies have a one-second TTL; exercise lookup without a warm dentry.
+                    std::thread::sleep(Duration::from_millis(1500));
+                    assert!(std::fs::metadata(&hidden).unwrap().is_dir());
+                }
+                assert!(store.read().get(".draft").is_none());
+                assert!(!common::list_dir_names(&root).contains(&".draft".to_string()));
+                std::fs::rename(&hidden, &visible).unwrap();
+                assert!(
+                    store.read().get("web").is_some(),
+                    "publication missing: in_place={in_place}, restore={restore}, cold={cold}"
+                );
+                assert!(common::list_dir_names(&root).contains(&"web".to_string()));
+                let discover =
+                    std::fs::read_to_string(root.join("skill-discover/SKILL.md")).unwrap();
+                assert!(discover.contains("| web |"));
+                std::thread::sleep(Duration::from_millis(1500));
+                let content = std::fs::read_to_string(visible.join("SKILL.md")).unwrap();
+                assert!(content.contains(if restore {
+                    "restored body"
+                } else {
+                    "published body"
+                }));
+                handle.unmount().unwrap();
+                let mut fresh = SkillStore::new();
+                fresh.load_from_directory(source.path(), &ParseConfig::default());
+                let live = store.read();
+                assert_eq!(live.list(), fresh.list());
+                assert_eq!(
+                    live.get("web").unwrap().source_path,
+                    fresh.get("web").unwrap().source_path
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hidden_directory_lookup_preserves_security_and_symlink_boundaries() {
+    skip_if_no_fuse!();
+
+    for security in [false, true] {
+        let source = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mountpoint = tempfile::tempdir().unwrap();
+        for name in [".draft", ".staging"] {
+            std::fs::create_dir(source.path().join(name)).unwrap();
+        }
+        std::os::unix::fs::symlink(outside.path(), source.path().join(".linked")).unwrap();
+        let store = Arc::new(RwLock::new(SkillStore::new()));
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            store.clone(),
+            MountOptions::default(),
+            false,
+            MountConfig {
+                active_resolver: security.then(|| {
+                    Arc::new(skillfs_fuse::security::ActiveSkillResolver::new(
+                        source.path().to_path_buf(),
+                    ))
+                }),
+                ..MountConfig::default()
+            },
+        )
+        .unwrap();
+        let root = mountpoint.path().join("skills");
+        assert_eq!(std::fs::metadata(root.join(".draft")).is_ok(), !security);
+        for name in [".linked", ".staging", ".missing"] {
+            assert_eq!(
+                std::fs::metadata(root.join(name))
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::ENOENT)
+            );
+        }
+        assert!(store.read().list().is_empty());
+        assert_eq!(common::list_dir_names(&root), vec!["skill-discover"]);
+        handle.unmount().unwrap();
+    }
+}
+
+#[test]
+fn hidden_publication_preserves_existing_skills_and_manifest_validation() {
+    skip_if_no_fuse!();
+
+    for (case, in_place) in [
+        ("collision", false),
+        ("collision", true),
+        ("missing", false),
+        ("symlink", false),
+        ("oversize", false),
+    ] {
+        let source = tempfile::tempdir().unwrap();
+        let mountpoint = tempfile::tempdir().unwrap();
+        let existing = source.path().join("catalog/web");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(
+            existing.join("SKILL.md"),
+            "---\nname: web\n---\noriginal body\n",
+        )
+        .unwrap();
+        let draft = source.path().join(".draft");
+        std::fs::create_dir(&draft).unwrap();
+        match case {
+            "collision" => {
+                std::fs::write(draft.join("SKILL.md"), "---\nname: web\n---\nreplacement\n")
+                    .unwrap()
+            }
+            "symlink" => {
+                std::os::unix::fs::symlink(existing.join("SKILL.md"), draft.join("SKILL.md"))
+                    .unwrap()
+            }
+            "oversize" => std::fs::write(draft.join("SKILL.md"), "x".repeat(1025)).unwrap(),
+            _ => {}
+        }
+        let mut initial = SkillStore::new();
+        initial.load_from_directory(source.path(), &ParseConfig::default());
+        let store = Arc::new(RwLock::new(initial));
+        let mount_path = if in_place {
+            source.path()
+        } else {
+            mountpoint.path()
+        };
+        let handle = mount_background_configured(
+            mount_path,
+            source.path(),
+            store.clone(),
+            MountOptions::default(),
+            in_place,
+            MountConfig {
+                max_skill_size: Some(1024),
+                ..MountConfig::default()
+            },
+        )
+        .unwrap();
+        let root = if in_place {
+            mount_path.to_path_buf()
+        } else {
+            mount_path.join("skills")
+        };
+        let target = if case == "collision" {
+            "web"
+        } else {
+            "published"
+        };
+        let result = std::fs::rename(root.join(".draft"), root.join(target));
+        if case == "collision" && !in_place {
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ENOTEMPTY));
+        } else {
+            result.unwrap();
+        }
+        assert!(store.read().get("published").is_none());
+        assert_eq!(
+            store.read().get("web").unwrap().source_path,
+            existing.join("SKILL.md")
+        );
+        handle.unmount().unwrap();
+        assert!(
+            std::fs::read_to_string(existing.join("SKILL.md"))
+                .unwrap()
+                .contains("original body")
+        );
+        let mut fresh = SkillStore::new();
+        fresh.load_from_directory(
+            source.path(),
+            &ParseConfig {
+                max_skill_size: 1024,
+                ..ParseConfig::default()
+            },
+        );
+        assert_eq!(store.read().list(), fresh.list());
+        assert_eq!(
+            store.read().get("web").unwrap().source_path,
+            fresh.get("web").unwrap().source_path
+        );
+    }
+}
+
 fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -410,4 +640,148 @@ fn inbox_loser_rmdir_keeps_the_categorized_owner() {
         owner_md,
         "the retained owner's manifest is untouched and keeps the key"
     );
+}
+
+/// A dot-prefixed top-level directory is a hidden working copy under the
+/// loaders' contract: `SkillStore::load_from_directory` skips dot-prefixed
+/// top-level directories on every scan, and the nested write-path send
+/// sites apply the same rule through `hermes_nested_sync_eligible`. The
+/// flat slot has no such gate: `mkdir /skills/.draft` inserted a store
+/// placeholder for the hidden name, which made the hidden directory
+/// resolvable and writable through the mount and surfaced it in the
+/// `/skills` listing, while a fresh scan of the same tree keeps excluding
+/// it — the live store diverged from what a remount would serve.
+#[test]
+fn hidden_top_level_dirs_stay_out_of_the_store() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    std::fs::create_dir_all(source.path().join("web")).expect("served skill dir");
+    std::fs::write(
+        source.path().join("web/SKILL.md"),
+        "---\nname: web\ndescription: served\n---\nbody\n",
+    )
+    .expect("seed SKILL.md");
+
+    let mut initial_store = SkillStore::new();
+    initial_store.load_from_directory(source.path(), &ParseConfig::default());
+    let store: SharedSkillStore = Arc::new(RwLock::new(initial_store));
+    assert!(store.read().get("web").is_some());
+    assert!(store.read().get(".draft").is_none());
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        store.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount flat source");
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(mountpoint.path().join("skills/web/SKILL.md")).is_ok()
+        }),
+        "flat mount never served the seeded skill"
+    );
+
+    // The hidden working copy enters only through the mount: the mkdir
+    // placeholder and the manifest re-parse must both stay out of the
+    // live store, exactly like every discovery scan of the same tree.
+    std::fs::create_dir(mountpoint.path().join("skills/.draft"))
+        .expect("mkdir hidden dir through the mount");
+
+    assert!(
+        store.read().get(".draft").is_none(),
+        "mkdir of a hidden top-level directory must not insert a store placeholder"
+    );
+
+    std::fs::write(
+        mountpoint.path().join("skills/.draft/SKILL.md"),
+        "---\nname: leaked\ndescription: hidden\n---\nhidden body\n",
+    )
+    .expect("write hidden SKILL.md through the mount");
+
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        store.read().get(".draft").is_none(),
+        "a manifest written into a hidden top-level directory must not enter the store"
+    );
+
+    // A fresh scan of the same source agrees: the hidden name is not a
+    // managed skill.
+    let mut fresh = SkillStore::new();
+    fresh.load_from_directory(source.path(), &ParseConfig::default());
+    assert!(fresh.get(".draft").is_none());
+    assert!(fresh.get("web").is_some());
+
+    assert!(
+        store.read().get("web").is_some(),
+        "the visible control stays managed"
+    );
+    handle.unmount().expect("unmount flat source");
+}
+
+/// The rename twin of the hidden-copy rule: renaming a managed skill onto
+/// a dot-prefixed top-level name must withdraw the store entry entirely —
+/// a fresh scan of the renamed tree serves neither the old name (its
+/// directory is gone) nor the hidden one (the loader skips dot-prefixed
+/// top-level directories), and the live store must agree with both.
+#[test]
+fn renaming_onto_a_hidden_top_level_name_withdraws_the_entry() {
+    skip_if_no_fuse!();
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    std::fs::create_dir_all(source.path().join("web")).expect("served skill dir");
+    std::fs::write(
+        source.path().join("web/SKILL.md"),
+        "---\nname: web\ndescription: served\n---\nbody\n",
+    )
+    .expect("seed SKILL.md");
+
+    let mut initial_store = SkillStore::new();
+    initial_store.load_from_directory(source.path(), &ParseConfig::default());
+    let store: SharedSkillStore = Arc::new(RwLock::new(initial_store));
+    assert!(store.read().get("web").is_some());
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        store.clone(),
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount flat source");
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(mountpoint.path().join("skills/web/SKILL.md")).is_ok()
+        }),
+        "flat mount never served the seeded skill"
+    );
+
+    std::fs::rename(
+        mountpoint.path().join("skills/web"),
+        mountpoint.path().join("skills/.draft"),
+    )
+    .expect("rename onto a hidden top-level name");
+
+    assert!(
+        store.read().get("web").is_none(),
+        "the old name's directory is gone, so its entry must be withdrawn"
+    );
+    assert!(
+        store.read().get(".draft").is_none(),
+        "the hidden top-level name must not gain a store entry"
+    );
+
+    // A fresh scan of the renamed tree agrees on both counts.
+    let mut fresh = SkillStore::new();
+    fresh.load_from_directory(source.path(), &ParseConfig::default());
+    assert!(fresh.get("web").is_none());
+    assert!(fresh.get(".draft").is_none());
+
+    handle.unmount().expect("unmount flat source");
 }
