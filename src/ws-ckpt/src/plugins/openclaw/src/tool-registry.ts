@@ -32,7 +32,7 @@ export function registerTools(api: OpenClawPluginApi): void {
         "View or update ws-ckpt configuration. " +
         "Configurable keys: " +
         "autoCheckpoint (whether to auto-snapshot at the end of each conversation turn), " +
-        "workspace (default workspace absolute path; used by every command without -w. " +
+        "workspace (default workspace absolute path or registered ID; used by every command without -w. " +
         "If the path is a symlink, use the link itself — do NOT replace it with the " +
         "resolved real path; the daemon registers and matches by the exact string you pass), " +
         "cronSchedules (scheduled cron snapshots using standard 5-field cron expressions; " +
@@ -60,7 +60,7 @@ export function registerTools(api: OpenClawPluginApi): void {
             description:
               "New value as a string. Formats: " +
               "autoCheckpoint = \"true\"/\"false\"; " +
-              "workspace = absolute path; " +
+              "workspace = absolute path or registered ID; " +
               "cronSchedules = 'add \"CRON_EXPR\"' / 'remove \"CRON_EXPR\"' / 'set [\"CRON_EXPR\"]'; " +
               "maxSnapshotsNum = positive integer (or \"unset\" to restore inherit-global); " +
               "maxSnapshotsDuration = e.g. \"7d\"/\"24h\" (or \"unset\" to restore inherit-global).",

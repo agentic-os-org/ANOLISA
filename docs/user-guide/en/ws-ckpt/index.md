@@ -452,6 +452,31 @@ removing the manifest starts a fresh selection and is not a recovery procedure.
 }
 ```
 
+The OpenClaw plugin accepts a workspace path or a registered workspace ID.
+For an ID, it uses the registered path to check whether OpenClaw's working
+directory is inside the workspace and sends the ID to the daemon. If the
+plugin cannot resolve the ID, it skips automatic checkpoints and reports why.
+With `autoCheckpoint` enabled, a session starting on an already-bound workspace
+creates its initial checkpoint without pausing other sessions' default operations.
+
+Runtime workspace updates wait for any in-progress plugin registration before
+binding the new target. A second workspace update returns a retryable error
+while the first is still validating or setting up its target. Disabling
+`autoCheckpoint` through the config tool or a plugin reload supersedes an
+earlier enable that is still validating.
+A plugin reload during session recovery applies the
+workspace read from disk after that recovery finishes. If an update saves the
+new workspace but reports a setup warning,
+default checkpoint, rollback, and rollback preview return an error until the
+new workspace is ready. The session-start and end-of-turn hooks skip automatic
+checkpoints during that time. Tools called with an explicit `workspace` still
+use that target and the usual daemon checks.
+
+After fixing the reported problem, use `ws-ckpt-config` with `action: "update"`,
+`key: "workspace"`, and the same path or ID as `value`. Run the update from a session
+outside that directory. Once setup succeeds, default operations resume on the
+new workspace.
+
 ### Hermes Plugin Configuration
 
 Hermes resolves `ws-ckpt` from the Agent's `PATH` when synchronizing
@@ -471,10 +496,9 @@ checkpoint only for the workspace that was restored. For example, rolling
 back an explicit workspace B leaves the configured workspace A's automatic
 checkpoint enabled. If you change the workspace before the hook runs, the
 suppression applies only when the hook actually targets a restored workspace.
-Pending suppression is then cleared, even if automatic checkpoints
-are disabled or the plugin is unavailable. Later turns checkpoint normally.
-Preview and failed rollbacks do not arm suppression. Turns with no
-pending rollback do not resolve registration paths for this check.
+The matching turn-end hook clears pending suppression, even if automatic
+checkpoints are disabled or the plugin is unavailable. Preview and failed
+rollbacks do not arm suppression.
 
 OpenClaw binds the rollback tool to the host's `sessionKey`, and also to
 `sessionId` when the tool factory supplies it. Another session's `agent_end`
@@ -498,13 +522,20 @@ its session's next turn ends or the plugin process exits.
 You can address a rollback by workspace ID or registered path. A bare selector
 (with no path separator, except `.` and `..`) is resolved through
 `ws-ckpt status -w <selector> --format json` before a non-preview rollback.
-If that lookup fails, no rollback is executed; check daemon status or use the
-registered absolute path. A bare configured workspace also needs this lookup
-when a turn-end hook has pending suppression. If that lookup fails, the hook
-logs the failure, consumes the pending state and attempts its normal checkpoint.
-Path-addressed operations and turns without pending suppression add no status
-query. These lookups are separate daemon requests, not an atomic transaction
-with concurrent workspace unregister/re-registration.
+If that lookup fails, the plugin skips the rollback. Check daemon status or
+use the registered absolute path.
+
+- OpenClaw resolves the configured workspace ID at every turn end when
+  automatic checkpoints are enabled and the default workspace is ready,
+  even without pending rollback suppression. If the lookup fails, OpenClaw
+  logs the error and skips that turn's checkpoint.
+- Hermes resolves the configured workspace ID at turn end only when automatic
+  checkpoints are enabled and rollback suppression is pending. If the lookup
+  fails, Hermes logs the error and still attempts that turn's checkpoint.
+
+Using a registered path bypasses this lookup. The lookup and the operation
+are separate daemon requests. A workspace can be unregistered or
+re-registered between them.
 
 For path addressing, use the workspace's registered path, including its final
 symlink, rather than the live snapshot directory behind that link.

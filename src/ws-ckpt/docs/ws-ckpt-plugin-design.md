@@ -88,7 +88,7 @@ Plugin 只管建快照，不主动删——清理交给 daemon auto-cleanup（`C
 
 | 阶段         | Hermes hook                        | OpenClaw hook        | 行为                                                                                    |
 | ------------ | ---------------------------------- | -------------------- | --------------------------------------------------------------------------------------- |
-| 会话起始     | `on_session_start`               | `session_start`    | 校验环境 →`ws-ckpt init`(idempotent) → 创建 `event=session_start` 的基线快照      |
+| 会话起始     | `on_session_start`               | `session_start`    | 校验环境。OpenClaw 对未绑定的目标先查 `status`，需要时再按路径执行 `init`。目标就绪后创建基线快照。 |
 | 用户消息到达 | `pre_llm_call(user_message=...)` | `message_received` | 截取 user message 前 80 字符,存到 in-memory tracker,下次 checkpoint 当作 commit message |
 | 回合结束     | `on_session_end`                 | `agent_end`        | `++turn_count` → 用 tracker 缓存的 message 创建 `event=turn_end` 快照              |
 

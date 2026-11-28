@@ -96,10 +96,9 @@ export class BtrfsManager {
    * Ensure the workspace is initialized.
    *
    * Checks whether the workspace is already managed by ws-ckpt
-   * (via `ws-ckpt status`). If yes, just stores the path. If not,
-   * runs `ws-ckpt init`.
+   * (via `ws-ckpt status`) before falling back to path-based `ws-ckpt init`.
    *
-   * @param workspacePath - Absolute path to the workspace directory.
+   * @param workspacePath - Workspace directory path or registered workspace ID.
    * @returns `true` if the workspace is ready, `false` otherwise.
    */
   public async ensureWorkspace(workspacePath: string): Promise<boolean> {
