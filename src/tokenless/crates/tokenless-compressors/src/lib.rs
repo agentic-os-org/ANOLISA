@@ -11,7 +11,10 @@ mod search_results;
 mod tabular;
 mod terminal_cleanup;
 
-pub use browser_snapshot::{BrowserSnapshotCompressor, is_cdt_listing};
+pub use browser_snapshot::{
+    BrowserSnapshotCompressor, fold_advance, is_cdt_listing, is_pw_element_line, name_continues,
+    pw_element_ref,
+};
 pub use build_log::{
     BuildLogCompressor, BuildLogMetrics, BuildLogMode, BuildLogOperation, BuildLogOutcome,
 };

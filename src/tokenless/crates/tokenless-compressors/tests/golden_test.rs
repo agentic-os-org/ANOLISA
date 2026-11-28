@@ -467,6 +467,7 @@ fn browser_snapshot_goldens() {
     for (name, retained) in [
         ("browser_pw_basic", "\te3\t"),
         ("browser_pw_edges", "f2e38"),
+        ("browser_find_multi_block", "\te5\t"),
     ] {
         let source = input(&format!("{name}.txt"));
         let output = BrowserSnapshotCompressor.compress(&source).unwrap();

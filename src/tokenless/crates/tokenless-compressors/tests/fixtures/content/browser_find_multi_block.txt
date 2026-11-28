@@ -1,0 +1,25 @@
+### Result
+Found 3 matches for "Tokenless":
+
+- generic [ref=e1]:
+  - link "Show HN: Agentic OS Memory" [ref=e2] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=101
+  ...
+  - link "discuss" [ref=e3] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=101#comments
+  - text: 42 points
+----
+- toolbar [ref=e4]:
+  ...
+  - link "Ask HN: Tokenless Context Benchmarks" [ref=e5] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=102
+  - button "bookmark" [ref=e6] [cursor=pointer]
+  - link "18 comments" [ref=e7] [cursor=pointer]:
+    - /url: https://news.example.com/item?id=102#comments
+----
+- link "Tokenless Release Notes" [ref=e8] [cursor=pointer]:
+  - /url: https://github.com/agentic-os-org/ANOLISA
+### Ran Playwright code
+```js
+await page.getByText('Tokenless').all();
+```

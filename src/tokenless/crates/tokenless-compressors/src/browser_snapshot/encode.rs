@@ -7,6 +7,7 @@ use super::Record;
 /// Table columns for the Playwright record view.
 #[derive(Clone, Copy)]
 pub(crate) enum Col {
+    Block,
     Depth,
     Role,
     Name,
@@ -26,9 +27,21 @@ pub(crate) const PW_COLS: &[Col] = &[
     Col::Text,
 ];
 
+pub(crate) const FIND_COLS: &[Col] = &[
+    Col::Block,
+    Col::Depth,
+    Col::Role,
+    Col::Name,
+    Col::Ref,
+    Col::Attrs,
+    Col::Url,
+    Col::Text,
+];
+
 impl Col {
     fn header(self) -> &'static str {
         match self {
+            Self::Block => "block",
             Self::Depth => "depth",
             Self::Role => "role",
             Self::Name => "name",
@@ -41,6 +54,7 @@ impl Col {
 
     fn value(self, record: &Record) -> String {
         match self {
+            Self::Block => record.block.to_string(),
             Self::Depth => record.depth.to_string(),
             Self::Role => record.role.clone(),
             Self::Name => record.name.clone(),

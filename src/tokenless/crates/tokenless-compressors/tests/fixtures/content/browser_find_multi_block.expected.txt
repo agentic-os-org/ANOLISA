@@ -1,0 +1,20 @@
+### Result
+Found 3 matches for "Tokenless":
+
+U1=https://news.example.com/
+block	depth	role	name	ref	attrs	url	text
+0	0	generic		e1			
+0	1	link	Show HN: Agentic OS Memory	e2		U1/item?id=101	
+0	1	...					
+0	1	link	discuss	e3		U1/item?id=101#comments	
+0	1	text					42 points
+1	0	toolbar		e4			
+1	1	...					
+1	1	link	Ask HN: Tokenless Context Benchmarks	e5		U1/item?id=102	
+1	1	button	bookmark	e6			
+1	1	link	18 comments	e7		U1/item?id=102#comments	
+2	0	link	Tokenless Release Notes	e8		https://github.com/agentic-os-org/ANOLISA	
+### Ran Playwright code
+```js
+await page.getByText('Tokenless').all();
+```
