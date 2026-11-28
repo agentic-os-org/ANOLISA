@@ -79,48 +79,57 @@ impl Default for ExportFilter {
     }
 }
 
-/// Parse YAML-like frontmatter from a markdown string.
-/// Normalizes block lists into JSON arrays; returns the map and borrowed body.
-pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, &str) {
+/// Read fields for filtering, and return a separate body only if the flat AMA
+/// map can represent the header. Otherwise export the original Markdown whole.
+pub(crate) fn parse_frontmatter(content: &str) -> (HashMap<String, String>, Option<&str>) {
     let mut fm = HashMap::new();
 
     // Shared fence rule: a closing fence that ends the file (no trailing
     // newline) still closes the block, so such a file no longer exports with
     // an empty frontmatter map (GH-3580).
     let Some((fm_str, body)) = super::frontmatter::split(content) else {
-        // No frontmatter found
-        return (fm, content);
+        return (fm, None);
     };
 
-    let mut current_list_key: Option<String> = None;
-    let mut current_list_items: Vec<String> = Vec::new();
-    for line in fm_str.lines() {
-        if let Some(item) = line.strip_prefix("  - ") {
-            // List item under the current list header
-            if current_list_key.is_some() {
-                current_list_items.push(item.trim().to_string());
-            }
+    const ITEM: &str = "  - ";
+    let mut lines = fm_str.lines().peekable();
+    let mut items = Vec::new();
+    let mut complete = true;
+    while let Some(line) = lines.next() {
+        if line.trim().is_empty() {
             continue;
         }
-        // Flush any accumulated list items
-        if let Some(key) = current_list_key.take() {
-            let json =
-                serde_json::to_string(&current_list_items).unwrap_or_else(|_| "[]".to_string());
-            fm.insert(key, json);
-            current_list_items.clear();
+        if line.starts_with(ITEM) {
+            // A list item without a preceding field is ordinary text.
+            complete = false;
+            continue;
         }
-        if let Some((key, value)) = line.split_once(": ") {
-            fm.insert(key.trim().to_string(), value.trim().to_string());
+        let (key, value) = if let Some((key, value)) = line.split_once(": ") {
+            (key, value.trim().to_owned())
         } else if let Some(key) = line.strip_suffix(':') {
-            current_list_key = Some(key.trim().to_string());
+            items.clear();
+            while let Some(item) = lines.next_if(|line| line.starts_with(ITEM)) {
+                items.push(item[ITEM.len()..].trim());
+            }
+            let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+            (key, json)
+        } else {
+            complete = false;
+            continue;
+        };
+        if key.is_empty()
+            || key.starts_with(char::is_whitespace)
+            || key.starts_with('#')
+            || key.starts_with("- ")
+        {
+            complete = false;
+        }
+        if fm.insert(key.trim().to_owned(), value).is_some() {
+            // A map cannot retain both occurrences of a repeated label.
+            complete = false;
         }
     }
-    // Flush trailing list
-    if let Some(key) = current_list_key.take() {
-        let json = serde_json::to_string(&current_list_items).unwrap_or_else(|_| "[]".to_string());
-        fm.insert(key, json);
-    }
-
+    let body = (complete && !fm.is_empty()).then_some(body);
     (fm, body)
 }
 
@@ -178,7 +187,7 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
             .to_string_lossy()
             .to_string();
 
-        let content = std::fs::read_to_string(path)
+        let mut content = std::fs::read_to_string(path)
             .map_err(|e| export_io_error(svc, &rel_path, "cannot read", e))?;
 
         let (frontmatter, body) = parse_frontmatter(&content);
@@ -201,19 +210,9 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
             }
         }
 
-        let exported = ExportedMemory {
-            path: rel_path.clone(),
-            frontmatter: frontmatter.clone(),
-            content: body.to_string(),
-        };
-
-        // Separate tasks from regular memories
-        if rel_path.starts_with("tasks/") {
-            if filter.include_tasks {
-                tasks.push(exported);
-            }
+        let entries = if rel_path.starts_with("tasks/") {
+            &mut tasks
         } else {
-            // Update stats
             if let Some(cat) = frontmatter.get("category") {
                 *stats.by_category.entry(cat.clone()).or_insert(0) += 1;
             }
@@ -221,8 +220,21 @@ pub fn memory_export(svc: &MemoryService, filter: &ExportFilter) -> Result<Strin
                 *stats.by_source.entry(src.clone()).or_insert(0) += 1;
             }
             stats.total_bytes += content.len() as u64;
-            memories.push(exported);
-        }
+            &mut memories
+        };
+        let fields = if let Some(body) = body {
+            let header_len = content.len() - body.len();
+            content.drain(..header_len);
+            frontmatter
+        } else {
+            // An empty field map tells even older importers to write content verbatim.
+            HashMap::new()
+        };
+        entries.push(ExportedMemory {
+            path: rel_path,
+            frontmatter: fields,
+            content,
+        });
     }
 
     let agent_id = std::env::var("MCP_CLIENT_NAME").unwrap_or_else(|_| "unknown".into());
@@ -280,7 +292,7 @@ mod tests {
         assert_eq!(fm.get("id").unwrap(), "abc123");
         assert_eq!(fm.get("category").unwrap(), "lesson");
         assert_eq!(fm.get("source").unwrap(), "auto-consolidation");
-        assert!(body.contains("This is the body"));
+        assert_eq!(body.unwrap().trim(), "This is the body.");
     }
 
     #[test]
@@ -288,7 +300,7 @@ mod tests {
         let content = "Just plain markdown content.";
         let (fm, body) = parse_frontmatter(content);
         assert!(fm.is_empty());
-        assert_eq!(body, content);
+        assert!(body.is_none());
     }
 
     #[test]
@@ -298,7 +310,7 @@ mod tests {
         let (fm, body) = parse_frontmatter(content);
         assert_eq!(fm.get("id").unwrap(), "abc123");
         assert_eq!(fm.get("category").unwrap(), "lesson");
-        assert_eq!(body, "");
+        assert_eq!(body, Some(""));
     }
 
     #[test]
@@ -306,7 +318,7 @@ mod tests {
         let content = "---\nid: abc123\r\n---\r\nbody\r\n";
         let (fm, body) = parse_frontmatter(content);
         assert_eq!(fm.get("id").unwrap(), "abc123");
-        assert_eq!(body, "body\r\n");
+        assert_eq!(body, Some("body\r\n"));
     }
 
     #[test]
@@ -363,6 +375,6 @@ mod tests {
         let (fm, body) = parse_frontmatter(content);
         assert_eq!(fm.get("title").unwrap(), "Test");
         assert!(fm.contains_key("next_steps"));
-        assert!(body.contains("Body"));
+        assert_eq!(body, Some("Body"));
     }
 }

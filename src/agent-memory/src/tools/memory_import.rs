@@ -578,6 +578,7 @@ mod tests {
             );
         }
         let (parsed, body) = crate::tools::memory_export::parse_frontmatter(&md);
+        let body = body.unwrap();
         assert!(
             parsed.get("tags").is_some_and(|v| v == "keepme"),
             "keys sorted after the malicious one must survive: {parsed:?}"
@@ -599,6 +600,7 @@ mod tests {
         let md = reconstruct_markdown(&fm, "real body");
 
         let (parsed, body) = crate::tools::memory_export::parse_frontmatter(&md);
+        let body = body.unwrap();
         assert!(
             parsed.get("tags").is_some_and(|v| v == "keepme"),
             "keys sorted after the malicious one must survive: {parsed:?}"
@@ -629,6 +631,7 @@ mod tests {
 
         let md1 = reconstruct_markdown(&fm, "body");
         let (parsed, body1) = crate::tools::memory_export::parse_frontmatter(&md1);
+        let body1 = body1.unwrap();
         assert_eq!(body1.trim(), "body");
         assert_eq!(parsed.get("id").map(String::as_str), Some("abc123"));
         assert_eq!(
@@ -643,6 +646,7 @@ mod tests {
         // reconstruct -> parse round trip is byte-stable.
         let md2 = reconstruct_markdown(&parsed, body1);
         let (parsed2, body2) = crate::tools::memory_export::parse_frontmatter(&md2);
+        let body2 = body2.unwrap();
         assert_eq!(
             parsed, parsed2,
             "parsed values must be stable across cycles"

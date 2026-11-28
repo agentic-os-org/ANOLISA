@@ -478,6 +478,13 @@ Import replaces ASCII control characters, including newlines, with spaces
 before storing frontmatter. Summary rankings reflect those normalized entries;
 control characters are not preserved by an AMA import round trip.
 
+Two leading Markdown `---` rules can enclose prose rather than metadata. If
+the section contains text or repeated fields that the AMA metadata map would
+discard, `mem_export` saves the whole note in `content` with an empty
+`frontmatter` map. Recognized fields still participate in export filters.
+This also applies to backups made by `overwrite`. If an older archive is
+already missing text, export again from the original note or another intact copy.
+
 A missing store root is an export error, not an empty archive. Scan and read failures include the affected mount-relative path and are audited best-effort; an unavailable store can also prevent audit persistence.
 
 `mem_export` stops with an error naming the affected path if it cannot scan a directory or read a Markdown file as UTF-8. It does not return a partial AMA archive as a successful export. Check file permissions or encoding and retry. Category and source filters require reading metadata, so a read failure can also block a filtered export. Metadata directories and non-Markdown files remain excluded.

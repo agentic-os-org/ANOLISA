@@ -6,6 +6,7 @@
 
 use agent_memory::config::AppConfig;
 use agent_memory::service::MemoryService;
+use agent_memory::tools::memory_export::{ExportFilter, memory_export};
 use agent_memory::tools::memory_import::{ImportStrategy, memory_import};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use tempfile::tempdir;
@@ -175,16 +176,48 @@ fn import_accepts_real_export_round_trip() {
     // MEMORY.md and README.md) still imports cleanly with zero errors.
     let (_tmp, svc) = setup();
     svc.write("notes/a.md", "alpha content", false).unwrap();
-    let exported = agent_memory::tools::memory_export::memory_export(
-        &svc,
-        &agent_memory::tools::memory_export::ExportFilter::default(),
-    )
-    .unwrap();
+    let exported = memory_export(&svc, &ExportFilter::default()).unwrap();
     let out = memory_import(&svc, &exported, ImportStrategy::SkipExisting, true).unwrap();
     assert!(
         out.contains("0 errors"),
         "real archive must import without errors: {out}"
     );
+}
+
+#[test]
+fn round_trip_preserves_markdown_between_leading_rules() {
+    let (_src, source) = setup();
+    let (_dst, destination) = setup();
+    let notes = [
+        (
+            "facts/release/handover.md",
+            "---\n# Handover\nKeep the previous package.\n---\nCall the operator.\n",
+        ),
+        (
+            "notes/checklist.md",
+            "---\ncategory: release\nOwner: release team\nKeep both copies.\n---\nChecklist",
+        ),
+        (
+            "notes/shifts.md",
+            "---\ncategory: release\nOwner: morning shift\nOwner: evening shift\n---\n",
+        ),
+        (
+            "notes/runbook.md",
+            "---\ncategory: release\n- Validate: tests\n- Deploy: package\n---\n",
+        ),
+    ];
+    for (path, content) in notes {
+        source.write(path, content, false).unwrap();
+    }
+    let filter = ExportFilter {
+        category: Some("release".into()),
+        ..Default::default()
+    };
+    let archive = memory_export(&source, &filter).unwrap();
+    memory_import(&destination, &archive, ImportStrategy::SkipExisting, false).unwrap();
+    for (path, content) in notes {
+        assert_eq!(destination.read(path).unwrap(), content, "{path}");
+    }
 }
 
 #[test]
