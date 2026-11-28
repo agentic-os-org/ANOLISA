@@ -1,0 +1,2150 @@
+//! End-to-end coverage for `tokenless init`.
+//!
+//! Every case drives the real binary against a throwaway `ANOLISA_ADAPTER_DIR`
+//! built from stub detectors and installers, so the two detector contracts
+//! (tri-state exit code and published JSON status), the selection modes and the
+//! exit codes a caller can rely on are exercised the way a user reaches them.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use tempfile::TempDir;
+
+/// Detector that follows the shared tri-state contract: not installed yet, but
+/// every prerequisite is present.
+const DETECT_INSTALLABLE: &str = "#!/usr/bin/env bash\nexit 1\n";
+/// Detector that follows the shared tri-state contract: adapter registered.
+const DETECT_READY: &str = "#!/usr/bin/env bash\nexit 0\n";
+/// Detector that follows the shared tri-state contract: prerequisites missing.
+const DETECT_MISSING_PREREQS: &str = "#!/usr/bin/env bash\nexit 2\n";
+
+/// One manifest target with the detector body it should be wired to.
+struct Target {
+    name: &'static str,
+    detect: &'static str,
+    /// `None` declares `actions.detect` without `actions.install`.
+    install: Option<String>,
+}
+
+impl Target {
+    /// A target whose detector reports installable and whose installer records
+    /// every run in the shared install log.
+    fn installable(name: &'static str) -> Self {
+        Self::new(name, DETECT_INSTALLABLE)
+    }
+
+    fn new(name: &'static str, detect: &'static str) -> Self {
+        Self {
+            name,
+            detect,
+            install: Some(logging_installer()),
+        }
+    }
+}
+
+/// Installer body that appends the target name to the fixture's install log.
+fn logging_installer() -> String {
+    String::from(
+        "#!/usr/bin/env bash\n\
+         printf '%s\\n' \"$ANOLISA_TARGET\" >> \"$TOKENLESS_INIT_TEST_LOG\"\n",
+    )
+}
+
+/// A throwaway adapter directory plus the isolated home the CLI runs against.
+struct Fixture {
+    _root: TempDir,
+    adapter_dir: PathBuf,
+    home: PathBuf,
+    data_root: PathBuf,
+    log: PathBuf,
+}
+
+impl Fixture {
+    /// Build an adapter directory holding `manifest.json` and the stub scripts.
+    fn new(targets: &[Target]) -> Self {
+        Self::with_contract(targets, true)
+    }
+
+    /// A tree that predates the detector contract: no `detectContract` marker,
+    /// so exit 0 may only mean the host is usable. This is what a newer CLI
+    /// meets when npm preserves a shared adapter directory another installation
+    /// put there, or when `ANOLISA_ADAPTER_DIR` points at one.
+    fn legacy(targets: &[Target]) -> Self {
+        Self::with_contract(targets, false)
+    }
+
+    fn with_contract(targets: &[Target], declare_contract: bool) -> Self {
+        let root = TempDir::new().expect("create fixture root");
+        let adapter_dir = root.path().join("data/anolisa/adapters/tokenless");
+        fs::create_dir_all(&adapter_dir).expect("create adapter directory");
+
+        let contract = if declare_contract {
+            "\"detectContract\":\"status-v1\","
+        } else {
+            ""
+        };
+        let mut manifest = format!(
+            "{{\"component\":\"tokenless\",\"version\":\"0.0.0-test\",{contract}\"targets\":{{"
+        );
+        for (index, target) in targets.iter().enumerate() {
+            let scripts = Path::new(target.name).join("scripts");
+            fs::create_dir_all(adapter_dir.join(&scripts)).expect("create script directory");
+            write_script(&adapter_dir.join(scripts.join("detect.sh")), target.detect);
+            let actions = match &target.install {
+                Some(body) => {
+                    write_script(&adapter_dir.join(scripts.join("install.sh")), body);
+                    format!(
+                        "\"detect\":\"{0}/scripts/detect.sh\",\"install\":\"{0}/scripts/install.sh\"",
+                        target.name
+                    )
+                }
+                None => format!("\"detect\":\"{0}/scripts/detect.sh\"", target.name),
+            };
+            let separator = if index == 0 { "" } else { "," };
+            // No capabilities on purpose: the hooks column would print
+            // "tool-ready", and a `contains("ready")` assertion on the row
+            // could not tell the hooks text from the status column.
+            manifest.push_str(&format!(
+                "{separator}\"{name}\":{{\"compatibleVersions\":\"*\",\"actions\":{{{actions}}}}}",
+                name = target.name
+            ));
+        }
+        manifest.push_str("}}");
+        fs::write(adapter_dir.join("manifest.json"), manifest).expect("write manifest");
+
+        // A home and a data root of their own keep the real installation, and
+        // anything the detectors read from $HOME, out of the run.
+        let home = root.path().join("home");
+        let data_root = root.path().join("data");
+        fs::create_dir_all(&home).expect("create fixture home");
+        let log = root.path().join("install.log");
+
+        Self {
+            _root: root,
+            adapter_dir,
+            home,
+            data_root,
+            log,
+        }
+    }
+
+    /// A command for the CLI under test with the fixture as its whole world.
+    fn command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tokenless"));
+        command
+            .env("ANOLISA_ADAPTER_DIR", &self.adapter_dir)
+            .env("HOME", &self.home)
+            .env("XDG_DATA_HOME", &self.data_root)
+            .env("TOKENLESS_INIT_TEST_LOG", &self.log)
+            .env_remove("TOKENLESS_DATA_DIR")
+            .env_remove("DSH_TOKENLESS_DATA_DIR")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    /// A command whose `PATH` holds nothing, so a child the CLI spawns by name
+    /// cannot be found.
+    fn command_without_bash(&self, empty_bin: &Path) -> Command {
+        let mut command = self.command();
+        command.env("PATH", empty_bin);
+        command
+    }
+
+    /// A directory for host CLI stubs, off the fixture PATH until a test asks
+    /// for it through the environment.
+    fn stub_bin(&self) -> PathBuf {
+        let dir = self._root.path().join("stub-bin");
+        fs::create_dir_all(&dir).expect("create stub bin");
+        dir
+    }
+
+    /// A directory holding nothing, for runs that must not find an interpreter.
+    fn empty_bin(&self) -> PathBuf {
+        let dir = self._root.path().join("empty-bin");
+        fs::create_dir_all(&dir).expect("create empty bin");
+        dir
+    }
+
+    /// Targets the installers recorded, in the order they ran.
+    fn installed(&self) -> Vec<String> {
+        match fs::read_to_string(&self.log) {
+            Ok(contents) => contents.lines().map(String::from).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// Write an executable script body, keeping the shebang the stubs declare.
+fn write_script(path: &Path, body: &str) {
+    fs::write(path, body).expect("write stub script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod stub script");
+    }
+}
+
+/// One finished CLI run with both streams decoded.
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl Run {
+    /// Both streams together, for assertions that do not care which one carried
+    /// an installer's diagnostics.
+    fn combined(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+
+    fn assert_code(&self, expected: i32) {
+        assert_eq!(
+            self.code, expected,
+            "unexpected exit code\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout, self.stderr
+        );
+    }
+}
+
+fn run(fixture: &Fixture, args: &[&str]) -> Run {
+    finish(
+        fixture
+            .command()
+            .args(args)
+            .output()
+            .expect("run tokenless init"),
+    )
+}
+
+/// Run with `stdin` attached as a pipe, which is what a non-terminal caller sees.
+fn run_with_stdin(fixture: &Fixture, args: &[&str], stdin: &str) -> Run {
+    use std::io::Write as _;
+    let mut child = fixture
+        .command()
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn tokenless init");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin.as_bytes())
+        .expect("feed stdin");
+    finish(child.wait_with_output().expect("wait for tokenless init"))
+}
+
+fn finish(output: Output) -> Run {
+    Run {
+        code: output.status.code().expect("exit code"),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// True when a system-wide installation could answer the discovery fallbacks.
+///
+/// Mirrors the CLI's own `has_manifest` check so a template-only installation
+/// still counts as present.
+fn system_adapter_dir_present() -> bool {
+    ["/usr/share", "/usr/local/share"].iter().any(|root| {
+        let adapter_dir = Path::new(root).join("anolisa/adapters/tokenless");
+        adapter_dir.join("manifest.json").exists() || adapter_dir.join("manifest.json.in").exists()
+    })
+}
+
+/// The status table row for one framework.
+fn row_for<'a>(stdout: &'a str, name: &str) -> &'a str {
+    stdout
+        .lines()
+        .find(|line| line.starts_with(name))
+        .unwrap_or_else(|| panic!("no status row for {name}:\n{stdout}"))
+}
+
+/// The status column of one framework's table row.
+fn status_of(stdout: &str, name: &str) -> String {
+    let row = row_for(stdout, name);
+    row[name.len()..]
+        .trim()
+        .trim_end_matches('\u{2014}')
+        .trim()
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// P1-01 — a named operation ends with its own result
+// ---------------------------------------------------------------------------
+
+#[test]
+fn named_framework_installs_once_and_does_not_continue_into_selection() {
+    let fixture = Fixture::new(&[Target::installable("one"), Target::installable("two")]);
+
+    let run = run(&fixture, &["init", "--framework", "one"]);
+
+    run.assert_code(0);
+    assert_eq!(fixture.installed(), vec!["one".to_string()]);
+    assert!(
+        run.stdout.contains("one adapter installed successfully."),
+        "missing success line:\n{}",
+        run.stdout
+    );
+    // The fall-through used to reuse the pre-install statuses and offer the
+    // generic selection again, which installed the named target a second time.
+    assert!(
+        !run.stdout.contains("Installable frameworks:"),
+        "named operation continued into the interactive selection:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("Select a framework to install"),
+        "named operation prompted again:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("Run `tokenless init --framework"),
+        "named operation printed the non-terminal hints:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn named_framework_rejects_all_instead_of_installing_twice() {
+    let fixture = Fixture::new(&[Target::installable("one"), Target::installable("two")]);
+
+    let run = run(&fixture, &["init", "--framework", "one", "--all"]);
+
+    assert_ne!(run.code, 0, "combination was accepted:\n{}", run.combined());
+    assert!(
+        fixture.installed().is_empty(),
+        "rejected combination still installed {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn named_framework_rejects_list() {
+    let fixture = Fixture::new(&[Target::installable("one")]);
+
+    let run = run(&fixture, &["init", "--framework", "one", "--list"]);
+
+    assert_ne!(run.code, 0, "combination was accepted:\n{}", run.combined());
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn unknown_framework_fails() {
+    let fixture = Fixture::new(&[Target::installable("one")]);
+
+    let run = run(&fixture, &["init", "--framework", "nope"]);
+
+    run.assert_code(1);
+    assert!(
+        run.combined().contains("unknown framework: nope"),
+        "missing reason:\n{}",
+        run.combined()
+    );
+    assert!(fixture.installed().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// P1-02 — the detector contract decides the status
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tri_state_exit_codes_drive_the_status_table() {
+    let fixture = Fixture::new(&[
+        Target::new("readytarget", DETECT_READY),
+        Target::new("installabletarget", DETECT_INSTALLABLE),
+        Target::new("missingtarget", DETECT_MISSING_PREREQS),
+    ]);
+
+    let run = run(&fixture, &["init", "--list"]);
+
+    run.assert_code(0);
+    for (name, label) in [
+        ("readytarget", "ready"),
+        ("installabletarget", "installable"),
+        ("missingtarget", "missing prereqs"),
+    ] {
+        assert_eq!(status_of(&run.stdout, name), label, "row: {name}");
+    }
+    assert!(fixture.installed().is_empty(), "--list must not install");
+}
+
+#[test]
+fn detector_exiting_zero_is_ready_and_is_not_reinstalled() {
+    let fixture = Fixture::new(&[Target::new("one", DETECT_READY)]);
+
+    let run = run(&fixture, &["init", "--framework", "one"]);
+
+    run.assert_code(0);
+    assert!(
+        run.stdout.contains("one is already installed and ready."),
+        "unexpected output:\n{}",
+        run.stdout
+    );
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn detector_reporting_missing_prereqs_is_not_offered_for_install() {
+    let fixture = Fixture::new(&[Target::new("one", DETECT_MISSING_PREREQS)]);
+
+    let named = run(&fixture, &["init", "--framework", "one"]);
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("not installable (status: missing prereqs)"),
+        "unexpected reason:\n{}",
+        named.combined()
+    );
+
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert!(
+        batch
+            .stdout
+            .contains("No frameworks are waiting for installation.")
+    );
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn published_json_status_overrides_the_exit_code() {
+    // The shapes the shipped detectors use: codex reports its binary, qoder
+    // reports host-CLI capability, and qwenwork exits 0 either way.
+    let fixture = Fixture::new(&[
+        Target::new(
+            "binaryonly",
+            "#!/usr/bin/env bash\necho '{\"installed\": true, \"status\": \"installable\"}'\nexit 0\n",
+        ),
+        Target::new(
+            "hostcli",
+            "#!/usr/bin/env bash\necho '[tokenless] hostcli: compatible CLI found'\necho '{\"status\":\"installable\"}'\nexit 0\n",
+        ),
+        Target::new(
+            "absenthost",
+            "#!/usr/bin/env bash\necho '{\"status\": \"missing_prereqs\"}'\nexit 1\n",
+        ),
+        Target::new(
+            "registered",
+            "#!/usr/bin/env bash\necho 'resources ready'\necho '{\"status\": \"ready\"}'\nexit 0\n",
+        ),
+    ]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    for (name, label) in [
+        ("binaryonly", "installable"),
+        ("hostcli", "installable"),
+        ("absenthost", "missing prereqs"),
+        ("registered", "ready"),
+    ] {
+        assert_eq!(status_of(&list.stdout, name), label, "row: {name}");
+    }
+
+    // Only the two genuinely installable targets are offered to --all.
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["binaryonly".to_string(), "hostcli".to_string()]
+    );
+}
+
+#[test]
+fn legacy_installed_false_is_not_reported_ready() {
+    let fixture = Fixture::new(&[Target::new(
+        "one",
+        "#!/usr/bin/env bash\necho '{\"installed\": false}'\nexit 0\n",
+    )]);
+
+    let run = run(&fixture, &["init", "--list"]);
+
+    run.assert_code(0);
+    assert_eq!(status_of(&run.stdout, "one"), "installable");
+}
+
+// ---------------------------------------------------------------------------
+// P2-01 — installer output survives
+// ---------------------------------------------------------------------------
+
+#[test]
+fn installer_diagnostics_on_both_streams_are_preserved() {
+    let fixture = Fixture::new(&[Target {
+        name: "one",
+        detect: DETECT_INSTALLABLE,
+        install: Some(String::from(
+            "#!/usr/bin/env bash\n\
+             echo 'restart the host to load the adapter'\n\
+             echo 'diagnostic-on-stderr' >&2\n\
+             exit 3\n",
+        )),
+    }]);
+
+    let run = run(&fixture, &["init", "--framework", "one"]);
+
+    run.assert_code(1);
+    assert!(
+        run.stdout.contains("restart the host to load the adapter"),
+        "stdout guidance was dropped:\n{}",
+        run.stdout
+    );
+    assert!(
+        run.stderr.contains("diagnostic-on-stderr"),
+        "stderr diagnostics were dropped:\n{}",
+        run.stderr
+    );
+    assert!(
+        run.combined().contains("exited with code 3"),
+        "exit code was not reported:\n{}",
+        run.combined()
+    );
+}
+
+#[test]
+fn successful_installer_stdout_reaches_the_user() {
+    let fixture = Fixture::new(&[Target {
+        name: "one",
+        detect: DETECT_INSTALLABLE,
+        install: Some(String::from(
+            "#!/usr/bin/env bash\necho 'restart OpenCode to finish setup'\n",
+        )),
+    }]);
+
+    let run = run(&fixture, &["init", "--all"]);
+
+    run.assert_code(0);
+    assert!(
+        run.stdout.contains("restart OpenCode to finish setup"),
+        "installer stdout was dropped:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        fixture.installed().len(),
+        0,
+        "unexpected log {:?}",
+        fixture.installed()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-02 — a selected target that cannot be installed fails the run
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch_install_fails_when_a_selected_target_has_no_installer() {
+    let fixture = Fixture::new(&[Target {
+        name: "one",
+        detect: DETECT_INSTALLABLE,
+        install: None,
+    }]);
+
+    let run = run(&fixture, &["init", "--all"]);
+
+    run.assert_code(1);
+    assert!(
+        run.combined().contains("no install script for one"),
+        "missing warning:\n{}",
+        run.combined()
+    );
+    assert!(
+        run.combined().contains("installation failed for: one"),
+        "missing failure summary:\n{}",
+        run.combined()
+    );
+    assert!(
+        run.stdout.contains("declares no install action"),
+        "status table did not flag the target:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn named_install_fails_when_the_target_has_no_installer() {
+    let fixture = Fixture::new(&[Target {
+        name: "one",
+        detect: DETECT_INSTALLABLE,
+        install: None,
+    }]);
+
+    let run = run(&fixture, &["init", "--framework", "one"]);
+
+    run.assert_code(1);
+    assert!(
+        run.combined()
+            .contains("no install script configured for one"),
+        "missing reason:\n{}",
+        run.combined()
+    );
+}
+
+#[test]
+fn batch_install_fails_only_after_running_the_remaining_installers() {
+    let fixture = Fixture::new(&[
+        Target {
+            name: "one",
+            detect: DETECT_INSTALLABLE,
+            install: None,
+        },
+        Target::installable("two"),
+    ]);
+
+    let run = run(&fixture, &["init", "--all"]);
+
+    run.assert_code(1);
+    assert_eq!(
+        fixture.installed(),
+        vec!["two".to_string()],
+        "a failing target must not stop the others"
+    );
+    assert!(run.combined().contains("installation failed for: one"));
+}
+
+// ---------------------------------------------------------------------------
+// Selection modes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn all_installs_every_installable_target_once() {
+    let fixture = Fixture::new(&[
+        Target::installable("one"),
+        Target::installable("two"),
+        Target::new("three", DETECT_READY),
+    ]);
+
+    let run = run(&fixture, &["init", "--all"]);
+
+    run.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["one".to_string(), "two".to_string()],
+        "ready targets must not be reinstalled"
+    );
+}
+
+#[test]
+fn batch_failure_of_one_installer_is_reported_after_the_rest_run() {
+    let fixture = Fixture::new(&[
+        Target {
+            name: "one",
+            detect: DETECT_INSTALLABLE,
+            install: Some(String::from("#!/usr/bin/env bash\nexit 4\n")),
+        },
+        Target::installable("two"),
+    ]);
+
+    let run = run(&fixture, &["init", "--all"]);
+
+    run.assert_code(1);
+    assert_eq!(fixture.installed(), vec!["two".to_string()]);
+    assert!(run.combined().contains("installation failed for: one"));
+}
+
+#[test]
+fn without_a_terminal_the_selection_is_skipped_with_hints() {
+    let fixture = Fixture::new(&[Target::installable("one")]);
+
+    let run = run_with_stdin(&fixture, &["init"], "1\n");
+
+    run.assert_code(0);
+    assert!(
+        fixture.installed().is_empty(),
+        "a piped selection must not install: {:?}",
+        fixture.installed()
+    );
+    assert!(
+        run.stdout
+            .contains("Run `tokenless init --framework <name>`"),
+        "missing hint:\n{}",
+        run.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-03 — discovery honors the configured data root
+// ---------------------------------------------------------------------------
+
+#[test]
+fn discovery_finds_the_configured_xdg_data_home() {
+    let fixture = Fixture::new(&[Target::installable("one")]);
+    let expected = fixture.adapter_dir.display().to_string();
+
+    // No ANOLISA_ADAPTER_DIR: the fixture lives at
+    // $XDG_DATA_HOME/anolisa/adapters/tokenless, which the packaged user
+    // layout uses whenever XDG_DATA_HOME is set.
+    let run = finish(
+        Command::new(env!("CARGO_BIN_EXE_tokenless"))
+            .arg("init")
+            .arg("--list")
+            .env_remove("ANOLISA_ADAPTER_DIR")
+            .env("HOME", &fixture.home)
+            .env("XDG_DATA_HOME", &fixture.data_root)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run tokenless init"),
+    );
+
+    run.assert_code(0);
+    assert!(
+        run.stdout
+            .contains(&format!("Adapter directory: {expected}")),
+        "adapter directory was not discovered:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn discovery_skips_a_relative_xdg_data_home() {
+    if system_adapter_dir_present() {
+        // A real system installation would answer the fallback and hide the
+        // rejection this case asserts.
+        return;
+    }
+    let fixture = Fixture::new(&[Target::installable("one")]);
+
+    let run = finish(
+        Command::new(env!("CARGO_BIN_EXE_tokenless"))
+            .arg("init")
+            .arg("--list")
+            .env_remove("ANOLISA_ADAPTER_DIR")
+            .env("HOME", &fixture.home)
+            .env("XDG_DATA_HOME", "relative/data")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run tokenless init"),
+    );
+
+    run.assert_code(1);
+    assert!(
+        run.combined().contains("Adapter directory not found."),
+        "unexpected error:\n{}",
+        run.combined()
+    );
+}
+
+#[test]
+fn missing_adapter_directory_explains_the_override() {
+    if system_adapter_dir_present() {
+        return;
+    }
+    let root = TempDir::new().expect("create empty root");
+
+    let run = finish(
+        Command::new(env!("CARGO_BIN_EXE_tokenless"))
+            .arg("init")
+            .arg("--list")
+            .env_remove("ANOLISA_ADAPTER_DIR")
+            .env("HOME", root.path().join("home"))
+            .env("XDG_DATA_HOME", root.path().join("data"))
+            .stdin(Stdio::null())
+            .output()
+            .expect("run tokenless init"),
+    );
+
+    run.assert_code(1);
+    assert!(
+        run.combined().contains("ANOLISA_ADAPTER_DIR"),
+        "error did not name the override:\n{}",
+        run.combined()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P1-02 (round 2) — a newer CLI meeting older adapter resources
+// ---------------------------------------------------------------------------
+
+/// Detector bodies the pre-contract adapter tree shipped. Codex probed the
+/// tokenless binary and Qoder probed host-CLI capability; both exited 0 without
+/// ever asking the host whether the adapter was registered.
+const PRE_CONTRACT_CODEX_DETECT: &str = "#!/usr/bin/env bash\necho '{\"installed\": true, \"version\": \"9.9.9\", \"path\": \"/usr/bin/tokenless\"}'\nexit 0\n";
+const PRE_CONTRACT_QODER_DETECT: &str =
+    "#!/usr/bin/env bash\necho '[tokenless] qoder: detected compatible qodercli'\nexit 0\n";
+
+#[test]
+fn pre_contract_tree_refuses_targets_whose_detector_only_probed_the_host() {
+    let fixture = Fixture::legacy(&[
+        Target::new("codex", PRE_CONTRACT_CODEX_DETECT),
+        Target::new("qoder", PRE_CONTRACT_QODER_DETECT),
+    ]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "unverified");
+    assert_eq!(status_of(&list.stdout, "qoder"), "unverified");
+    assert!(
+        list.stdout.contains("predate the detector status contract"),
+        "the stale resources were not explained:\n{}",
+        list.stdout
+    );
+
+    // The named command has to fail *before* invoking an installer whose exit 0
+    // would not mean the adapter was registered.
+    let named = run(&fixture, &["init", "--framework", "codex"]);
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("cannot be installed from the adapter resources"),
+        "unexpected reason:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a registration that never happened was reported as success:\n{}",
+        named.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "an installer ran: {:?}",
+        fixture.installed()
+    );
+
+    // Batch mode skips them, which is what the current tree does for a target
+    // whose prerequisites are missing.
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert!(
+        batch
+            .stdout
+            .contains("No frameworks are waiting for installation.")
+    );
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn pre_contract_codex_with_an_unusable_host_pin_never_reports_success() {
+    // The reported repro: a pre-contract tree plus CODEX_BIN pointing at a file
+    // that does not exist. The old detector only checked the tokenless binary,
+    // so it exited 0, the installer printed "skipping plugin registration" and
+    // the CLI reported a successful install that registered nothing.
+    let fixture = Fixture::legacy(&[Target::new("codex", PRE_CONTRACT_CODEX_DETECT)]);
+    let unusable_pin = fixture.stub_bin().join("absent-codex");
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "codex"])
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "the named command reported success:\n{}",
+        named.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command ran the installer: {:?}",
+        fixture.installed()
+    );
+
+    let batch = finish(
+        fixture
+            .command()
+            .args(["init", "--all"])
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(0);
+    assert!(
+        !batch.combined().contains("installed successfully"),
+        "batch mode reported success:\n{}",
+        batch.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "batch mode ran the installer: {:?}",
+        fixture.installed()
+    );
+}
+
+/// The shipped OpenCode detector already used the tri-state contract before the
+/// manifest marker existed, so a pre-contract tree must keep trusting it.
+#[test]
+#[cfg(unix)]
+fn pre_contract_tree_keeps_a_verified_opencode_registration_ready() {
+    let fixture = Fixture::legacy(&[Target::new("opencode", DETECT_INSTALLABLE)]);
+    // Replace the stub with the shipped detector and give it what it probes: a
+    // plugin source, a host CLI that reports a version, and the symlink that
+    // registers the plugin.
+    fs::copy(
+        bundled_adapters().join("opencode/scripts/detect.sh"),
+        fixture.adapter_dir.join("opencode/scripts/detect.sh"),
+    )
+    .expect("copy shipped detector");
+    let plugin = fixture.adapter_dir.join("opencode/plugin.js");
+    fs::write(&plugin, "// tokenless opencode plugin\n").expect("write plugin source");
+
+    let host = fixture.stub_bin().join("opencode");
+    write_script(&host, "#!/bin/sh\necho '1.2.3'\n");
+    let config = fixture._root.path().join("opencode-config");
+    fs::create_dir_all(config.join("plugins")).expect("create opencode config");
+    std::os::unix::fs::symlink(&plugin, config.join("plugins/tokenless.js"))
+        .expect("register the plugin");
+
+    let mut list = fixture.command();
+    list.args(["init", "--list"])
+        .env("OPENCODE_BIN", &host)
+        .env("TOKENLESS_OPENCODE_CONFIG_DIR", &config);
+    let list = finish(list.output().expect("run tokenless init"));
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "opencode"), "ready");
+    assert!(
+        !list.stdout.contains("predate the detector status contract"),
+        "a readable pre-contract detector was reported as stale:\n{}",
+        list.stdout
+    );
+
+    let mut named = fixture.command();
+    named
+        .args(["init", "--framework", "opencode"])
+        .env("OPENCODE_BIN", &host)
+        .env("TOKENLESS_OPENCODE_CONFIG_DIR", &config);
+    let named = finish(named.output().expect("run tokenless init"));
+    named.assert_code(0);
+    assert!(
+        named
+            .stdout
+            .contains("opencode is already installed and ready."),
+        "a verified registration was not reported ready:\n{}",
+        named.stdout
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "a ready adapter was reinstalled: {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn the_contract_marker_is_what_unlocks_exit_zero_as_ready() {
+    // Identical detectors and identical exit codes: only the manifest marker
+    // differs, so this pins the marker as the thing that decides.
+    let fixture = Fixture::new(&[
+        Target::new("probejson", PRE_CONTRACT_CODEX_DETECT),
+        Target::new("probetext", PRE_CONTRACT_QODER_DETECT),
+    ]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "probejson"), "ready");
+    assert_eq!(status_of(&list.stdout, "probetext"), "ready");
+    assert!(
+        !list.stdout.contains("predate the detector status contract"),
+        "a declaring tree was reported as stale:\n{}",
+        list.stdout
+    );
+
+    let named = run(&fixture, &["init", "--framework", "probejson"]);
+    named.assert_code(0);
+    assert!(
+        fixture.installed().is_empty(),
+        "a ready target was reinstalled: {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn a_pre_contract_tree_still_honours_a_published_status() {
+    // A detector that describes itself is trusted whatever the tree declares, so
+    // a partially refreshed tree — new scripts, manifest not yet regenerated —
+    // is neither forced back to installable nor refused.
+    let publishing = "#!/usr/bin/env bash\necho '{\"status\": \"ready\"}'\nexit 0\n";
+    let fixture = Fixture::legacy(&[
+        Target::new("one", publishing),
+        Target::new("codex", publishing),
+    ]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "one"), "ready");
+    assert_eq!(status_of(&list.stdout, "codex"), "ready");
+    assert!(!list.stdout.contains("predate the detector status contract"));
+}
+
+// ---------------------------------------------------------------------------
+// P2-04 — the shipped Codex detector against an unusable host
+// ---------------------------------------------------------------------------
+
+/// Source directory of the adapters this crate ships with.
+fn bundled_adapters() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../adapters/tokenless")
+        .canonicalize()
+        .expect("bundled adapter directory")
+}
+
+/// An adapter tree holding only the *shipped* Codex detector, so the contract
+/// An adapter tree holding only the *shipped* Codex detector, so the contract
+/// under test is the real script rather than a stub of it. Its installer is a
+/// recording stub: the shipped one needs a live Codex host.
+struct CodexFixture {
+    _root: TempDir,
+    adapter_dir: PathBuf,
+    home: PathBuf,
+    data_root: PathBuf,
+    /// Put on PATH ahead of whatever else a test asks for.
+    bin: PathBuf,
+    log: PathBuf,
+}
+
+impl CodexFixture {
+    fn new() -> Self {
+        let root = TempDir::new().expect("create codex fixture root");
+        let adapter_dir = root.path().join("data/anolisa/adapters/tokenless");
+        let scripts = adapter_dir.join("codex/scripts");
+        fs::create_dir_all(&scripts).expect("create codex script directory");
+        let bundled = bundled_adapters().join("codex/scripts");
+        for name in ["detect.sh", "_common.sh"] {
+            fs::copy(bundled.join(name), scripts.join(name)).expect("copy shipped detector");
+        }
+        let log = root.path().join("install.log");
+        fs::write(
+            adapter_dir.join("manifest.json"),
+            concat!(
+                r#"{"component":"tokenless","version":"0.0.0-test","#,
+                r#""detectContract":"status-v1","#,
+                r#""targets":{"codex":{"compatibleVersions":"*","#,
+                r#""actions":{"detect":"codex/scripts/detect.sh","#,
+                r#""install":"codex/scripts/install.sh"}}}}"#
+            ),
+        )
+        .expect("write manifest");
+        write_script(
+            &scripts.join("install.sh"),
+            &format!(
+                "#!/usr/bin/env bash\nprintf 'installer-ran\\n' >> '{}'\n",
+                log.display()
+            ),
+        );
+        let home = root.path().join("home");
+        let data_root = root.path().join("data");
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&home).expect("create fixture home");
+        fs::create_dir_all(&bin).expect("create fixture bin");
+        Self {
+            _root: root,
+            adapter_dir,
+            home,
+            data_root,
+            bin,
+            log,
+        }
+    }
+
+    /// A `codex` the shipped resolver can find.
+    fn with_codex_stub(&self) -> &Self {
+        write_script(&self.bin.join("codex"), "#!/bin/sh\nexit 0\n");
+        self
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        // System directories stay reachable so Bash itself is found; the
+        // fixture bin comes first so a stub host wins over any real one.
+        self.command_with_path(args, &format!("{}:/usr/bin:/bin", self.bin.display()))
+    }
+
+    /// A command with an explicit PATH, for runs that must not find `jq`.
+    fn command_with_path(&self, args: &[&str], path: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tokenless"));
+        command
+            .args(args)
+            .env("ANOLISA_ADAPTER_DIR", &self.adapter_dir)
+            .env("HOME", &self.home)
+            .env("XDG_DATA_HOME", &self.data_root)
+            .env("PATH", path)
+            .env_remove("CODEX_BIN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn marketplace(&self) -> PathBuf {
+        self.data_root.join("anolisa/codex-marketplace")
+    }
+
+    /// How many times the fixture installer ran.
+    fn install_runs(&self) -> usize {
+        match fs::read_to_string(&self.log) {
+            Ok(contents) => contents.lines().count(),
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Absolute path of a tool on the test runner's PATH.
+#[cfg(unix)]
+fn tool_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Fill `dir` with the usual shell tools but not `jq`, so a PATH built from it
+/// exercises the detector's jq-free branch.
+#[cfg(unix)]
+fn link_shell_tools(dir: &Path) -> bool {
+    ["bash", "cat", "dirname", "grep", "head", "sed", "tr"]
+        .iter()
+        .all(|tool| match tool_path(tool) {
+            Some(source) => std::os::unix::fs::symlink(source, dir.join(tool)).is_ok(),
+            None => false,
+        })
+}
+
+#[test]
+fn shipped_codex_detector_refuses_an_unusable_host_pin() {
+    let fixture = CodexFixture::new();
+
+    // Bundled resources, a tokenless binary the detector can resolve, and
+    // CODEX_BIN pointing at a file that does not exist. An explicit pin is
+    // authoritative, so the resolver must not substitute another codex.
+    let run = finish(
+        fixture
+            .command(&["init", "--framework", "codex"])
+            .env("CODEX_BIN", fixture.bin.join("absent-codex"))
+            .output()
+            .expect("run tokenless init"),
+    );
+
+    run.assert_code(1);
+    assert!(
+        run.combined()
+            .contains("codex is not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        run.combined()
+    );
+    assert!(
+        !run.combined().contains("installed successfully"),
+        "a host that cannot register was reported as installed:\n{}",
+        run.combined()
+    );
+    assert_eq!(
+        fixture.install_runs(),
+        0,
+        "install.sh ran although registration was impossible:\n{}",
+        run.combined()
+    );
+    assert!(
+        !fixture.marketplace().exists(),
+        "a marketplace tree was created for an unusable host"
+    );
+}
+
+#[test]
+fn shipped_codex_detector_is_installable_with_a_resolvable_host() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+
+    let list = finish(
+        fixture
+            .command(&["init", "--list"])
+            .output()
+            .expect("run tokenless init"),
+    );
+
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "installable");
+    assert!(
+        !list.stdout.contains("predate the detector status contract"),
+        "the bundled tree was reported as stale:\n{}",
+        list.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-06 — a status document that does not parse is not an answer
+// ---------------------------------------------------------------------------
+
+/// What the shipped Codex detector emitted on a jq-free host whose `tokenless`
+/// lived under a directory name holding a double quote: a document that starts
+/// like JSON, never closes its string, and is followed by exit 0.
+const BROKEN_STATUS_DETECT: &str = r#"#!/usr/bin/env bash
+printf '%s' '{"installed": true, "status": "installable", "path": "/opt/we"ird/tokenless"}'
+exit 0
+"#;
+
+#[test]
+fn an_unparseable_status_document_selects_nothing() {
+    let fixture = Fixture::new(&[Target::new("one", BROKEN_STATUS_DETECT)]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "one"), "unreadable");
+    assert!(
+        list.stdout.contains("not parseable JSON"),
+        "the unreadable answer was not reported:\n{}",
+        list.stdout
+    );
+
+    // Neither selectable state may stand in for the missing answer: ready would
+    // skip the registration, and installable would run an installer that is
+    // allowed to exit 0 after skipping its work.
+    let named = run(&fixture, &["init", "--framework", "one"]);
+    named.assert_code(1);
+    assert!(
+        named.combined().contains("not parseable JSON"),
+        "the named command did not explain itself:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "an unreadable target was reported installed:\n{}",
+        named.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command reached the installer: {:?}",
+        fixture.installed()
+    );
+
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert!(
+        fixture.installed().is_empty(),
+        "batch mode selected an unreadable target: {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn a_zero_exit_skip_is_never_reported_as_a_successful_install() {
+    // The shape the shipped Codex installer takes when no host CLI resolves: it
+    // announces the skip and exits 0. With an unreadable detector status the
+    // target must not be selected at all, so that exit 0 cannot be relayed as a
+    // successful registration.
+    let fixture = Fixture::new(&[Target {
+        name: "codex",
+        detect: BROKEN_STATUS_DETECT,
+        install: Some(String::from(
+            "#!/usr/bin/env bash\n\
+             echo '[tokenless] codex CLI not found - skipping plugin registration.'\n",
+        )),
+    }]);
+
+    let named = run(&fixture, &["init", "--framework", "codex"]);
+    named.assert_code(1);
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a skipped registration was reported as success:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("skipping plugin registration"),
+        "the installer ran at all:\n{}",
+        named.combined()
+    );
+
+    let batch = run(&fixture, &["init", "--all"]);
+    batch.assert_code(0);
+    assert!(
+        !batch.combined().contains("skipping plugin registration"),
+        "batch mode ran the installer:\n{}",
+        batch.combined()
+    );
+}
+
+#[test]
+fn an_unparseable_status_document_does_not_resurrect_a_pre_contract_target() {
+    // A broken answer from a detector that never described the adapter cannot
+    // make it installable, whether or not the tree declares the contract.
+    let fixture = Fixture::legacy(&[Target::new("codex", BROKEN_STATUS_DETECT)]);
+
+    let list = run(&fixture, &["init", "--list"]);
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "unreadable");
+
+    let named = run(&fixture, &["init", "--framework", "codex"]);
+    named.assert_code(1);
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command reached the installer: {:?}",
+        fixture.installed()
+    );
+}
+
+/// The shipped detector against a quoted path and a PATH without `jq`.
+#[test]
+#[cfg(unix)]
+fn shipped_codex_detector_stays_parseable_without_jq() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    let quoted = fixture._root.path().join("we\"ird");
+    fs::create_dir_all(&quoted).expect("create quoted directory");
+    write_script(
+        &quoted.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if !link_shell_tools(&tools) {
+        // No way to build a jq-free PATH on this host; the adapter shell suite
+        // covers the same detector output.
+        return;
+    }
+    let path = format!(
+        "{}:{}:{}",
+        quoted.display(),
+        fixture.bin.display(),
+        tools.display()
+    );
+
+    let list = finish(
+        fixture
+            .command_with_path(&["init", "--list"], &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "installable");
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "the shipped detector emitted unparseable JSON:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "a fresh install never reached the installer:\n{}",
+        named.combined()
+    );
+}
+
+/// The shipped detector against a PATH entry whose name holds a control
+/// character, with no `jq` and a host pin that does not resolve.
+#[test]
+#[cfg(unix)]
+fn shipped_codex_detector_escapes_control_characters_without_jq() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    // A form feed in the directory name: the case that kept the jq-free branch
+    // emitting invalid JSON after quotes and backslashes were handled.
+    let control = fixture._root.path().join("bin\u{000c}");
+    fs::create_dir_all(&control).expect("create control-character directory");
+    write_script(
+        &control.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if !link_shell_tools(&tools) {
+        // No way to build a jq-free PATH here; the adapter shell suite covers
+        // the same detector output.
+        return;
+    }
+    let path = format!(
+        "{}:{}:{}",
+        control.display(),
+        fixture.bin.display(),
+        tools.display()
+    );
+    let unusable_pin = fixture._root.path().join("absent-codex");
+
+    let list = finish(
+        fixture
+            .command_with_path(&["init", "--list"], &path)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    // The same answer the jq branch gives for this input.
+    assert_eq!(status_of(&list.stdout, "codex"), "missing prereqs");
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "the shipped detector emitted unparseable JSON:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a host that cannot register was reported as installed:\n{}",
+        named.combined()
+    );
+    assert_eq!(fixture.install_runs(), 0, "the installer ran");
+}
+
+// ---------------------------------------------------------------------------
+// P2-05 — the Bash prerequisite is an error, not an adapter status
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_interpreter_is_reported_instead_of_an_adapter_status() {
+    let fixture = Fixture::new(&[Target::installable("one")]);
+    let empty_bin = fixture.empty_bin();
+
+    let batch = finish(
+        fixture
+            .command_without_bash(&empty_bin)
+            .args(["init", "--all"])
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(1);
+    assert_eq!(status_of(&batch.stdout, "one"), "unavailable");
+    assert!(
+        batch.combined().contains("Bash"),
+        "the missing prerequisite was not named:\n{}",
+        batch.combined()
+    );
+    assert!(
+        !batch
+            .combined()
+            .contains("No frameworks are waiting for installation"),
+        "a host that cannot run detectors reported nothing to install:\n{}",
+        batch.combined()
+    );
+    assert!(
+        fixture.installed().is_empty(),
+        "something was installed without an interpreter: {:?}",
+        fixture.installed()
+    );
+
+    let list = finish(
+        fixture
+            .command_without_bash(&empty_bin)
+            .args(["init", "--list"])
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(1);
+    assert!(list.combined().contains("Bash"), "{}", list.combined());
+
+    let named = finish(
+        fixture
+            .command_without_bash(&empty_bin)
+            .args(["init", "--framework", "one"])
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn a_detector_that_runs_is_not_reported_as_unavailable() {
+    // Guard against the launcher check firing on a host that does have Bash.
+    let fixture = Fixture::new(&[Target::installable("one")]);
+
+    let run = run(&fixture, &["init", "--list"]);
+
+    run.assert_code(0);
+    assert_eq!(status_of(&run.stdout, "one"), "installable");
+    assert!(!run.combined().contains("unavailable"), "{}", run.stdout);
+}
+
+// ---------------------------------------------------------------------------
+// P2-07 — output the CLI does not own must not hide the status
+// ---------------------------------------------------------------------------
+
+/// A `BASH_ENV` file, which Bash sources before every lifecycle script. The CLI
+/// inherits the caller's environment and collects the detector's stdout, so one
+/// line printed here lands ahead of whatever the detector publishes.
+const STARTUP_ECHO: &str = "echo shell-initialized\n";
+
+/// The same message on the other stream, which never reaches the parser.
+const STARTUP_ECHO_STDERR: &str = "echo shell-initialized >&2\n";
+
+/// A detector that pretty-prints its status across several lines and exits 0:
+/// the shape both branches of the shipped Codex detector emit for a binary they
+/// found. Read line by line, the document is no line of the output.
+const PRETTY_MISSING_PREREQS_DETECT: &str = r#"#!/usr/bin/env bash
+printf '%s\n' '{' '  "installed": true,' '  "status": "missing_prereqs"' '}'
+exit 0
+"#;
+
+/// The same document reporting a target that can be registered.
+const PRETTY_INSTALLABLE_DETECT: &str = r#"#!/usr/bin/env bash
+printf '%s\n' '{' '  "installed": true,' '  "status": "installable"' '}'
+exit 0
+"#;
+
+/// Write a startup file and return it, ready to be handed to `BASH_ENV`.
+fn startup_file(root: &Path, body: &str) -> PathBuf {
+    let path = root.join("bashenv.sh");
+    fs::write(&path, body).expect("write BASH_ENV startup file");
+    path
+}
+
+/// A `tokenless` the shipped Codex detector can resolve, so it publishes the
+/// multi-line document rather than its one-line "binary not found" answer.
+fn with_tokenless_stub(fixture: &CodexFixture) {
+    write_script(
+        &fixture.bin.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+}
+
+#[test]
+fn a_startup_line_does_not_hide_a_pretty_printed_status() {
+    let fixture = Fixture::new(&[
+        Target::new("absent", PRETTY_MISSING_PREREQS_DETECT),
+        Target::new("fresh", PRETTY_INSTALLABLE_DETECT),
+    ]);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    // What the two detectors publish when nothing else shares the stream.
+    let plain = run(&fixture, &["init", "--list"]);
+    plain.assert_code(0);
+    assert_eq!(status_of(&plain.stdout, "absent"), "missing prereqs");
+    assert_eq!(status_of(&plain.stdout, "fresh"), "installable");
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    // Both detectors exit 0, so only the published status tells them apart:
+    // losing the document behind the startup line read both as ready.
+    assert_eq!(
+        status_of(&list.stdout, "absent"),
+        "missing prereqs",
+        "startup output hid the status:\n{}",
+        list.stdout
+    );
+    assert_eq!(status_of(&list.stdout, "fresh"), "installable");
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "absent"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("absent is not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("already installed and ready"),
+        "a host that cannot register was reported ready:\n{}",
+        named.combined()
+    );
+
+    let batch = finish(
+        fixture
+            .command()
+            .args(["init", "--all"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["fresh".to_string()],
+        "batch mode selected the wrong targets:\n{}",
+        batch.combined()
+    );
+}
+
+#[test]
+fn a_startup_line_does_not_resurrect_a_broken_status_document() {
+    // The document of the previous round's escaping bug, one startup line
+    // later: it was still opened, so it still publishes no answer, and the
+    // exit 0 that follows it may not stand in for one.
+    let fixture = Fixture::new(&[Target::new("one", BROKEN_STATUS_DETECT)]);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "one"),
+        "unreadable",
+        "a broken document behind a startup line was read as an answer:\n{}",
+        list.stdout
+    );
+    assert!(
+        list.stdout.contains("not parseable JSON"),
+        "the unreadable answer was not reported:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "one"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        fixture.installed().is_empty(),
+        "the named command reached the installer: {:?}",
+        fixture.installed()
+    );
+
+    let batch = finish(
+        fixture
+            .command()
+            .args(["init", "--all"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    batch.assert_code(0);
+    assert!(
+        fixture.installed().is_empty(),
+        "batch mode selected an unreadable target: {:?}",
+        fixture.installed()
+    );
+}
+
+#[test]
+fn startup_output_on_stderr_gives_the_same_answer() {
+    // The control for the case above: the same message on the stream the
+    // parser never reads left the answer intact, so both streams now agree.
+    let fixture = Fixture::new(&[Target::new("one", PRETTY_MISSING_PREREQS_DETECT)]);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO_STDERR);
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "one"), "missing prereqs");
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "one"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(fixture.installed().is_empty());
+}
+
+#[test]
+fn a_startup_line_does_not_hide_the_shipped_codex_status() {
+    let fixture = CodexFixture::new();
+    with_tokenless_stub(&fixture);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    let list = finish(
+        fixture
+            .command(&["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", fixture.bin.join("absent-codex"))
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "codex"),
+        "missing prereqs",
+        "the shipped detector's status was lost behind startup output:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command(&["init", "--framework", "codex"])
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", fixture.bin.join("absent-codex"))
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert!(
+        named
+            .combined()
+            .contains("codex is not installable (status: missing prereqs)"),
+        "unexpected result:\n{}",
+        named.combined()
+    );
+    assert!(
+        !named.combined().contains("installed successfully"),
+        "a host that cannot register was reported as installed:\n{}",
+        named.combined()
+    );
+    assert_eq!(fixture.install_runs(), 0, "the installer ran");
+}
+
+#[test]
+fn a_startup_line_does_not_skip_the_shipped_codex_install() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    with_tokenless_stub(&fixture);
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+
+    let list = finish(
+        fixture
+            .command(&["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(status_of(&list.stdout, "codex"), "installable");
+
+    let named = finish(
+        fixture
+            .command(&["init", "--framework", "codex"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    // Reporting ready here skipped the registration entirely: the detector
+    // never claims more than installable, because it does not ask the host.
+    assert!(
+        !named.combined().contains("already installed and ready"),
+        "a fresh Codex was reported ready:\n{}",
+        named.combined()
+    );
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "a fresh install never reached the installer:\n{}",
+        named.combined()
+    );
+}
+
+/// The shipped detector on a jq-free PATH, where the multi-line document is
+/// emitted by the detector's own `printf` rather than by `jq`.
+#[test]
+#[cfg(unix)]
+fn a_startup_line_does_not_hide_the_shipped_codex_status_without_jq() {
+    let fixture = CodexFixture::new();
+    with_tokenless_stub(&fixture);
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if !link_shell_tools(&tools) {
+        // No way to build a jq-free PATH on this host; the case with `jq`
+        // covers the same parser.
+        return;
+    }
+    let path = format!("{}:{}", fixture.bin.display(), tools.display());
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+    let unusable_pin = fixture._root.path().join("absent-codex");
+
+    let list = finish(
+        fixture
+            .command_with_path(&["init", "--list"], &path)
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "codex"),
+        "missing prereqs",
+        "the jq-free document was lost behind startup output:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "the shipped detector emitted unparseable JSON:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .env("BASH_ENV", &startup)
+            .env("CODEX_BIN", &unusable_pin)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(1);
+    assert_eq!(fixture.install_runs(), 0, "the installer ran");
+
+    // The same PATH with a host the resolver can find: installable, and the
+    // registration is reached.
+    fixture.with_codex_stub();
+    let installed = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &path)
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    installed.assert_code(0);
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "a fresh install never reached the installer:\n{}",
+        installed.combined()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-07 (round 7) — the scanner must not lose a document it can read
+// ---------------------------------------------------------------------------
+
+/// The shipped Qoder detector's output shape: one prose line of its own, then a
+/// compact status document.
+const QODER_SHAPE_DETECT: &str = r#"#!/usr/bin/env bash
+echo "[tokenless] qoder: detected compatible qodercli at /usr/bin/qodercli"
+echo '{"status":"installable"}'
+exit 0
+"#;
+
+/// A startup line holding one brace that never closes, which is what a shell
+/// startup log looks like when it quotes a command or a parameter expansion.
+const STARTUP_UNMATCHED_BRACE: &str = "echo 'loading {profile'\n";
+
+#[test]
+fn an_unmatched_brace_in_startup_output_does_not_swallow_the_status() {
+    let fixture = Fixture::new(&[Target::new("one", QODER_SHAPE_DETECT)]);
+    let startup = startup_file(fixture._root.path(), STARTUP_UNMATCHED_BRACE);
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    // The stray brace is prose: it opens nothing, so the document behind it is
+    // still the detector's answer.
+    assert_eq!(
+        status_of(&list.stdout, "one"),
+        "installable",
+        "a prose brace swallowed the status:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "one"])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(fixture.installed(), vec!["one".to_string()]);
+}
+
+/// The shipped Qoder detector against a compatible host stub, with the same
+/// unmatched brace in the startup log.
+#[test]
+#[cfg(unix)]
+fn an_unmatched_brace_does_not_swallow_the_shipped_qoder_status() {
+    let fixture = Fixture::new(&[Target::installable("qoder")]);
+    fs::copy(
+        bundled_adapters().join("qoder/scripts/detect.sh"),
+        fixture.adapter_dir.join("qoder/scripts/detect.sh"),
+    )
+    .expect("copy shipped qoder detector");
+    // A host CLI that answers the capability probes the detector makes.
+    let stub = fixture.stub_bin();
+    write_script(&stub.join("qodercli"), "#!/bin/sh\nexit 0\n");
+    let startup = startup_file(fixture._root.path(), STARTUP_UNMATCHED_BRACE);
+    let path = format!(
+        "{}:{}",
+        stub.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "qoder"),
+        "installable",
+        "the shipped detector's status was lost:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "qoder"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["qoder".to_string()],
+        "the registration was skipped:\n{}",
+        named.combined()
+    );
+}
+
+/// The shipped Codex detector behind a startup line, with the tokenless binary
+/// under a PATH entry whose name holds a form feed — the escape the detector
+/// writes as a backslash and one byte, on both the `jq` and the jq-free path.
+#[test]
+#[cfg(unix)]
+fn a_startup_line_does_not_break_an_escaped_control_character() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    let control = fixture._root.path().join("bin\u{000c}");
+    fs::create_dir_all(&control).expect("create control-character directory");
+    write_script(
+        &control.join("tokenless"),
+        "#!/bin/sh\necho 'tokenless 9.9.9'\n",
+    );
+    let startup = startup_file(fixture._root.path(), STARTUP_ECHO);
+    let mut paths = vec![format!(
+        "{}:{}:/usr/bin:/bin",
+        control.display(),
+        fixture.bin.display()
+    )];
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if link_shell_tools(&tools) {
+        paths.push(format!(
+            "{}:{}:{}",
+            control.display(),
+            fixture.bin.display(),
+            tools.display()
+        ));
+    }
+
+    for path in &paths {
+        let list = finish(
+            fixture
+                .command_with_path(&["init", "--list"], path)
+                .env("BASH_ENV", &startup)
+                .output()
+                .expect("run tokenless init"),
+        );
+        list.assert_code(0);
+        assert_eq!(
+            status_of(&list.stdout, "codex"),
+            "installable",
+            "PATH {path}:\n{}",
+            list.stdout
+        );
+        assert!(
+            !list.stdout.contains("not parseable JSON"),
+            "a valid document was reported unreadable on PATH {path}:\n{}",
+            list.stdout
+        );
+    }
+
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &paths[0])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "an escaped path cost the registration:\n{}",
+        named.combined()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-07 (round 8) — a log pair around the whole detector run
+// ---------------------------------------------------------------------------
+
+/// A startup file whose braces pair up around the detector run: Bash sources it
+/// before the script and its EXIT trap fires after, so the status document sits
+/// *inside* a balanced pair of prose braces. Neither brace is the detector's.
+const STARTUP_PAIRED_BRACES: &str = "echo 'shell-initialized {'\ntrap 'echo \"}\"' EXIT\n";
+
+/// The shipped Codex detector behind that log pair, on both of its JSON paths.
+#[test]
+#[cfg(unix)]
+fn paired_startup_and_exit_braces_do_not_swallow_the_shipped_codex_status() {
+    let fixture = CodexFixture::new();
+    fixture.with_codex_stub();
+    with_tokenless_stub(&fixture);
+    let startup = startup_file(fixture._root.path(), STARTUP_PAIRED_BRACES);
+
+    // With `jq` on PATH, and on a jq-free PATH where the detector's own printf
+    // writes the document: the trap wraps both of them the same way.
+    let mut paths = vec![format!("{}:/usr/bin:/bin", fixture.bin.display())];
+    let tools = fixture._root.path().join("tools");
+    fs::create_dir_all(&tools).expect("create tools directory");
+    if link_shell_tools(&tools) {
+        paths.push(format!("{}:{}", fixture.bin.display(), tools.display()));
+    }
+
+    for path in &paths {
+        let list = finish(
+            fixture
+                .command_with_path(&["init", "--list"], path)
+                .env("BASH_ENV", &startup)
+                .output()
+                .expect("run tokenless init"),
+        );
+        list.assert_code(0);
+        assert_eq!(
+            status_of(&list.stdout, "codex"),
+            "installable",
+            "PATH {path}:\n{}",
+            list.stdout
+        );
+        assert!(
+            !list.stdout.contains("not parseable JSON"),
+            "a valid document inside a log pair was reported unreadable on PATH {path}:\n{}",
+            list.stdout
+        );
+    }
+
+    // And the registration the false `unreadable` skipped.
+    let named = finish(
+        fixture
+            .command_with_path(&["init", "--framework", "codex"], &paths[0])
+            .env("BASH_ENV", &startup)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert!(
+        !named.combined().contains("already installed and ready"),
+        "a fresh Codex was reported ready:\n{}",
+        named.combined()
+    );
+    assert_eq!(
+        fixture.install_runs(),
+        1,
+        "the log pair cost the registration:\n{}",
+        named.combined()
+    );
+}
+
+/// The shipped Qoder detector behind the same log pair, against a compatible
+/// host stub.
+#[test]
+#[cfg(unix)]
+fn paired_startup_and_exit_braces_do_not_swallow_the_shipped_qoder_status() {
+    let fixture = Fixture::new(&[Target::installable("qoder")]);
+    fs::copy(
+        bundled_adapters().join("qoder/scripts/detect.sh"),
+        fixture.adapter_dir.join("qoder/scripts/detect.sh"),
+    )
+    .expect("copy shipped qoder detector");
+    let stub = fixture.stub_bin();
+    write_script(&stub.join("qodercli"), "#!/bin/sh\nexit 0\n");
+    let startup = startup_file(fixture._root.path(), STARTUP_PAIRED_BRACES);
+    let path = format!(
+        "{}:{}",
+        stub.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let list = finish(
+        fixture
+            .command()
+            .args(["init", "--list"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    list.assert_code(0);
+    assert_eq!(
+        status_of(&list.stdout, "qoder"),
+        "installable",
+        "the shipped detector's status was lost inside a log pair:\n{}",
+        list.stdout
+    );
+    assert!(
+        !list.stdout.contains("not parseable JSON"),
+        "a valid document was reported unreadable:\n{}",
+        list.stdout
+    );
+
+    let named = finish(
+        fixture
+            .command()
+            .args(["init", "--framework", "qoder"])
+            .env("BASH_ENV", &startup)
+            .env("PATH", &path)
+            .output()
+            .expect("run tokenless init"),
+    );
+    named.assert_code(0);
+    assert_eq!(
+        fixture.installed(),
+        vec!["qoder".to_string()],
+        "the registration was skipped:\n{}",
+        named.combined()
+    );
+}

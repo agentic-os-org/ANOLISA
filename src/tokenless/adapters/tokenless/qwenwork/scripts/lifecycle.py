@@ -355,6 +355,16 @@ def _install(data: Path, target: Path, previous: dict | None) -> None:
         ) from error
 
 
+def _publish_detect_status(status: str) -> None:
+    """Publish the adapter state `tokenless init` reads for this target.
+
+    detect's exit code cannot carry it: this action returns 0 whether or not the
+    plugin is sideloaded and 1 for every failure, so the tri-state contract the
+    other adapters follow would read "resources ready" as "adapter registered".
+    """
+    print(json.dumps({"status": status}))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run a read-only probe, explicit sideload, or ownership-checked removal."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -407,6 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "detect":
             status = "sideloaded" if previous is not None else "not sideloaded"
             print(f"Resources ready; plugin {status}: {target}. Enablement is not checked.")
+            _publish_detect_status("ready" if previous is not None else "installable")
         elif args.dry_run:
             print(f"DRY-RUN: would sideload plugin to {target}; no files changed.")
         else:
@@ -418,6 +429,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (LifecycleError, OSError, ValueError, ImportError, SyntaxError, subprocess.CalledProcessError) as error:
         print(f"[tokenless] ERROR: {error}", file=sys.stderr)
+        if args.action == "detect":
+            # The exit code cannot say "missing prerequisites": every failure of
+            # every action returns 1, and detect returns 0 for a host whose
+            # plugin is absent. Publish the state instead.
+            _publish_detect_status("missing_prereqs")
         return 1
 
 

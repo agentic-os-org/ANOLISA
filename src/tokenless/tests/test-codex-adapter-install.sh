@@ -306,6 +306,151 @@ else
     fail "uninstall left the marketplace directory or the binary behind"
 fi
 
+# ── detect.sh publishes the adapter status next to the binary state ──────
+# The exit code stays 0 either way (fail-open - plugin activation is controlled
+# by capabilities), so `tokenless init` reads the published `status` instead.
+# This detector probes the tokenless binary and never asks codex whether the
+# plugin is registered, so it must never claim `ready`.
+DETECT_SH="$ADAPTER_DIR/codex/scripts/detect.sh"
+detect_env() {  # <PATH> -> detect.sh stdout, host scrubbed out
+    env -i PATH="$1" HOME="$FAKE_HOME" XDG_DATA_HOME="$XDG" \
+        ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" ANOLISA_COMPONENT=tokenless \
+        ANOLISA_TARGET=codex bash "$DETECT_SH" 2>/dev/null
+}
+detect_status() {  # <json> -> the published status, jq's spacing removed
+    printf '%s' "$1" | tr -d ' \n' | sed -n 's/.*"status":"\([a-z_]*\)".*/\1/p'
+}
+detect_flat() {  # <json> -> the whole object on one line
+    printf '%s' "$1" | tr -d ' \n'
+}
+
+write_tokenless_stub
+detect_out="$(detect_env "$PREFIX/bin:$SANDBOX/bin:/usr/bin:/bin")"
+detect_rc=$?
+if [ "$detect_rc" -eq 0 ]; then
+    pass "detect stays fail-open with the binary present"
+else
+    fail "detect exited $detect_rc with the binary present"
+fi
+if [ "$(detect_status "$detect_out")" = installable ]; then
+    pass "detect publishes installable, not ready, for a binary on PATH"
+else
+    fail "detect published '$(detect_status "$detect_out")' for a binary on PATH"
+fi
+case "$(detect_flat "$detect_out")" in
+    *'"installed":true'*) pass "detect still reports the binary it found" ;;
+    *) fail "detect dropped the installed field: $detect_out" ;;
+esac
+
+# An explicit CODEX_BIN is authoritative: a pin that does not resolve must not
+# be reported as installable, because install.sh would then print "skipping
+# plugin registration" and exit 0 having registered nothing.
+detect_out="$(env -i PATH="$SANDBOX/bin:/usr/bin:/bin" HOME="$FAKE_HOME" \
+    XDG_DATA_HOME="$XDG" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    ANOLISA_COMPONENT=tokenless ANOLISA_TARGET=codex \
+    CODEX_BIN="$SANDBOX/absent-codex" bash "$DETECT_SH" 2>/dev/null)"
+detect_rc=$?
+if [ "$detect_rc" -eq 0 ]; then
+    pass "detect stays fail-open when no codex CLI can be resolved"
+else
+    fail "detect exited $detect_rc when no codex CLI could be resolved"
+fi
+if [ "$(detect_status "$detect_out")" = missing_prereqs ]; then
+    pass "detect publishes missing_prereqs for an unusable CODEX_BIN pin"
+else
+    fail "detect published '$(detect_status "$detect_out")' for an unusable CODEX_BIN pin"
+fi
+
+rm -f "$TOKENLESS_BIN"
+if [ -n "$HOST_BIN" ]; then
+    skip "no-binary detect status ($HOST_BIN answers the absolute fallback)"
+else
+    detect_out="$(detect_env "$SANDBOX/bin:/usr/bin:/bin")"
+    detect_rc=$?
+    if [ "$detect_rc" -eq 0 ] && [ "$(detect_status "$detect_out")" = installable ]; then
+        pass "detect publishes installable without the tokenless binary"
+    else
+        fail "detect reported rc=$detect_rc status='$(detect_status "$detect_out")' without the binary"
+    fi
+fi
+
+# ── The jq-free branch must still emit parseable JSON ───────────────────────
+# A tokenless path holding a double quote used to be interpolated raw into a
+# heredoc, so a host without jq received invalid JSON together with exit 0 - and
+# a caller that could not parse the status fell back to the exit code and read
+# it as a registered adapter.
+quoted_dir="$SANDBOX/we\"ird"
+mkdir -p "$quoted_dir"
+cat > "$quoted_dir/tokenless" <<'STUBEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && echo "tokenless 0.0.0-test"
+exit 0
+STUBEOF
+chmod +x "$quoted_dir/tokenless"
+
+# The usual shell tools, but no jq, so the fallback branch is the one that runs.
+nojq_bin="$SANDBOX/nojq-bin"
+mkdir -p "$nojq_bin"
+for tool in bash cat dirname grep head sed tr; do
+    tool_path="$(command -v "$tool" 2>/dev/null || true)"
+    [ -n "$tool_path" ] && ln -sf "$tool_path" "$nojq_bin/$tool"
+done
+
+quoted_out="$(env -i PATH="$quoted_dir:$SANDBOX/bin:$nojq_bin" HOME="$FAKE_HOME" \
+    XDG_DATA_HOME="$XDG" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    ANOLISA_COMPONENT=tokenless ANOLISA_TARGET=codex bash "$DETECT_SH" 2>/dev/null)"
+quoted_rc=$?
+if [ "$quoted_rc" -eq 0 ]; then
+    pass "detect stays fail-open on the jq-free path"
+else
+    fail "detect exited $quoted_rc on the jq-free path"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$quoted_out" | QUOTED_EXPECT="$quoted_dir/tokenless" python3 -c '
+import json, os, sys
+document = json.load(sys.stdin)
+assert document["path"] == os.environ["QUOTED_EXPECT"], document
+assert document["installed"] is True, document
+assert document["status"] in ("installable", "missing_prereqs"), document
+'; then
+        pass "the jq-free branch escapes a quoted path into parseable JSON"
+    else
+        fail "the jq-free branch did not emit parseable JSON: $quoted_out"
+    fi
+else
+    skip "the jq-free branch JSON check (no python3)"
+fi
+
+# A form feed in the directory name: escaping only quotes and backslashes still
+# produced invalid JSON here, because U+000C may not appear raw in a string.
+control_dir="$SANDBOX/$(printf 'bin\ffeed')"
+mkdir -p "$control_dir"
+cp "$quoted_dir/tokenless" "$control_dir/tokenless"
+control_out="$(env -i PATH="$control_dir:$SANDBOX/bin:$nojq_bin" HOME="$FAKE_HOME" \
+    XDG_DATA_HOME="$XDG" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+    ANOLISA_COMPONENT=tokenless ANOLISA_TARGET=codex bash "$DETECT_SH" 2>/dev/null)"
+control_rc=$?
+if [ "$control_rc" -eq 0 ]; then
+    pass "detect stays fail-open on a control-character path"
+else
+    fail "detect exited $control_rc on a control-character path"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$control_out" | CONTROL_EXPECT="$control_dir/tokenless" python3 -c '
+import json, os, sys
+document = json.load(sys.stdin)
+assert document["path"] == os.environ["CONTROL_EXPECT"], document
+assert document["installed"] is True, document
+assert document["status"] in ("installable", "missing_prereqs"), document
+'; then
+        pass "the jq-free branch escapes a control character into parseable JSON"
+    else
+        fail "the jq-free branch did not escape a control character: $control_out"
+    fi
+else
+    skip "the control-character JSON check (no python3)"
+fi
+
 echo ""
 echo "Codex adapter tests: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]

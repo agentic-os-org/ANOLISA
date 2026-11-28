@@ -196,10 +196,32 @@ class QwenWorkInstallTests(unittest.TestCase):
             self.assertIn("1.2.5", out)
             self.assertIn("not sideloaded", out)
             self.assertNotIn("activated", out)
+            self.assertIn('{"status": "installable"}', out)
             out, _ = self.run_action("install", "--dry-run")
             self.assertIn("DRY-RUN", out)
             self.assertEqual(snapshot(self.root), before)
             self.assertFalse(missing.parent.exists())
+
+    def test_detect_publishes_the_adapter_status_beside_the_exit_code(self) -> None:
+        # `tokenless init` cannot read this action's exit code: detect returns 0
+        # whether or not the plugin is sideloaded and 1 for every failure, so the
+        # adapter state travels as a JSON status object on stdout.
+        out, _ = self.run_action("detect")
+        self.assertIn('{"status": "installable"}', out)
+        self.run_action("install")
+        out, _ = self.run_action("detect")
+        self.assertIn('{"status": "ready"}', out)
+        self.run_action("uninstall")
+        out, _ = self.run_action("detect")
+        self.assertIn('{"status": "installable"}', out)
+
+    def test_detect_publishes_missing_prereqs_when_the_host_is_unusable(self) -> None:
+        before = snapshot(self.root)
+        with mock.patch.object(lifecycle.platform, "system", return_value="Linux"):
+            out, error = self.run_action("detect", success=False)
+        self.assertIn("supports macOS and Windows only", error)
+        self.assertIn('{"status": "missing_prereqs"}', out)
+        self.assertEqual(snapshot(self.root), before)
 
     def test_missing_application_and_wrong_identity(self) -> None:
         with mock.patch.dict(os.environ, {"TOKENLESS_QWENWORK_APP": str(self.root / "absent.app")}):

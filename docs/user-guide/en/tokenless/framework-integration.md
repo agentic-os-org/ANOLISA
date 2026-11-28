@@ -473,7 +473,73 @@ The npm postinstall script attempts to copy adapter resources under:
 
 Confirm that this directory exists. Adapter copying is supplementary and fails open with a warning; a successful binary install can therefore exist without this copy. If it is absent, review the npm postinstall warning and prefer an anolisa-managed installation.
 
-An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and QwenPaw provide their own install scripts:
+An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it.
+
+### Quick setup with `tokenless init`
+
+After installing the npm package or building from source, run `tokenless init` to detect installed agent frameworks and guide adapter installation:
+
+```bash
+# Scan and display all framework statuses
+tokenless init --list
+
+# Install a specific adapter
+tokenless init --framework claude-code
+
+# Install all installable adapters (non-interactive)
+tokenless init --all
+
+# Interactive selection (when stdin is a terminal)
+tokenless init
+```
+
+`tokenless init` reads the adapter manifest, runs each framework's `detect.sh`, and reports whether the adapter is ready, installable, or missing prerequisites — then runs `install.sh` for the selected framework. Installer output is passed through on both stdout and stderr, so a failing installer's own diagnostics stay part of the report.
+
+`--framework` names the single target to act on, so it cannot be combined with `--all` or `--list`. The command exits `0` when every selected target was already ready or was installed, and `1` when a selected target could not be installed — including one whose manifest declares no install action.
+
+**How a status is decided.** A detector reports the state of its own adapter, not of the host binary that adapter talks to, so `tokenless init` reads a detector in this order:
+
+1. A JSON object on stdout carrying `"status": "ready" | "installable" | "missing_prereqs"`. Detectors whose exit code already means something else publish it: Codex probes the tokenless binary, Qoder probes host-CLI capability, and QwenWork returns `0` whether or not its plugin is sideloaded.
+2. The shared tri-state exit code — `0` = adapter registered and ready, `1` = not registered but installable, `2` (or any other code) = missing prerequisites. OpenClaw, Hermes, Claude Code, OpenCode, Qwen Code, and QwenPaw follow it.
+
+A JSON object carrying `installed` but no `status` predates this contract; `installed: false` still downgrades exit `0` to installable, so an availability-only probe is never read as a registered adapter.
+
+An adapter directory that predates the contract is reachable — an npm install preserves a shared adapter directory that another installation owns, and `ANOLISA_ADAPTER_DIR` accepts any directory — so its manifest may lack the `"detectContract": "status-v1"` marker. Such a tree is not treated as uniformly unknown. Most of its detectors already reported adapter state through the tri-state exit code, so those answers stay in force and a verified registration is still reported `ready` instead of being offered for reinstallation. The detectors that reported the *host* instead cannot establish adapter state: Codex probed the tokenless binary, Qoder probed host-CLI capability, and QwenWork returned `0` whether or not its plugin was sideloaded. Their targets are listed as `unverified` and are not offered for installation, because their installers exit successfully without registering anything. The status table names them and explains how to refresh the resources — reinstall tokenless, or point `ANOLISA_ADAPTER_DIR` at a current adapter directory.
+
+A detector that publishes a status document which does not parse is reported `unreadable` and is likewise not offered for installation. A broken document is no answer at all, and an installer that exits successfully after skipping its work would otherwise be relayed as a completed registration.
+
+**Bash is required.** `tokenless init` runs every target's `detect.sh` and `install.sh` with Bash. When Bash cannot be launched, the affected frameworks are listed as `unavailable` and the command exits `1` with the reason instead of reporting a status it never established. Windows setups that do not use Git Bash can drive the QwenWork adapter through its native PowerShell lifecycle, described in the `QwenWork (Windows x64 local mode)` section above.
+
+**Where the adapter directory is looked for.** The first location below that contains `manifest.json` (or the `manifest.json.in` template) wins:
+
+1. `$ANOLISA_ADAPTER_DIR`, when set — use it for a custom install prefix.
+2. `$XDG_DATA_HOME/anolisa/adapters/tokenless`, when `XDG_DATA_HOME` is an absolute path.
+3. `~/.local/share/anolisa/adapters/tokenless`.
+4. `/usr/share/anolisa/adapters/tokenless`, then `/usr/local/share/anolisa/adapters/tokenless`.
+
+This mirrors the packaged layout, which resolves the user data root as `${XDG_DATA_HOME:-$HOME/.local/share}`.
+
+If none of them holds a manifest, `tokenless init` exits with an error:
+
+```
+Adapter directory not found.
+Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+For a custom location, set ANOLISA_ADAPTER_DIR to the directory containing manifest.json.
+```
+
+Resolve this by installing the tokenless package first, or by pointing `ANOLISA_ADAPTER_DIR` at an adapter directory that already exists:
+
+```bash
+npm install -g anolisa-tokenless
+# or
+anolisa install tokenless
+# or, for a non-standard prefix
+export ANOLISA_ADAPTER_DIR=/opt/anolisa/share/anolisa/adapters/tokenless
+```
+
+### Manual install scripts
+
+OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and QwenPaw provide their own install scripts:
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh

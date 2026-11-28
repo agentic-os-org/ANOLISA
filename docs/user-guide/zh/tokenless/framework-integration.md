@@ -418,7 +418,73 @@ npm 的 postinstall 脚本会尝试把 Adapter 资源复制到：
 
 应确认该目录确实存在。Adapter 复制属于补充步骤，失败时只输出警告，不会让二进制安装失败；因此可能出现命令可用但这里没有资源副本的情况。目录缺失时应检查 npm postinstall 警告，并优先改用 anolisa 管理的安装。
 
-npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code 和 QwenPaw 可以运行各自的安装脚本：
+npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。
+
+### 使用 `tokenless init` 快速设置
+
+安装 npm 包或从源码构建后，运行 `tokenless init` 检测已安装的 Agent 框架并引导适配器安装：
+
+```bash
+# 扫描并显示所有框架状态
+tokenless init --list
+
+# 安装指定适配器
+tokenless init --framework claude-code
+
+# 安装所有可安装的适配器（非交互模式）
+tokenless init --all
+
+# 交互式选择（stdin 为终端时）
+tokenless init
+```
+
+`tokenless init` 读取适配器清单，运行各框架的 `detect.sh`，报告适配器状态（就绪 / 可安装 / 缺少前置依赖），然后为选定框架执行 `install.sh`。安装脚本的 stdout 与 stderr 都会原样透出，因此安装失败时脚本自身的诊断信息仍然是输出的一部分。
+
+`--framework` 已经指定了唯一目标，因此不能与 `--all` 或 `--list` 组合使用。选定目标全部已就绪或安装成功时退出码为 `0`；只要有一个选定目标无法安装（包括清单中未声明 install 动作的目标），退出码就是 `1`。
+
+**状态如何判定。** 探测器报告的是它自己这个适配器的状态，而不是该适配器所依赖的宿主二进制的状态，因此 `tokenless init` 按以下顺序解读探测结果：
+
+1. stdout 上携带 `"status": "ready" | "installable" | "missing_prereqs"` 的 JSON 对象。退出码另有含义的探测器用它显式声明：Codex 探测的是 tokenless 二进制，Qoder 探测的是宿主 CLI 能力，QwenWork 无论插件是否已 sideload 都返回 `0`。
+2. 共用的三态退出码 —— `0` = 适配器已注册且就绪，`1` = 未注册但可安装，`2`（或其他任何退出码）= 缺少前置依赖。OpenClaw、Hermes、Claude Code、OpenCode、Qwen Code 和 QwenPaw 遵循该约定。
+
+只带 `installed` 而没有 `status` 的 JSON 属于该约定之前的旧格式；`installed: false` 仍会把退出码 `0` 降级为可安装，因此仅探测可用性的脚本不会被当作适配器已注册。
+
+早于本约定的适配器目录确实会出现：npm 安装会保留属于其他安装的共享适配器目录，`ANOLISA_ADAPTER_DIR` 也接受任意目录，因此其 manifest 可能没有 `"detectContract": "status-v1"` 标记。这类目录不会被一律当作语义未知：其中大多数探测器本来就用三态退出码报告适配器状态，这些结果仍然有效，已验证的注册仍报 `ready`，不会被重新安装。但只探测「宿主」的探测器无法确立适配器状态：Codex 探测的是 tokenless 二进制，Qoder 探测的是宿主 CLI 能力，QwenWork 无论插件是否已 sideload 都返回 `0`。这些目标会列为 `unverified` 且不提供安装，因为它们的安装脚本会在什么都没注册的情况下以成功退出。状态表会点名这些目标并说明刷新方式：重新安装 tokenless，或把 `ANOLISA_ADAPTER_DIR` 指向当前的适配器目录。
+
+若探测器发布了本应是 JSON 的状态文档但无法解析，则报 `unreadable`，同样不提供安装。文档损坏等于没有给出答案；否则一个「跳过工作却以成功退出」的安装脚本会被当作已完成注册转达出去。
+
+**本命令需要 Bash。**`tokenless init` 用 Bash 运行每个目标的 `detect.sh` 与 `install.sh`。无法启动 Bash 时，受影响的框架会列为 `unavailable`，命令带原因以退出码 `1` 结束，而不是报出一个它从未确立过的状态。不使用 Git Bash 的 Windows 环境可以改用 QwenWork 适配器的原生 PowerShell lifecycle，做法见上文「千问办公（Windows x64 本地模式）」一节。
+
+**适配器目录的查找顺序。** 以下位置中第一个包含 `manifest.json`（或模板 `manifest.json.in`）的目录生效：
+
+1. `$ANOLISA_ADAPTER_DIR`（若已设置）—— 自定义安装前缀时使用。
+2. `$XDG_DATA_HOME/anolisa/adapters/tokenless`（`XDG_DATA_HOME` 为绝对路径时）。
+3. `~/.local/share/anolisa/adapters/tokenless`。
+4. `/usr/share/anolisa/adapters/tokenless`，随后是 `/usr/local/share/anolisa/adapters/tokenless`。
+
+该顺序与打包布局一致：安装包把用户数据根目录解析为 `${XDG_DATA_HOME:-$HOME/.local/share}`。
+
+若上述位置都没有清单文件，`tokenless init` 将报错退出：
+
+```
+Adapter directory not found.
+Install tokenless via `npm install -g anolisa-tokenless` or `anolisa install tokenless`.
+For a custom location, set ANOLISA_ADAPTER_DIR to the directory containing manifest.json.
+```
+
+请先安装 tokenless 包，或把 `ANOLISA_ADAPTER_DIR` 指向已存在的适配器目录后重试：
+
+```bash
+npm install -g anolisa-tokenless
+# 或
+anolisa install tokenless
+# 或者，非标准安装前缀
+export ANOLISA_ADAPTER_DIR=/opt/anolisa/share/anolisa/adapters/tokenless
+```
+
+### 手动安装脚本
+
+OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code 和 QwenPaw 可以运行各自的安装脚本：
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh

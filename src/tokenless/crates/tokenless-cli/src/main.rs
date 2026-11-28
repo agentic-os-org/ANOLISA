@@ -1,5 +1,6 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
 mod env_check;
+mod init;
 mod rewrite_deadline;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -184,6 +185,22 @@ enum Commands {
         /// Output machine-readable JSON (for hook/plugin consumption)
         #[arg(long)]
         json: bool,
+    },
+    /// Detect installed agent frameworks and install tokenless adapters
+    Init {
+        /// Install a specific framework by name (e.g. claude-code, qoder)
+        ///
+        /// Names the single target to act on, so it cannot be combined with
+        /// the other selection modes: `--all` would install unrelated adapters
+        /// after the named one, and `--list` promises not to install anything.
+        #[arg(long, conflicts_with_all = ["all", "list"])]
+        framework: Option<String>,
+        /// Install all installable frameworks without prompting
+        #[arg(long)]
+        all: bool,
+        /// List framework status without installing
+        #[arg(long)]
+        list: bool,
     },
     /// Run the embedded RTK command line (see `tokenless rtk --help`)
     ///
@@ -1559,6 +1576,13 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             json,
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
+        }
+        Commands::Init {
+            framework,
+            all,
+            list,
+        } => {
+            init::run(framework, all, list)?;
         }
         // Defensive: main() hands `rtk` to RTK before the Tokenless parser
         // sees it, so this arm normally does not run.
