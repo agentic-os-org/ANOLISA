@@ -23,7 +23,7 @@ WORKSPACE="$TMPBASE/workspace"
 DAEMON_PID=""
 LOOP_DEV=""
 STATE_DIR="/var/lib/ws-ckpt"
-LOCKFILE="/run/ws-ckpt/ws-ckpt.lock"
+LOCKFILE="$STATE_DIR/daemon.lock"
 STATE_DIR_BACKUP=""
 
 PASS=0
@@ -35,7 +35,10 @@ cleanup() {
     echo ""
     echo "=== Cleanup ==="
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null && wait "$DAEMON_PID" 2>/dev/null || true
-    umount "$MNT" 2>/dev/null || true
+    # The loop backend can mount its own image over the fixture mount.
+    while mountpoint -q "$MNT"; do
+        umount --detach-loop "$MNT" || break
+    done
     [ -n "$LOOP_DEV" ] && losetup -d "$LOOP_DEV" 2>/dev/null || true
     # Clean test state from hardcoded state_dir
     rm -rf "$STATE_DIR"
@@ -94,6 +97,58 @@ assert_output_contains() {
     fi
 }
 
+start_daemon() {
+    local log="$1"
+    "$BIN" daemon --mount-path "$MNT" --socket "$SOCKET" >"$log" 2>&1 &
+    DAEMON_PID=$!
+    for _ in $(seq 1 30); do
+        if [ -S "$SOCKET" ]; then
+            echo "Daemon started (PID $DAEMON_PID)"
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "FATAL: daemon socket not ready after 6s"
+    tail -50 "$log"
+    exit 1
+}
+
+stop_daemon() {
+    local exit_code=0
+    kill -TERM "$DAEMON_PID"
+    wait "$DAEMON_PID" || exit_code=$?
+    DAEMON_PID=""
+    if [ "$exit_code" -ne 0 ] || [ -e "$SOCKET" ] || [ -e "$LOCKFILE" ]; then
+        echo "FATAL: SIGTERM did not shut down cleanly (exit $exit_code)"
+        exit 1
+    fi
+    echo "  PASS  SIGTERM exits 0 and removes the socket and lockfile"
+    PASS=$((PASS + 1))
+}
+
+assert_listener_bind_failure() {
+    local desc="$1" path="$2" exit_code=0
+    local stdout="$TMPBASE/$desc.stdout" stderr="$TMPBASE/$desc.stderr"
+
+    timeout --kill-after=2s 10s "$BIN" daemon --mount-path "$MNT" --socket "$path" \
+        >"$stdout" 2>"$stderr" || exit_code=$?
+    if [ "$exit_code" -ne 1 ]; then
+        echo "  FAIL  $desc (expected exit 1, got $exit_code)"
+    elif ! grep -Fq -- 'Failed to bind Unix socket' "$stderr" || ! grep -Fq -- "$path" "$stderr"; then
+        echo "  FAIL  $desc (stderr is missing the bind error or socket path)"
+    elif grep -Fq -- 'Listening on' "$stdout" "$stderr"; then
+        echo "  FAIL  $desc (daemon logged readiness despite failing to bind)"
+    elif [ ! -f "$LOCKFILE" ]; then
+        echo "  FAIL  $desc (unclean shutdown marker is missing)"
+    else
+        echo "  PASS  $desc (exit 1 with socket path and bind error)"
+        PASS=$((PASS + 1))
+        return
+    fi
+    tail -n 50 "$stdout" "$stderr"
+    FAIL=$((FAIL + 1))
+}
+
 # ── build ─────────────────────────────────────────────────────────────────────
 
 # WS_CKPT_E2E_BIN lets local reruns skip the cargo build by pointing at an
@@ -130,15 +185,7 @@ fi
 # ── start daemon ──────────────────────────────────────────────────────────────
 
 echo "=== Starting daemon ==="
-"$BIN" daemon --mount-path "$MNT" --socket "$SOCKET" >"$TMPBASE/daemon.log" 2>&1 &
-DAEMON_PID=$!
-# Wait for socket
-for i in $(seq 1 30); do
-    [ -S "$SOCKET" ] && break
-    sleep 0.2
-done
-[ -S "$SOCKET" ] || { echo "FATAL: daemon socket not ready after 6s"; exit 1; }
-echo "Daemon started (PID $DAEMON_PID)"
+start_daemon "$TMPBASE/daemon.log"
 
 # ── set WS_CKPT env for CLI ──────────────────────────────────────────────────
 
@@ -155,8 +202,20 @@ echo "nested" > "$WORKSPACE/subdir/file2.txt"
 echo ""
 echo "=== CLI Tests ==="
 
-# status
-assert_ok "status" "$BIN" status
+# Exercise failed listener startup against the state created by a real daemon.
+assert_ok "status before listener failure cases" "$BIN" status
+stop_daemon
+
+printf -v LONG_SOCKET '%0128d' 0
+assert_listener_bind_failure "overlong-socket" "$TMPBASE/$LONG_SOCKET"
+
+OCCUPIED_SOCKET="$TMPBASE/occupied.sock"
+mkdir "$OCCUPIED_SOCKET"
+assert_listener_bind_failure "socket-path-occupied-by-directory" "$OCCUPIED_SOCKET"
+assert_ok "socket path directory is preserved" test -d "$OCCUPIED_SOCKET"
+
+start_daemon "$TMPBASE/restarted-daemon.log"
+assert_ok "status after listener failures" "$BIN" status
 
 # init
 assert_ok "init workspace" "$BIN" init -w "$WORKSPACE"
@@ -306,6 +365,8 @@ else
 fi
 
 
+stop_daemon
+
 # ── summary ───────────────────────────────────────────────────────────────────
 
 echo ""
@@ -317,6 +378,6 @@ echo "  Total:  $((PASS + FAIL))"
 if [ "$FAIL" -ne 0 ]; then
     echo ""
     echo "=== Daemon log (last 50 lines) ==="
-    tail -50 "$TMPBASE/daemon.log" 2>/dev/null || true
+    tail -n 50 "$TMPBASE/daemon.log" "$TMPBASE/restarted-daemon.log" 2>/dev/null || true
     exit 1
 fi

@@ -18,11 +18,13 @@ pub mod state;
 mod util;
 pub mod workspace_mgr;
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -82,14 +84,14 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         );
     }
 
-    // 9. Start background scheduler
+    // Register shutdown handlers before making the socket available.
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("Failed to install SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("Failed to install SIGINT handler")?;
+    let socket = listener::prepare_socket(&state.socket_path).await?;
+
     scheduler::start_scheduler(state.clone());
-
-    // 10. Create cancellation token
     let cancel = CancellationToken::new();
-
-    // 11. Register signal handlers
-    let mut sigterm = signal(SignalKind::terminate())?;
 
     // SIGHUP no-op handler
     match signal(SignalKind::hangup()) {
@@ -109,30 +111,23 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         }
     }
 
-    // 12. Spawn listener
-    let listener_cancel = cancel.clone();
-    let listener_state = Arc::clone(&state);
-    let listener_handle =
-        tokio::spawn(async move { listener::run_listener(listener_state, listener_cancel).await });
-
-    // 13. Wait for shutdown signal
-    tokio::select! {
-        _ = sigterm.recv() => {
-            info!("Received SIGTERM, shutting down...");
+    let listener_handle = tokio::spawn(listener::serve_listener(
+        socket,
+        Arc::clone(&state),
+        cancel.clone(),
+    ));
+    let shutdown = async {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT (Ctrl+C), shutting down...");
+            }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received SIGINT (Ctrl+C), shutting down...");
-        }
-    }
+    };
+    wait_for_listener(listener_handle, shutdown, &cancel).await?;
 
-    cancel.cancel();
-
-    // 14. Wait for listener to finish
-    if let Err(e) = listener_handle.await {
-        tracing::error!("Listener task panicked: {}", e);
-    }
-
-    // 15. Flush all workspace index.json files
     info!("Flushing workspace indexes...");
     let all_ws = state.all_workspaces();
     for ws in &all_ws {
@@ -147,15 +142,106 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
         }
     }
 
-    // 16. Save final state
     if let Err(e) = state.save_manifest().await {
         tracing::error!("Failed to save final state.json: {:#}", e);
     }
 
-    // 17. Remove lockfile (clean exit marker)
+    // A missing lockfile marks a clean exit.
     drop(lockfile_holder);
     let _ = std::fs::remove_file(&lockfile_path);
 
     info!("daemon shutdown complete");
     Ok(())
+}
+
+async fn wait_for_listener(
+    mut listener: JoinHandle<anyhow::Result<()>>,
+    shutdown: impl Future<Output = ()>,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    let (result, shutting_down) = tokio::select! {
+        // A listener that has already exited cannot be draining for this signal.
+        biased;
+        result = &mut listener => (result, false),
+        () = shutdown => {
+            cancel.cancel();
+            (listener.await, true)
+        }
+    };
+    result.context("Listener task failed")??;
+    anyhow::ensure!(shutting_down, "Listener exited before a shutdown signal");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::{pending, ready};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn listener_error_before_shutdown_is_preserved() {
+        let listener = tokio::spawn(async { anyhow::bail!("listener failed") });
+        let err = wait_for_listener(listener, pending(), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "listener failed");
+    }
+
+    #[tokio::test]
+    async fn listener_panic_is_a_failure() {
+        let listener = tokio::spawn(async { panic!("listener panicked") });
+        let err = wait_for_listener(listener, pending(), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        let join_error = err.downcast::<tokio::task::JoinError>().unwrap();
+        assert!(join_error.is_panic());
+    }
+
+    #[tokio::test]
+    async fn listener_cancellation_is_a_failure() {
+        let listener = tokio::spawn(pending());
+        listener.abort();
+        let err = wait_for_listener(listener, pending(), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        let join_error = err.downcast::<tokio::task::JoinError>().unwrap();
+        assert!(join_error.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn listener_success_before_shutdown_is_a_failure() {
+        let listener = tokio::spawn(async { Ok(()) });
+        let err = wait_for_listener(listener, pending(), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Listener exited before a shutdown signal");
+    }
+
+    #[tokio::test]
+    async fn listener_error_after_shutdown_is_preserved() {
+        let cancel = CancellationToken::new();
+        let listener_cancel = cancel.clone();
+        let listener = tokio::spawn(async move {
+            listener_cancel.cancelled().await;
+            anyhow::bail!("listener failed while draining");
+        });
+        let err = wait_for_listener(listener, ready(()), &cancel)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "listener failed while draining");
+    }
+
+    #[tokio::test]
+    async fn listener_success_after_shutdown_is_clean() {
+        let cancel = CancellationToken::new();
+        let listener_cancel = cancel.clone();
+        let listener = tokio::spawn(async move {
+            listener_cancel.cancelled().await;
+            Ok(())
+        });
+        wait_for_listener(listener, ready(()), &cancel)
+            .await
+            .unwrap();
+    }
 }
