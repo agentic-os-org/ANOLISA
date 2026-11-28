@@ -206,6 +206,62 @@ fn stacked_response_codings_preserve_usage_messages_and_tool_index() {
     check(&bytes.chunks(17).collect::<Vec<_>>());
 }
 
+#[test]
+fn repeated_response_coding_lines_preserve_usage_messages_and_tool_index() {
+    use std::io::Write;
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&body()).unwrap();
+    let gzip = gzip.finish().unwrap();
+    let mut encoded = Vec::new();
+    {
+        let mut outer = brotli::CompressorWriter::new(&mut encoded, 4096, 3, 22);
+        outer.write_all(&gzip).unwrap();
+    }
+    let bytes = response(
+        &encoded,
+        &format!(
+            "Content-Encoding: gzip\r\ncOnTeNt-EnCoDiNg: br\r\nContent-Length: {}\r\n",
+            encoded.len()
+        ),
+    );
+    check(&bytes.chunks(17).collect::<Vec<_>>());
+}
+
+#[test]
+fn repeated_request_coding_lines_preserve_the_full_prompt() {
+    use std::io::Write;
+    let prompt = serde_json::json!({
+        "model": "test-model", "stream": false,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&serde_json::to_vec(&prompt).unwrap())
+        .unwrap();
+    let gzip = gzip.finish().unwrap();
+    let mut encoded = Vec::new();
+    {
+        let mut outer = brotli::CompressorWriter::new(&mut encoded, 4096, 3, 22);
+        outer.write_all(&gzip).unwrap();
+    }
+    let mut bytes = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Encoding: br\r\nContent-Length: {}\r\n\r\n",
+        encoded.len()
+    ).into_bytes();
+    let header_len = bytes.len();
+    bytes.extend(encoded);
+    let mut aggregator = Aggregator::new();
+    assert!(feed(&mut aggregator, 1, &bytes[..header_len], 1).is_empty());
+    for (index, chunk) in bytes[header_len..].chunks(17).enumerate() {
+        assert!(feed(&mut aggregator, 1, chunk, index as u64 + 2).is_empty());
+    }
+    let completed = feed(&mut aggregator, 0, &full_response(), 1_000);
+    assert_eq!(completed.len(), 1);
+    let AggregatedResult::HttpComplete(pair) = &completed[0] else {
+        panic!("expected HTTP pair, got {:?}", completed[0])
+    };
+    assert_eq!(pair.request.json_body(), Some(prompt));
+}
+
 /// A chunked, **compressed** SSE body whose terminator shares the final read.
 ///
 /// The parser turns a read that ends in `0\r\n\r\n` into SSE events for the
