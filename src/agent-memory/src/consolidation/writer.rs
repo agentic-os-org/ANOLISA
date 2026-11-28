@@ -11,19 +11,47 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use crate::index::store::BM25Store;
 
 use super::fact::ConsolidatedFact;
+
+/// Removes a staging file unless the rename that publishes it succeeded.
+///
+/// Created only after this call won `create_new` for `path`, so it can never
+/// unlink a file another call owns.
+struct StagingGuard {
+    path: PathBuf,
+    published: bool,
+}
+
+impl StagingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            published: false,
+        }
+    }
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
 
 /// Writes facts to a given base directory.
 pub struct FactWriter {
     facts_dir: PathBuf,
     jsonl_path: PathBuf,
     /// Mount root fd for sandboxed writes via safe_fs (openat2 + RESOLVE_BENEATH).
-    /// None falls back to std::fs (used in tests with temp dirs).
+    /// None falls back to std::fs (used in tests with temp dirs); without it
+    /// `write` can only create -- replacing an existing fact needs the anchor.
     root_fd: Option<Arc<OwnedFd>>,
     /// Held file handle for fallback (non-sandboxed) JSONL writes.
     jsonl_file: Mutex<Option<std::fs::File>>,
@@ -70,6 +98,13 @@ impl FactWriter {
     /// falling back to std::fs for tests with temp dirs.
     /// If conflict detection is enabled, marks similar existing facts as superseded.
     /// Facts are organized into category subdirectories under facts/.
+    ///
+    /// # Errors
+    /// With a root fd, replacing an existing fact stages in the mount's
+    /// metadata directory, so that directory must already exist; without one,
+    /// a replacement this call can observe returns `InvalidArgument`. A
+    /// concurrent create can still publish over the result, because the
+    /// existence check and the rename are separate operations.
     pub fn write(&self, fact: &ConsolidatedFact) -> Result<()> {
         std::fs::create_dir_all(&self.facts_dir)?;
 
@@ -118,9 +153,77 @@ impl FactWriter {
             let md_rel = Path::new("facts")
                 .join(fact.category.to_string())
                 .join(format!("{}.md", fact.id));
-            crate::safe_fs::write(fd.as_fd(), &md_rel, fact.to_markdown().as_bytes())?;
+            // A failed write must keep the committed fact instead of
+            // truncating it, so a destination that already exists is staged
+            // and renamed. Fact ids are ULIDs, not content hashes, so in
+            // production a new fact always lands on a new path and this arm is
+            // defence in depth rather than the normal route.
+            match crate::safe_fs::write_create_new(
+                fd.as_fd(),
+                &md_rel,
+                fact.to_markdown().as_bytes(),
+            ) {
+                Err(MemoryError::AlreadyExists(_)) => crate::safe_fs::write_atomic(
+                    fd.as_fd(),
+                    Path::new(crate::ns::RESERVED_FIRST_SEGMENTS[0]),
+                    &md_rel,
+                    fact.to_markdown().as_bytes(),
+                )
+                .map(|_| ()),
+                created => created.map(|_| ()),
+            }?;
+        } else if md_path.exists() {
+            // Without the sandbox anchor this path cannot replace a file
+            // without losing what the sandboxed arm preserves: `rename` only
+            // needs write permission on the directory, so the destination's
+            // write-permission gate is bypassed, and it publishes the staging
+            // file's inode, so the destination's mode, POSIX ACLs and
+            // `user.*` attributes are replaced by the staging file's. Refuse
+            // rather than weaken either -- the service always attaches the
+            // anchor, so this is reachable only via `FactWriter::new`.
+            return Err(MemoryError::InvalidArgument(format!(
+                "replacing {} needs the sandbox root fd; a FactWriter without one can only create",
+                md_path.display()
+            )));
         } else {
-            std::fs::write(&md_path, fact.to_markdown())?;
+            // A create has nothing to preserve, so staging then renaming is
+            // safe here: `create_new` means a planted symlink at a predictable
+            // name cannot redirect the write. The name carries an attempt
+            // counter as well as the pid, because the pid alone is not unique
+            // per write: a second `write()` of the same id would lose
+            // `create_new` with EEXIST and then, under an unconditional
+            // cleanup, unlink the file the first call is still writing.
+            static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+            let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+            let staging =
+                md_path.with_extension(format!("md.memory-write-{}-{attempt}", std::process::id()));
+            // `?` returns before the guard exists, so a call that never won
+            // `create_new` has nothing of ours to remove.
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)?;
+            // `StagingGuard` removes the partial file on every early return,
+            // including a panic, so an interrupted write cannot leave a name
+            // that reclaim does not look for and `git_repo`'s add_all would
+            // commit. A `SIGKILL` between the create and the rename still can.
+            let mut guard = StagingGuard::new(staging.clone());
+            file.write_all(fact.to_markdown().as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&staging, &md_path)?;
+            guard.published = true;
+            // The rename is durable only once the directory entry is synced;
+            // without this a crash can leave the staging name with no
+            // destination. `write_atomic` syncs its staging directory too and
+            // reports a failure, but here the fact is already published, so
+            // this cannot turn into an error return.
+            match std::fs::File::open(&category_dir).and_then(|d| d.sync_all()) {
+                Ok(()) => {}
+                Err(error) => tracing::warn!(
+                    "fact {} published but its directory sync failed: {error}",
+                    md_path.display()
+                ),
+            }
         }
 
         // Append JSONL line.
