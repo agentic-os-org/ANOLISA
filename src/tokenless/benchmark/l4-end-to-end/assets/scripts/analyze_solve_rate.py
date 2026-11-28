@@ -54,7 +54,10 @@ def unscored_cells(evals, runs, seen_runs):
     manifests = set()
     for root in roots:
         manifests.update(
-            glob.glob(f"{root}/**/out/repeat-*/arm-*/selection.json", recursive=True)
+            glob.glob(
+                f"{glob.escape(root)}/**/out/repeat-*/arm-*/selection.json",
+                recursive=True,
+            )
         )
     for path in sorted(manifests):
         arm_dir = os.path.dirname(path)
@@ -110,7 +113,10 @@ def load_reports(evals: str, runs: str | None = None, allow_legacy: bool = False
     out = []
     seen_runs = set()
     for path in sorted(
-        glob.glob(f"{evals}/**/repeat-*-arm-*/evaluate/*.json", recursive=True)
+        glob.glob(
+            f"{glob.escape(evals)}/**/repeat-*-arm-*/evaluate/*.json",
+            recursive=True,
+        )
     ):
         if f"{os.sep}logs{os.sep}" in path:
             continue
