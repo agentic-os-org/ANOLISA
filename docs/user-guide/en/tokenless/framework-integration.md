@@ -603,6 +603,8 @@ The marketplace plugin takes effect after restarting Claude Code. The install sc
 
 ### Codex
 
+Codex lifecycle and detection scripts use `HOME` for user-local Codex and Tokenless CLI discovery only when it is an absolute path. An unset, empty or relative `HOME` adds no user-local candidate. Absolute paths containing spaces remain supported. Explicit `CODEX_BIN`, `PATH`, and system CLI discovery retain their existing priority. This rule applies only to CLI discovery.
+
 The plugin loads in a new Codex session. Close the old session and start a new one before verifying behavior. Codex PostToolUse cannot replace or suppress the original output, so the plugin does not append compressed content or record response-compression candidates. It adds context only for classified environment failures. Actual first-pass savings come from RTK rewriting supported shell commands before execution.
 
 ### DeepSeek Harness
