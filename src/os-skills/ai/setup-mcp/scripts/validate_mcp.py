@@ -28,6 +28,9 @@ def merge(json_str, config_path):
     except json.JSONDecodeError as e:
         print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
+    if not isinstance(new, dict):
+        print("ERROR: Input JSON is not an object", file=sys.stderr)
+        sys.exit(1)
 
     servers = new.get("mcpServers", {})
     if not isinstance(servers, dict):
@@ -134,6 +137,9 @@ def check(config_path):
             data = json.load(f)
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         print(f"ERROR: Invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, dict):
+        print("ERROR: Config is not a JSON object", file=sys.stderr)
         sys.exit(1)
 
     servers = data.get("mcpServers", {})
