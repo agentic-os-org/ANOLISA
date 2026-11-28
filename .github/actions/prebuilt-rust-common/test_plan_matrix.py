@@ -148,7 +148,7 @@ class PlanMatrixTests(unittest.TestCase):
                 "component": "agent-sec-core",
                 "target-os": "linux",
                 "target-arch": "x86_64",
-                "profile": "gnu2.28-x86_64",
+                "profile": "gnu2.28-x86_64-sec-core",
             }]},
         )
 

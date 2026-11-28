@@ -34,7 +34,7 @@ done
 [ -n "$VERSION" ] || die '--version is required'
 [ -n "$SOURCE_REPO" ] || die '--source-repo is required'
 [ -n "$OUTPUT_DIR" ] || die '--output-dir is required'
-[ "$TARGET_OS/$TARGET_ARCH/$PROFILE" = linux/x86_64/gnu2.28-x86_64 ] || \
+[ "$TARGET_OS/$TARGET_ARCH/$PROFILE" = linux/x86_64/gnu2.28-x86_64-sec-core ] || \
     die "profile $PROFILE does not match target $TARGET_OS/$TARGET_ARCH"
 
 for command in cargo flock git install npm python3 sha256sum; do
@@ -115,16 +115,6 @@ SOURCE_VOLUME="$(python3 -c \
     'import shlex, sys; print(shlex.quote(f"--volume={sys.argv[1]}:{sys.argv[1]}:ro"))' \
     "$COMPONENT_ROOT")"
 export CROSS_CONTAINER_OPTS="${CROSS_CONTAINER_OPTS:+$CROSS_CONTAINER_OPTS }$SOURCE_VOLUME"
-
-# shortcut: Cross pre-build FROM uses a local image ID, requiring the legacy builder;
-# remove this when the release profile provides a BuildKit-compatible base.
-export DOCKER_BUILDKIT=0
-
-# Extend the pinned builder without upgrading its glibc or changing other profiles.
-export CROSS_TARGET_X86_64_UNKNOWN_LINUX_GNU_PRE_BUILD='set -eu
-glibc_release=$(rpm -q --qf "%{VERSION}-%{RELEASE}.%{ARCH}" glibc)
-dnf install -y --enablerepo=powertools "glibc-static-${glibc_release}"
-dnf clean all'
 
 python3 "$COMMON_DIR/reproducible-build.py" \
     --source-root "$COMPONENT_ROOT" \

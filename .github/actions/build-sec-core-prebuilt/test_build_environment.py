@@ -21,22 +21,16 @@ elif tool == "make":
     assert (root / "v2/Cargo.toml").is_file()
     keys = ("CROSS_CONTAINER_OPTS", "CROSS_TARGET_X86_64_UNKNOWN_LINUX_GNU_PRE_BUILD", "DOCKER_BUILDKIT")
     captured = {key: os.environ[key] for key in keys if key in os.environ}
+    captured["builder"] = next(
+        arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("RAW_RUST_BUILDER=")
+    )
     pathlib.Path(os.environ["TEST_CAPTURE"]).write_text(json.dumps(captured))
     sys.exit(73)
-elif tool == "rpm":
-    if os.environ.get("TEST_RPM_FAIL"):
-        sys.exit(9)
-    print("2.28-251.el8_10.25.x86_64", end="")
-elif tool == "dnf":
-    with open(os.environ["TEST_DNF_LOG"], "a") as stream:
-        stream.write(json.dumps(sys.argv[1:]) + "\\n")
-    if sys.argv[1] == "install" and os.environ.get("TEST_DNF_FAIL"):
-        sys.exit(8)
 """
 
 
 class BuildEnvironmentTests(unittest.TestCase):
-    def test_cross_source_mount_and_static_dependencies(self) -> None:
+    def test_cross_uses_prepared_builder_with_source_mount(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "source"
@@ -76,8 +70,6 @@ class BuildEnvironmentTests(unittest.TestCase):
                 "flock",
                 "npm",
                 "sha256sum",
-                "rpm",
-                "dnf",
             ):
                 command = fake_bin / name
                 command.write_text(STUB)
@@ -90,10 +82,10 @@ class BuildEnvironmentTests(unittest.TestCase):
                 "SEC_CORE_SOURCE_WORKTREE": str(worktree),
                 "TEST_CAPTURE": str(capture),
                 "TEST_SYSROOT": str(root / "sysroot"),
-                "TEST_DNF_LOG": str(root / "dnf.jsonl"),
                 "CROSS_CONTAINER_OPTS": "--env='EXISTING=two words'",
                 "DOCKER_BUILDKIT": "1",
             }
+            env.pop(PRE_BUILD, None)
             result = subprocess.run(
                 [
                     "bash",
@@ -109,7 +101,7 @@ class BuildEnvironmentTests(unittest.TestCase):
                     "--target-arch",
                     "x86_64",
                     "--profile",
-                    "gnu2.28-x86_64",
+                    "gnu2.28-x86_64-sec-core",
                 ],
                 env=env,
                 capture_output=True,
@@ -119,7 +111,13 @@ class BuildEnvironmentTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
             captured = json.loads(capture.read_text())
-            self.assertEqual(captured["DOCKER_BUILDKIT"], "0")
+            self.assertNotIn(PRE_BUILD, captured)
+            self.assertEqual(captured["DOCKER_BUILDKIT"], "1")
+            cross_profile = ACTION.parent.parent / "prebuilt-rust-common/cross-profile.sh"
+            self.assertEqual(
+                captured["builder"],
+                f"{cross_profile} gnu2.28-x86_64-sec-core",
+            )
             mounted = worktree / "src/agent-sec-core"
             self.assertEqual(
                 shlex.split(captured["CROSS_CONTAINER_OPTS"]),
@@ -131,53 +129,6 @@ class BuildEnvironmentTests(unittest.TestCase):
             self.assertFalse(
                 worktree.exists(), "the action must remove its source worktree"
             )
-
-            for failure, expected_code, expected_calls in (
-                (
-                    {},
-                    0,
-                    [
-                        [
-                            "install",
-                            "-y",
-                            "--enablerepo=powertools",
-                            "glibc-static-2.28-251.el8_10.25.x86_64",
-                        ],
-                        ["clean", "all"],
-                    ],
-                ),
-                ({"TEST_RPM_FAIL": "1"}, 9, []),
-                (
-                    {"TEST_DNF_FAIL": "1"},
-                    8,
-                    [
-                        [
-                            "install",
-                            "-y",
-                            "--enablerepo=powertools",
-                            "glibc-static-2.28-251.el8_10.25.x86_64",
-                        ]
-                    ],
-                ),
-            ):
-                with self.subTest(failure=failure):
-                    log = Path(env["TEST_DNF_LOG"])
-                    log.write_text("")
-                    prepared = subprocess.run(
-                        ["sh", "-c", captured[PRE_BUILD]],
-                        env={**env, **failure},
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=10,
-                    )
-                    self.assertEqual(
-                        prepared.returncode, expected_code, prepared.stderr
-                    )
-                    self.assertEqual(
-                        [json.loads(line) for line in log.read_text().splitlines()],
-                        expected_calls,
-                    )
 
 
 if __name__ == "__main__":

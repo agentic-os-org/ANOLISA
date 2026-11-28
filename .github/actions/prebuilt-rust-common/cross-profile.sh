@@ -15,6 +15,8 @@ GNU217_ARM_IMAGE_ID="sha256:4cec3c91665c86a79bb02aa4940eccbd40542bb3367bbaa4e24c
 GNU228_X86_BASE="docker.io/dockcross/manylinux_2_28-x64@sha256:263b776c5dc6ae7e50942c5fbb82eb24a1ec64016cd6dd10831d51c2201923cf"
 GNU228_X86_IMAGE="anolisa/rust-release-builder:gnu2.28-x86_64"
 GNU228_X86_IMAGE_ID="sha256:0a5c24bde830394d0fb585a4c7c2021b315e394bf3a3e3abb22401b70e4b35db"
+SEC_CORE_IMAGE="anolisa/rust-release-builder:gnu2.28-x86_64-sec-core"
+SEC_CORE_IMAGE_ID="sha256:077c59fba3b046f72cef0762a75a510907e9a6d315b22bcaa66a5df5ebe1322f"
 GNU228_ARM_BASE="docker.io/dockcross/manylinux_2_28-aarch64@sha256:63d09e1726a914c85b0087aa00b966df896fac962095310b915332f0135bfd74"
 GNU228_ARM_IMAGE="anolisa/rust-release-builder:gnu2.28-aarch64-agentsight"
 GNU228_ARM_IMAGE_ID="sha256:a60fbfb3f5bf4f5d6787ef0737fc3df7919a8da527f903fd71b4e838c443b736"
@@ -32,7 +34,7 @@ die() {
 
 profile_target() {
     case "$1" in
-        gnu2.17-x86_64|gnu2.28-x86_64) printf 'x86_64-unknown-linux-gnu\n' ;;
+        gnu2.17-x86_64|gnu2.28-x86_64|gnu2.28-x86_64-sec-core) printf 'x86_64-unknown-linux-gnu\n' ;;
         gnu2.17-aarch64|gnu2.28-aarch64) printf 'aarch64-unknown-linux-gnu\n' ;;
         darwin11-aarch64) printf 'aarch64-apple-darwin\n' ;;
         darwin11-x86_64) printf 'x86_64-apple-darwin\n' ;;
@@ -45,6 +47,7 @@ profile_image() {
         gnu2.17-x86_64) printf '%s\n' "$GNU217_X86_IMAGE" ;;
         gnu2.17-aarch64) printf '%s\n' "$GNU217_ARM_IMAGE" ;;
         gnu2.28-x86_64) printf '%s\n' "$GNU228_X86_IMAGE" ;;
+        gnu2.28-x86_64-sec-core) printf '%s\n' "$SEC_CORE_IMAGE" ;;
         gnu2.28-aarch64) printf '%s\n' "$GNU228_ARM_IMAGE" ;;
         darwin11-aarch64) printf '%s\n' "$DARWIN_IMAGE" ;;
         darwin11-x86_64) printf '%s\n' "$DARWIN_X86_IMAGE" ;;
@@ -57,6 +60,7 @@ profile_image_id() {
         gnu2.17-x86_64) printf '%s\n' "$GNU217_X86_IMAGE_ID" ;;
         gnu2.17-aarch64) printf '%s\n' "$GNU217_ARM_IMAGE_ID" ;;
         gnu2.28-x86_64) printf '%s\n' "$GNU228_X86_IMAGE_ID" ;;
+        gnu2.28-x86_64-sec-core) printf '%s\n' "$SEC_CORE_IMAGE_ID" ;;
         gnu2.28-aarch64) printf '%s\n' "$GNU228_ARM_IMAGE_ID" ;;
         darwin11-aarch64) printf '%s\n' "$DARWIN_IMAGE_ID" ;;
         darwin11-x86_64) printf '%s\n' "$DARWIN_X86_IMAGE_ID" ;;
@@ -72,7 +76,7 @@ profile_path() {
         gnu2.17-aarch64)
             printf '/usr/xcc/aarch64-unknown-linux-gnu/bin:/opt/rh/devtoolset-10/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
             ;;
-        gnu2.28-x86_64)
+        gnu2.28-x86_64|gnu2.28-x86_64-sec-core)
             printf '/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
             ;;
         gnu2.28-aarch64)
@@ -120,7 +124,7 @@ verify_linux_profile() {
             base="$GNU217_ARM_BASE"
             glibc=2.17
             ;;
-        gnu2.28-x86_64)
+        gnu2.28-x86_64|gnu2.28-x86_64-sec-core)
             base="$GNU228_X86_BASE"
             glibc=2.28
             ;;
@@ -136,7 +140,15 @@ verify_linux_profile() {
     [ "$(docker run --rm --entrypoint getconf "$image" GNU_LIBC_VERSION)" = "glibc $glibc" ] || \
         die "$image is not a glibc $glibc profile"
 
-    if [ "$profile" = gnu2.28-x86_64 ]; then
+    if [ "$profile" = gnu2.28-x86_64-sec-core ]; then
+        docker run --rm --entrypoint sh "$image" -c '
+            set -eu
+            format="%{VERSION}-%{RELEASE}.%{ARCH}"
+            glibc_release=$(rpm -q --qf "$format" glibc)
+            static_release=$(rpm -q --qf "$format" glibc-static)
+            [ "$glibc_release" = "$static_release" ]
+        ' || die "$image must contain glibc-static matching its glibc"
+    elif [ "$profile" = gnu2.28-x86_64 ]; then
         docker run --rm --entrypoint rpm "$image" -q \
             clang-devel llvm-devel elfutils-libelf-devel systemd-devel \
             fuse3-devel openssl-devel zlib-devel libzstd-devel \
@@ -280,7 +292,7 @@ run_profile() {
     fi
     install -d -m 0755 "$cargo_home/sccache"
     case "$profile" in
-        gnu2.17-x86_64|gnu2.28-x86_64) linker=gcc; archiver='ar' ;;
+        gnu2.17-x86_64|gnu2.28-x86_64|gnu2.28-x86_64-sec-core) linker=gcc; archiver='ar' ;;
         gnu2.17-aarch64|gnu2.28-aarch64)
             linker=aarch64-unknown-linux-gnu-gcc
             archiver=aarch64-unknown-linux-gnu-ar
