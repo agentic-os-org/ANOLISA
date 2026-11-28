@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -20,7 +21,7 @@ class RawPackagingTests(unittest.TestCase):
             version = tomllib.loads((source / "component.toml").read_text())["component"]["version"]
         return subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(PACKAGE),
                 "--source-dir",
                 str(source),
@@ -46,7 +47,7 @@ class RawPackagingTests(unittest.TestCase):
             if line and not line.startswith("#")
         }
         expected = {
-            f"share/anolisa/skills/{skill.name}/{path.relative_to(skill)}"
+            f"share/anolisa/skills/{skill.name}/{path.relative_to(skill).as_posix()}"
             for skill in skill_dirs
             for path in tracked_paths
             if path.is_relative_to(skill)
@@ -128,6 +129,43 @@ class RawPackagingTests(unittest.TestCase):
                 self.assertNotIn(b"experimental", contract.read())
             (skill / "SKILL.md").unlink()
             self.assertNotEqual(self.build(root, root / "bad").returncode, 0)
+
+    def test_nested_paths_are_posix_in_archive_and_sbom(self):
+        """Windows builds must not leak native separators into Linux package names."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_contract = (ROOT / "component.toml").read_text()
+            source_version = tomllib.loads(source_contract)["component"]["version"]
+            (root / "component.toml").write_text(source_contract)
+            (root / "packaging").mkdir()
+            (root / "packaging/released-skills.txt").write_text("ai/example\n")
+            skill = root / "ai/example"
+            nested = skill / "nested/tools"
+            nested.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("# Fixture\n")
+            payload = nested / "helper.py"
+            payload.write_bytes(b"print('fixture')\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", "component.toml", "packaging", "ai"], check=True
+            )
+
+            output = root / "artifacts"
+            result = self.build(root, output)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            archive = output / f"os-skills-{source_version}-linux-x86_64.tar.gz"
+            expected = "./share/anolisa/skills/example/nested/tools/helper.py"
+            with tarfile.open(archive) as package:
+                names = package.getnames()
+                self.assertIn(expected, names)
+                self.assertIn("./share/anolisa/skills/example/nested", names)
+                self.assertIn("./share/anolisa/skills/example/nested/tools", names)
+                self.assertFalse(any("\\" in name for name in names))
+                self.assertEqual(package.extractfile(expected).read(), b"print('fixture')\n")
+            sbom = json.loads((output / f"{archive.name}.cdx.json").read_text())
+            listed = {component["name"] for component in sbom["components"]}
+            self.assertIn(expected.removeprefix("./"), listed)
+            self.assertFalse(any("\\" in name for name in listed))
 
 
 if __name__ == "__main__":
