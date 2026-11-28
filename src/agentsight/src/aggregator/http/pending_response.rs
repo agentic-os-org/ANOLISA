@@ -10,7 +10,7 @@ use crate::probes::sslsniff::SslEvent;
 use anyhow::{Result, bail};
 use std::rc::Rc;
 
-const MAX_RESPONSE_HEADERS: usize = 64 * 1024;
+pub(super) const MAX_RESPONSE_HEADERS: usize = 64 * 1024;
 
 /// Interim 1xx statuses that do not finalize the request they answer.
 ///
@@ -28,7 +28,7 @@ impl ConnectionState {
             Self::ResponsePending { request, .. } | Self::SseActive { request, .. } => {
                 request.as_ref()
             }
-            Self::Idle | Self::RequestBodyPending { .. } => None,
+            _ => None,
         }
     }
 }
@@ -294,6 +294,15 @@ impl HttpConnectionAggregator {
     /// Recognize a response prefix on a pending request connection.
     pub(super) fn starts_response(&self, event: &SslEvent) -> bool {
         let data = &event.buf[..event.buf_size() as usize];
+        if let Some(source) = self
+            .connections
+            .peek(&ConnectionId::from_ssl_event(event))
+            .and_then(ConnectionState::pending_header_source)
+        {
+            return source.rw != event.rw
+                && !data.is_empty()
+                && (data.starts_with(b"HTTP/1.") || b"HTTP/1.".starts_with(data));
+        }
         match self.connections.peek(&ConnectionId::from_ssl_event(event)) {
             Some(
                 ConnectionState::RequestPending { request }
@@ -425,6 +434,9 @@ impl HttpConnectionAggregator {
                     pending_body: Some((expected_body_len, body_buffer)),
                 },
             ),
+            other if other.pending_header_source().is_some() => {
+                (None, PendingResponse::headers(Rc::new(event.clone())))
+            }
             other => {
                 self.insert(id, other);
                 return None;
