@@ -326,7 +326,7 @@ def main():
             for iid, n in fail_counter.most_common(20)
         ],
     }
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    os.makedirs(os.path.dirname(args.out) or os.curdir, exist_ok=True)
     with open(args.out, "w") as fh:
         fh.write(json.dumps(doc, indent=2) + "\n")
     print(f"wrote {args.out}")

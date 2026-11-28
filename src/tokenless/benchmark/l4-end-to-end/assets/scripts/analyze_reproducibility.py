@@ -201,7 +201,7 @@ def main():
         "session aggregate (known upstream turn-row loss)",
         "by_arm": per_arm,
     }
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    os.makedirs(os.path.dirname(args.out) or os.curdir, exist_ok=True)
     with open(args.out, "w") as fh:
         fh.write(json.dumps(doc, indent=2) + "\n")
     print(f"wrote {args.out}")
