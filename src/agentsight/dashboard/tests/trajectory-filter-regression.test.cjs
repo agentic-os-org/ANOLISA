@@ -105,6 +105,11 @@ function viewer({ readFailure = false } = {}) {
     filterButton(label) {
       return nodes(render(), (node) => node.type === 'button' && node.props.children === label)[0];
     },
+    attachRoundList(element) {
+      const list = nodes(render(), (node) => node.type === 'div' && node.props.ref &&
+        [node.props.children].flat(Infinity).some((child) => child?.type?.name === 'RoundListItem'))[0];
+      if (list) list.props.ref.current = element;
+    },
     unmount() { for (const cleanup of cleanups) cleanup?.(); },
     load(id) {
       nodes(render(), (node) => node.type === 'input' && node.props.type === 'text')[0].props.onChange({ target: { value: id } });
@@ -211,6 +216,31 @@ test('Enter and Shift+Enter navigate matches, while composing or modified keys d
   assert.equal(page.detail().props.round.key, 1);
   assert.equal(page.pressFilterKey('Enter', { shiftKey: true }), true);
   assert.equal(page.detail().props.round.key, 3);
+});
+
+test('explicit match navigation scrolls the result list only as far as needed', () => {
+  const page = withNonconsecutiveMatches();
+  const bounds = new Map([[1, { top: 100, bottom: 120 }], [3, { top: 240, bottom: 260 }]]);
+  const list = {
+    scrollTop: 0, scrollHeight: 400, clientHeight: 100, clientTop: 0,
+    getBoundingClientRect: () => ({ top: 100 }),
+    querySelector(selector) {
+      const key = Number(selector.match(/^\[data-round-key="(\d+)"\]$/)?.[1]);
+      const row = bounds.get(key);
+      return row && { getBoundingClientRect: () => ({ top: row.top - this.scrollTop, bottom: row.bottom - this.scrollTop }) };
+    },
+  };
+  page.filter('alpha');
+  page.attachRoundList(list);
+  page.pressFilterKey('Enter');
+  assert.equal(list.scrollTop, 0, 'a fully visible match leaves scroll position alone');
+  page.filterButton('atif.nextRoundMatch').props.onClick();
+  assert.equal(list.scrollTop, 60, 'the offscreen bottom edge is brought into the list viewport');
+  page.pressFilterKey('Enter');
+  assert.equal(list.scrollTop, 0, 'wraparound reveals the first match again');
+  list.scrollHeight = list.clientHeight;
+  page.pressFilterKey('Enter');
+  assert.equal(list.scrollTop, 0, 'a non-scrolling result list is untouched');
 });
 
 test('empty results disable navigation and clearing returns to ordinary list selection', () => {
