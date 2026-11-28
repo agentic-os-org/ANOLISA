@@ -1074,6 +1074,141 @@ async fn public_approval_is_fatal_and_skips_the_rest_of_the_batch() {
     assert!(protocol.contains("approval-second"), "{protocol}");
 }
 
+struct FailingTool {
+    name: &'static str,
+    response: Result<ToolResult, String>,
+}
+
+#[async_trait]
+impl Tool for FailingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "test tool that returns an error"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::ShellExec
+    }
+
+    async fn invoke(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolResult, String> {
+        self.response.clone()
+    }
+}
+
+#[tokio::test]
+async fn execute_tool_applies_the_same_budget_to_both_error_forms() {
+    let short_error = "tool failed".to_string();
+    let at_budget = format!("{}\n", "x".repeat(24)).repeat(1_000);
+    let byte_head = "x".repeat(24_999);
+    let line_head = format!("{}line", "line\n".repeat(999));
+    let cases = [
+        ("short error", short_error.clone(), short_error),
+        ("at both limits", at_budget.clone(), at_budget),
+        (
+            "over the byte limit across a UTF-8 character",
+            format!("{byte_head}é"),
+            format!("{byte_head}\n\n[output truncated: 25001 bytes / 1 lines → 24999 bytes]"),
+        ),
+        (
+            "over the line limit",
+            format!("{line_head}\nextra"),
+            format!("{line_head}\n\n[output truncated: 5005 bytes / 1001 lines → 4999 bytes]"),
+        ),
+    ];
+
+    for (case, input, expected) in cases {
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(FailingTool {
+            name: "invoke_error",
+            response: Err(input.clone()),
+        }));
+        tools.register(Box::new(FailingTool {
+            name: "returned_error",
+            response: Ok(ToolResult::error(input)),
+        }));
+        let mut core = CoshCore::new_legacy(
+            CoreConfig::default(),
+            Box::new(MockProvider::text_only("unused")),
+            tools,
+        );
+        let ctx = ToolContext::new(
+            core.cwd(),
+            core.session_id.clone(),
+            core.project_root.clone(),
+        );
+
+        let returned_error = core
+            .execute_tool("returned_error", serde_json::json!({}), &ctx)
+            .await;
+        let invoke_error = core
+            .execute_tool("invoke_error", serde_json::json!({}), &ctx)
+            .await;
+
+        assert!(returned_error.is_error && invoke_error.is_error, "{case}");
+        assert!(
+            invoke_error.output == returned_error.output,
+            "{case}: Err returned {} bytes, Ok returned {} bytes",
+            invoke_error.output.len(),
+            returned_error.output.len()
+        );
+        assert!(
+            returned_error.output == expected,
+            "{case}: unexpected output ({} bytes, expected {})",
+            returned_error.output.len(),
+            expected.len()
+        );
+    }
+}
+
+#[tokio::test]
+async fn execute_tool_records_marked_public_cleanup_failure() -> Result<(), &'static str> {
+    let error = "tool failed";
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(FailingTool {
+        name: "invoke_error",
+        response: Err(error.to_string()),
+    }));
+    let mut core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(MockProvider::text_only("unused")),
+        tools,
+        crate::cli::ExecutionProfile::PublicHeadlessV1,
+    );
+    let ctx = ToolContext::with_runtime(
+        core.cwd(),
+        core.session_id.clone(),
+        core.project_root.clone(),
+        core.workspace.clone(),
+        core.tool_runtime_context(),
+    );
+    let cleanup_failure = ctx
+        .cleanup_failure()
+        .ok_or("public cleanup status missing")?;
+
+    for (failed, expected_code) in [(false, None), (true, Some("cleanup_failed"))] {
+        cleanup_failure.store(failed, Ordering::SeqCst);
+        let result = core
+            .execute_tool("invoke_error", serde_json::json!({}), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.output, error);
+        assert_eq!(core.public_failure_code(), expected_code);
+    }
+    Ok(())
+}
+
 #[test]
 fn public_cleanup_failure_is_shared_with_command_tools() {
     let core = CoshCore::new_with_profile(

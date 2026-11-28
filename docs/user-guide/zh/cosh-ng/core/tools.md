@@ -45,4 +45,7 @@ cosh-core --headless --allowed-tools mcp__search__query
 
 文件读取工具以 Core 启动时捕获的工作空间为根；之后在 Shell 中执行 `cd` 不会改变边界，越界路径会被拒绝。搜索结果有大小限制，不完整时会标记截断。进入 Agent 上下文的 MCP 输出上限为 64 KiB。
 
+工具调用失败有两种形式：工具返回标记为错误的结果，或调用本身返回错误。对这两种情况，
+Core 最多保留原始错误文本的 25,000 字节和 1,000 行。超出任一上限时，Core 会附加截断提示。
+
 外部工具配置见 [MCP 设置](../mcp.md)，Extension 工具见 [Extensions](extensions.md)。

@@ -2098,7 +2098,7 @@ impl CoshCore {
                             public.terminal = Some(PublicTerminalReason::CleanupFailed);
                         }
                     }
-                    return ToolResult::error(error);
+                    ToolResult::error(error)
                 }
             },
             None => return ToolResult::error(format!("Unknown tool: {name}")),
