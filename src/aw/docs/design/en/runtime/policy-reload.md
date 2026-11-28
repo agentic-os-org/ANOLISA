@@ -46,16 +46,13 @@ audit and before publishing the Host. Capacity bounds active reservations using
 configured binding limits; completed claims are removed without a historical-call
 limit. Missing snapshots, expired acknowledgement and stale owners prevent work.
 
-`aw update --config aw.yaml --agent TARGET` selects a root instance in the same
-configured service. Multiple matches require `--instance ID`. PID-based bootstrap
-through `aw connect --agent TARGET --pid PID` and
-`aw disconnect --agent TARGET --pid PID` remains supported for Qoder TUI and QwenPaw App. A convenience
-`aw update --pid` selector is deferred independently of Adapter integration;
-service-side process association and identity checks remain required. This update
-path does not add cross-namespace control. The control plane selects the execution container,
-provisions Hook files at their final paths, and serializes updates with task
-dispatch. Dispatch resumes only after update succeeds. Active tasks and cleanup
-return `busy`; no automatic retry, task drain or mid-task switch is provided.
+`aw update` selects an existing instance in the configured service. With
+`--pid PID`, the CLI reads the live same-user process identity in the caller's
+PID namespace and matches it against one root instance in service status.
+The service checks the watched process again during idle admission. The control
+plane selects the execution container, provisions Hook files at their final
+paths and serializes updates with task dispatch. Active tasks and cleanup return
+`busy`. Dispatch resumes only after update succeeds.
 
 The [idle-update support matrix](../../../../../../docs/developer-guide/en/aw/deployment/policy-updates.md)
 records each launch mode, startup readiness seam, safe boundary and selection

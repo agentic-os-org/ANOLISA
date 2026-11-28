@@ -158,6 +158,7 @@ mod tests {
         assert!(legacy.action.is_none() && legacy.connect);
         assert_eq!(legacy.timeout_ms, 30000);
         assert!(parse(&["aw", "instance", "update", "--instance", "one"]).is_err());
+        assert!(parse(&["aw", "instance", "update", "--pid", "123"]).is_err());
         let value = parse(&[
             "aw",
             "instance",

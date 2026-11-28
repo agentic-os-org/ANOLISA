@@ -2,6 +2,8 @@
 
 #[path = "instance.rs"]
 mod instance;
+#[path = "runtime_policy_pid.rs"]
+mod pid;
 
 use super::support::{Fixture, Process, Service, TIMEOUT};
 use aw_service::Operation;
@@ -58,6 +60,43 @@ fn update(fixture: &Fixture, candidate: &Value, extra: &[&str]) -> Output {
 
 fn active(service: &Service) -> Value {
     service.status()["instances"][0].clone()
+}
+
+fn reloadable_document(fixture: &Fixture, adapter: &str) -> Value {
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/launcher/reload_host.py");
+    let host = fixture.root.join("reusable host");
+    fs::copy(source, &host).unwrap();
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut document = fixture.document();
+    document["spec"]["agents"]["qoder"] = json!({
+        "adapter": adapter,
+        "argv": if adapter == "qoder" { json!([host]) } else { json!([host, "app"]) }
+    });
+    if adapter == "qoder" {
+        document["spec"]["agents"]["qoder"]["qoder"] = json!({"sequential":true});
+    }
+    document
+}
+
+fn spawn_reloadable(fixture: &Fixture, config: &Path, adapter: &str) -> Process {
+    fs::write(fixture.root.join("home/config.json"), b"{}").unwrap();
+    let mut launch = fixture.command();
+    launch
+        .args(["run", "--config"])
+        .arg(config)
+        .args(["--agent", "qoder", "--reloadable"])
+        .env("FAKE_RELOAD_ADAPTER", adapter)
+        .env(
+            "FAKE_RELOAD_VERSION",
+            if adapter == "qoder" {
+                "1.1.90"
+            } else {
+                "QwenPaw, version 2.2.3"
+            },
+        )
+        .env("QWENPAW_WORKING_DIR", fixture.root.join("home"));
+    Process::spawn(fixture, launch)
 }
 
 #[test]
@@ -127,39 +166,14 @@ runpy.run_path(source, run_name="__main__")
 fn prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting() {
     for adapter in ["qoder", "qwenpaw"] {
         let fixture = Fixture::new();
-        let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/launcher/reload_host.py");
-        let host = fixture.root.join("reusable host");
-        fs::copy(source, &host).unwrap();
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(fixture.root.join("home/config.json"), b"{}").unwrap();
-        let mut baseline = fixture.document();
-        baseline["spec"]["agents"]["qoder"] = json!({"adapter":adapter,"argv":if adapter=="qoder" {json!([host])} else {json!([host,"app"])}});
-        if adapter == "qoder" {
-            baseline["spec"]["agents"]["qoder"]["qoder"] = json!({"sequential":true});
-        }
+        let mut baseline = reloadable_document(&fixture, adapter);
         fixture.observation(&mut baseline, "qoder");
         let service = Service::start(&fixture, &baseline);
         let original_config = fs::read(fixture.root.join("aw.json")).unwrap();
         let missing = update(&fixture, &baseline, &[]);
         assert!(!missing.status.success());
         assert!(String::from_utf8_lossy(&missing.stderr).contains("no matching instance"));
-        let mut launch = fixture.command();
-        launch
-            .args(["run", "--config"])
-            .arg(fixture.root.join("aw.json"))
-            .args(["--agent", "qoder", "--reloadable"])
-            .env("FAKE_RELOAD_ADAPTER", adapter)
-            .env(
-                "FAKE_RELOAD_VERSION",
-                if adapter == "qoder" {
-                    "1.1.90"
-                } else {
-                    "QwenPaw, version 2.2.3"
-                },
-            )
-            .env("QWENPAW_WORKING_DIR", fixture.root.join("home"));
-        let process = Process::spawn(&fixture, launch);
+        let process = spawn_reloadable(&fixture, &fixture.root.join("aw.json"), adapter);
         wait(&fixture.root.join("native-ready"));
         let native_pid: u32 = fs::read_to_string(fixture.root.join("native-ready"))
             .unwrap()

@@ -204,6 +204,10 @@
       "target": "aw-cli/test/launcher",
       "test": "runtime_policy::prewarmed_qoder_and_qwenpaw_switch_before_dispatch_without_restarting"
     },
+    "reload-pid-selector": {
+      "target": "aw-cli/test/launcher",
+      "test": "runtime_policy::pid::update_by_pid_selects_one_live_process_and_preserves_idle_gate"
+    },
     "reload-busy": {
       "target": "aw-cli/test/service",
       "test": "policy::whole_request_and_unfinished_tools_return_busy_without_deferred_activation"
@@ -1805,6 +1809,7 @@
         "qoder-lifecycle",
         "cancel-initialization",
         "runtime-reload",
+        "reload-pid-selector",
         "reload-busy",
         "reload-race",
         "reload-rollback",
@@ -1896,6 +1901,7 @@
         "qwenpaw-lifecycle",
         "cancel-initialization",
         "runtime-reload",
+        "reload-pid-selector",
         "reload-busy",
         "reload-race",
         "reload-rollback",

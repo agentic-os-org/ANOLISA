@@ -33,13 +33,10 @@ QwenPaw 2.2.2.post1 / AgentScope 2.0.10 App，以及 Qoder SDK 1.0.56 / bundled 
 存活状态，包括持久化审计后、发布 Host 前。并发容量使用配置的 binding 上限，完成
 占用及时移除，没有累计历史调用上限。快照缺失、确认过期或 owner 失效会阻止任务执行。
 
-`aw update --config aw.yaml --agent TARGET` 在原配置关联的同一服务中选择根实例。
-多个匹配要求 `--instance ID`。`aw connect --agent TARGET --pid PID` 及
-`aw disconnect --agent TARGET --pid PID`继续支持 Qoder TUI、QwenPaw App 的 PID 接入。便捷选择器
-`aw update --pid` 延后，与 Adapter 接入独立；服务侧进程关联和身份检查持续生效。
-此更新路径不增加跨 namespace 控制。管控侧选择执行容器，在最终路径准备 Hook 文件，并将
-更新和任务派发串行化；更新成功后再恢复派发。活跃任务及清理期间返回 `busy`，
-不提供自动重试、等待任务排空或任务内切换。
+`aw update` 在所配置的服务中选择已有实例。使用 `--pid PID` 时，CLI 读取调用者所在
+PID namespace 内同用户的存活进程身份，并在服务状态中匹配唯一根实例。服务在空闲准入时
+重新检查所监视的进程。管控侧选择执行容器，在最终路径准备 Hook 文件，并将更新和任务
+派发串行化。活跃任务及清理期间返回 `busy`，更新成功后再恢复派发。
 
 [空闲更新支持矩阵](../../../../../../docs/developer-guide/zh/aw/deployment/policy-updates.md)
 记录各启动模式的就绪接点、安全边界及选择入口。普通 Qoder SDK/QwenPaw 扩展公共服务事务，

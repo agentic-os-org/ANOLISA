@@ -253,8 +253,9 @@ AW CLI、Service 和 SDK，并重新生成既有 Descriptor。旧 Descriptor 可
 | 参数 | 必填 / 默认值 | 含义 |
 | --- | --- | --- |
 | `--config FILE` 或 `--socket ABS_PATH` | 默认 `--config aw.yaml` | 选择已有服务 |
-| `--agent TARGET` | 未提供 `--instance` 时必填 | 选择配置目标；匹配多个根实例时还需 `--instance` |
-| `--instance ID` | 未提供 `--agent` 时必填 | 选择实例；可与 `--agent` 组合，要求同时匹配 |
+| `--agent TARGET` | 至少提供一个选择参数 | 选择配置目标下的唯一根实例，或限制 `--instance`、`--pid` 的匹配范围 |
+| `--instance ID` | 与 `--pid` 互斥 | 按 AW 实例 ID 选择 |
+| `--pid PID` | 与 `--instance` 互斥 | 选择与存活进程关联的唯一根实例，要求进程与调用者同用户且处于同一 PID namespace |
 | `--policy FILE` | 使用 `--socket` 时必填，否则默认用 `--config` | 完整候选配置 |
 | `--expected-revision SHA256` | 默认使用选中实例的当前版本 | 乐观并发前置条件，冲突不自动重试 |
 
@@ -395,21 +396,18 @@ Qoder TUI 和 QwenPaw App，须满足[外部进程接入条件](../../../develop
 
 ```bash
 aw connect --agent TARGET --pid NATIVE_PID
-aw update --agent TARGET
-aw update --instance INSTANCE_ID --policy next.yaml
+aw update --pid NATIVE_PID --policy next.yaml
 aw disconnect --agent TARGET --pid NATIVE_PID
 ```
 
-将 `TARGET`、`NATIVE_PID`、`INSTANCE_ID` 分别替换为配置目标名、选定的进程和返回的
-实例 ID。attach 核验进程身份并等待原生 Hook 加载确认；移除保留原进程及其他 Hook。
+将 `TARGET` 和 `NATIVE_PID` 分别替换为配置目标名和选定的 PID。
+接入时核验进程身份并等待原生 Hook 加载确认，移除时保留原进程及其他 Hook。
 接入和断开均接受 `--config FILE`、`--agent TARGET`、`--pid PID`；选定实例空闲后执行
 `aw disconnect`。
 
-update 复用[空闲策略更新合同](../../../developer-guide/zh/aw/deployment/policy-updates.md)，
-接受 `--config FILE`、`--agent TARGET`、`--instance ID`、`--policy FILE` 和
-`--expected-revision SHA256`。可选择目标、实例，或两者交集。省略 `--policy` 时使用共享
-配置作为候选；匹配多个实例时须提供 `--instance`。忙碌或更新被拒绝时保留原策略；
-实例不存在会报错，不会触发自动接入。
+更新沿用[空闲策略更新合同](../../../developer-guide/zh/aw/deployment/policy-updates.md)。
+同一目标有多个实例时，用 `--pid` 或 `--instance` 选择。实例忙碌或更新被拒绝时，原策略继续生效。
+参数见 [`aw update`](#aw-update)。
 
 这些命令沿用现有接入和更新的 JSON 响应。update 也支持链接指南中的已准备原生模式，
 attach 仍限于文档列出的入口。下述业务自管 JSON 协议使用独立的 `aw instance` 命令。

@@ -23,7 +23,7 @@
 
 ```bash
 aw connect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
-aw update --config current.yaml --agent TARGET
+aw update --config current.yaml --pid "$NATIVE_PID"
 aw disconnect --config current.yaml --agent TARGET --pid "$NATIVE_PID"
 ```
 

@@ -263,8 +263,9 @@ Neither command starts a service. Both return JSON. Exit Agents sharing the serv
 | Argument | Required / default | Meaning |
 | --- | --- | --- |
 | `--config FILE` or `--socket ABS_PATH` | Default: `--config aw.yaml` | Select the existing service |
-| `--agent TARGET` | Required unless `--instance` is given | Select the configured target; more than one matching root instance requires `--instance` |
-| `--instance ID` | Required unless `--agent` is given | Select one instance; can be combined with `--agent` to require both to match |
+| `--agent TARGET` | One or more selectors are required | Select a unique root for the configured target, or constrain `--instance` or `--pid` |
+| `--instance ID` | Conflicts with `--pid` | Select one instance by its AW ID |
+| `--pid PID` | Conflicts with `--instance` | Select the unique root associated with a live process owned by the caller in the same PID namespace |
 | `--policy FILE` | Required with `--socket`; otherwise defaults to `--config` | Complete candidate configuration |
 | `--expected-revision SHA256` | Current selected instance revision | Optimistic concurrency condition; conflicts are not retried |
 
@@ -419,23 +420,19 @@ resuming. The command does not start or restart the Agent.
 
 ```bash
 aw connect --agent TARGET --pid NATIVE_PID
-aw update --agent TARGET
-aw update --instance INSTANCE_ID --policy next.yaml
+aw update --pid NATIVE_PID --policy next.yaml
 aw disconnect --agent TARGET --pid NATIVE_PID
 ```
 
-Replace `TARGET`, `NATIVE_PID` and `INSTANCE_ID` with your configured target,
-selected process and returned instance ID. Attach verifies the process identity
-and native Hook adoption. Removal retains the native process and unrelated Hooks.
+Replace `TARGET` and `NATIVE_PID` with your configured target and selected PID.
+Attach verifies the process identity and native Hook adoption. Removal retains
+the native process and unrelated Hooks.
 Connection and disconnection accept `--config FILE`, `--agent TARGET` and
 `--pid PID`. Use `aw disconnect` after the selected instance is idle.
 
 Update reuses the [idle policy update contract](../../../developer-guide/en/aw/deployment/policy-updates.md).
-It accepts `--config FILE`, `--agent TARGET`, `--instance ID`, `--policy FILE` and
-`--expected-revision SHA256`. Select an agent, an instance, or their intersection.
-Without `--policy`, the shared configuration is the candidate. Multiple matching
-instances require `--instance`. Busy or rejected updates retain the active policy;
-an unknown instance is an error and does not trigger attachment.
+If multiple instances share a target, use `--pid` or `--instance` to select one.
+Busy or rejected updates retain the active policy. For options, see [`aw update`](#aw-update).
 
 These commands return the existing attachment/update JSON responses. Update
 also supports the prepared native modes in the linked guide; attachment remains
