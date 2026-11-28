@@ -2,14 +2,14 @@ pub mod journald;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 
 /// One line of the JSONL audit log written to `<mount>/.anolisa/audit.log`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,18 +171,62 @@ impl AuditLogger {
 
     pub fn new_with_journald(path: PathBuf, journald_enabled: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                MemoryError::Other(format!(
+                    "cannot create audit log dir {}: {e}",
+                    parent.display()
+                ))
+            })?;
         }
         // O_NOFOLLOW refuses to open the path if its final component is a
         // symlink, so a co-tenant process that swapped `audit.log` for
         // `→ /tmp/evil` cannot redirect our audit stream off-mount. The
         // audit log is the trust anchor for tamper-evidence (see CLAUDE.md
         // "信任链传导") so this open path matters as much as safe_fs does.
+        //
+        // The same co-tenant threat model applies to *reading*: the log
+        // records every tool call's paths and error text, so it is created
+        // owner-only (0600, mirroring the tokenless stash database) and a
+        // pre-existing group/other-readable file is tightened on open —
+        // files created by older builds are repaired on first run. The
+        // unconditional `set_permissions` below is what enforces that end
+        // state (and what the tests pin); `.mode(0o600)` is belt-and-braces
+        // for the open→fchmod window, during which the file is still empty.
         let f = OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-            .open(&path)?;
+            .open(&path)
+            .map_err(|e| {
+                MemoryError::Other(format!("cannot open audit log {}: {e}", path.display()))
+            })?;
+        // Verify the tightening instead of trusting `Ok(())`: some FUSE and
+        // network mounts accept a chmod without applying it, and the
+        // owner-only guarantee stated above would then be silently false at
+        // runtime. The mode re-check mirrors `service::probe_session_base`,
+        // with one deliberate difference in consequence: the session-base
+        // check only rejects a candidate, so `MemoryService::new` degrades
+        // to session = None, while this refusal propagates out of
+        // `MemoryService::new` into `main` and exits the process — a
+        // readable audit trail is not a degradation we can accept for the
+        // trust anchor. Going through the held descriptor also means the
+        // verification cannot be redirected at a different inode.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| {
+                MemoryError::Other(format!(
+                    "cannot tighten audit log {} to 0600: {e}",
+                    path.display()
+                ))
+            })?;
+        let mode = f
+            .metadata()
+            .map_err(|e| {
+                MemoryError::Other(format!("cannot stat audit log {}: {e}", path.display()))
+            })?
+            .permissions()
+            .mode();
+        ensure_owner_only(mode, &path)?;
         if journald_enabled {
             journald::probe();
         }
@@ -209,6 +253,27 @@ impl AuditLogger {
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
+}
+
+/// Refuse a post-chmod mode that still grants group/other access.
+///
+/// Extracted from the open path so the fail-closed decision is directly
+/// unit-testable: no test can make a real filesystem accept a chmod without
+/// applying it (the production trigger — some FUSE and network mounts), so
+/// without this seam a refactor could delete the check and stay green. The
+/// refusal is terminal for the whole server (it propagates through
+/// `MemoryService::new` into `main`), which is why the message names the
+/// remedy an operator needs rather than just the symptom.
+fn ensure_owner_only(mode: u32, path: &Path) -> Result<()> {
+    if mode & 0o077 != 0 {
+        return Err(MemoryError::Other(format!(
+            "audit log {} is still mode {:o} after chmod; refusing it as the audit trail; \
+             move memory.paths.base_dir onto a local filesystem",
+            path.display(),
+            mode & 0o777
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -323,6 +388,102 @@ mod tests {
             assert!(
                 is_sanitized_query_path(&path),
                 "{path} is a sanitized marker and must be recognized as one"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_is_created_owner_only() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("audit.log");
+        let log = AuditLogger::new(p.clone()).unwrap();
+        log.log(AuditEntry::new("mem_write").path("notes/a.md"))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the audit log must not be readable by group/other"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_tightens_pre_existing_permissions() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("audit.log");
+        // A log created by an older build (or a permissive umask at creation
+        // time) may already exist group/other-readable.
+        std::fs::write(&p, b"{\"legacy\":true}\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let log = AuditLogger::new(p.clone()).unwrap();
+        log.log(AuditEntry::new("mem_read").path("notes/a.md"))
+            .unwrap();
+        drop(log);
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "opening an existing audit log must repair its permissions"
+        );
+        // The pre-existing line and the new append both survive the reopen.
+        let contents = std::fs::read_to_string(&p).unwrap();
+        assert!(contents.contains("\"legacy\":true"));
+        assert!(contents.contains("mem_read"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_refuses_a_symlinked_path() {
+        // The O_NOFOLLOW in the open is what makes the tightening (and the
+        // audit stream itself) unredirectable: a co-tenant swapping
+        // `audit.log` for a symlink must be refused, not followed.
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("elsewhere.log");
+        std::fs::write(&target, b"not the audit log\n").unwrap();
+        let p = tmp.path().join("audit.log");
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+
+        let err = AuditLogger::new(p.clone())
+            .err()
+            .expect("a symlinked audit.log must be refused");
+        assert!(
+            err.to_string().contains("cannot open audit log"),
+            "unexpected error: {err}"
+        );
+        // The symlink and its target are both untouched.
+        assert!(
+            std::fs::symlink_metadata(&p)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_owner_only_refuses_group_or_other_bits() {
+        let p = Path::new("/tmp/audit.log");
+        // Only the group/other bits matter, matching the mask used by
+        // `service::probe_session_base`.
+        assert!(ensure_owner_only(0o600, p).is_ok());
+        assert!(ensure_owner_only(0o700, p).is_ok());
+        for mode in [0o640, 0o644, 0o666, 0o777] {
+            let err = ensure_owner_only(mode, p)
+                .err()
+                .unwrap_or_else(|| panic!("mode {mode:o} must be refused"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("/tmp/audit.log"),
+                "message must name the path: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("{mode:o}")),
+                "message must show the octal mode: {msg}"
             );
         }
     }
