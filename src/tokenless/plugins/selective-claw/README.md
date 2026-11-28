@@ -115,6 +115,7 @@ selective-claw/
 │   └── store/
 │       ├── message-store.ts  # 消息 CRUD + 全文搜索
 │       └── index.ts          # 重导出
+├── benchmark/                # 手动运行的迁移性能基准
 └── test/                     # Vitest 测试套件（64 个测试）
 ```
 
@@ -147,6 +148,22 @@ npm run build
 npm test                              # 全部 64 个测试
 npx vitest run test/assembler.test.ts # 运行单个测试套件
 ```
+
+### 迁移性能基准
+
+安装开发依赖后，手动比较旧归档回填的新旧 SQL：
+
+```bash
+node --experimental-sqlite benchmark/turn-backfill.mjs --rows=1000,2000,4000 --rounds=3
+```
+
+脚本使用临时文件数据库和生产连接配置，输出原始样本、中位数与查询计划，
+并核对消息、轮次和全文索引。偶数轮数取两个中间样本的均值。
+计时仅覆盖完整迁移，不包含数据准备，也不代表整个会话的性能。
+旧算法在较大归档上可能运行较久。
+
+此基准不由 `npm test` 自动执行，也没有 CI 耗时门槛或查询计划断言；
+修改回填 SQL 时应手动复跑，正确性测试通过不能单独排除执行成本回退。
 
 ## 许可证
 
