@@ -315,12 +315,19 @@ test-benchmark-rtk-probe:
 	@echo "==> Testing benchmark RTK version probe..."
 	bash tests/test-benchmark-rtk-version-probe.sh
 
-# L4 离线测试仅使用临时夹具，不启动 Docker 或模型调用。
+# L4 offline tests use temporary fixtures only; they start no Docker or model calls.
 .PHONY: test-benchmark-l4
 L4_TEST_PYTHON ?= python3
+# One definition for the guard and the pytest invocation, so they cannot drift.
+L4_BILLING_TEST ?= ../../benchmark/swe-runner/tests/unit/trace_extraction/test_openclaw_sqlite.py
 test-benchmark-l4:
+	@command -v $(L4_TEST_PYTHON) >/dev/null 2>&1 \
+	    || { echo "L4_TEST_PYTHON=$(L4_TEST_PYTHON) not found; set it to a Python >= 3.12 test venv" >&2; exit 1; }
+	@$(L4_TEST_PYTHON) -c 'import sys; sys.exit("L4 tests require Python >= 3.12; set L4_TEST_PYTHON to a test venv" if sys.version_info < (3, 12) else 0)'
+	@test -f $(L4_BILLING_TEST) \
+	    || { echo "swe-runner billing test moved; update L4_BILLING_TEST" >&2; exit 1; }
 	PYTHONPATH="$(abspath ../../benchmark/swe-runner/src)" $(L4_TEST_PYTHON) -m pytest -q \
-	    benchmark/l4-end-to-end/tests ../../benchmark/swe-runner/tests/unit/trace_extraction/test_openclaw_sqlite.py
+	    benchmark/l4-end-to-end/tests $(L4_BILLING_TEST)
 	@for script in benchmark/l4-end-to-end/assets/scripts/*.sh; do bash -n "$$script" || exit 1; done
 
 # Hook counterfactuals need the real binary to rule out fail-open success.

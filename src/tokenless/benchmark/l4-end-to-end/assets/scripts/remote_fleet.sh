@@ -371,7 +371,7 @@ REMOTE
 }
 
 phase_collect() {
-    local i host dest
+    local i host dest collect_failed=0
     for i in "${!HOSTS[@]}"; do
         host=${HOSTS[$i]}
         dest=$WORKSPACE/runs/host$((i + 1))-$host
@@ -385,26 +385,27 @@ phase_collect() {
             -e "ssh ${SSH_OPTS[*]}" \
             --exclude 'openclaw-profiles/' \
             "$L4_SSH_USER@$host:$L4_REMOTE_WORK/out/" "$dest/out/" \
-            || { say "collect FAILED on $host"; return 1; }
+            || { say "collect FAILED on $host"; collect_failed=1; }
         # 整个 eval 目录一起回收，不能丢掉与 predictions 绑定的点文件。
         if rsh "$host" "test -d $L4_REMOTE_WORK/eval"; then
             mkdir -p "$dest/eval"
             ${SSH_PW[@]+"${SSH_PW[@]}"} rsync -az --no-owner --no-group \
                 -e "ssh ${SSH_OPTS[*]}" \
                 "$L4_SSH_USER@$host:$L4_REMOTE_WORK/eval/" "$dest/eval/" \
-                || { say "evaluation collect FAILED on $host"; return 1; }
+                || { say "evaluation collect FAILED on $host"; collect_failed=1; }
         else
             say "no evaluation directory observed on $host; solve rate remains unverified"
         fi
         ${SSH_PW[@]+"${SSH_PW[@]}"} rsync -az --no-owner --no-group \
             -e "ssh ${SSH_OPTS[*]}" \
             "$L4_SSH_USER@$host:$L4_REMOTE_WORK/logs/" "$dest/logs/" \
-            || { say "log collection FAILED on $host; provenance is incomplete"; return 1; }
+            || { say "log collection FAILED on $host; provenance is incomplete"; collect_failed=1; }
         for f in prompts.provenance shard.provenance l4_instances.txt; do
             ${SSH_PW[@]+"${SSH_PW[@]}"} scp "${SSH_OPTS[@]}" \
                 "$L4_SSH_USER@$host:$L4_REMOTE_WORK/$f" "$dest/$f" >/dev/null 2>&1 || true
         done
     done
+    [ "$collect_failed" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------
