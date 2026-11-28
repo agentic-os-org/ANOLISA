@@ -60,15 +60,24 @@ def _provenance(module) -> tuple[str | None, bool | None, int | None]:
     src = getattr(module, "__file__", None)
     if not src:
         return None, None, None
+    source = pathlib.Path(src).resolve()
     root = None
-    for candidate in pathlib.Path(src).resolve().parents:
+    for candidate in source.parents:
         if (candidate / ".git").exists():
             root = candidate
             break
     if root is None:
         return None, None, None
-    base = ["git", "-c", f"safe.directory={root}", "-C", str(root)]
+    base = ["git", "--literal-pathspecs", "-c", f"safe.directory={root}", "-C", str(root)]
     try:
+        tracked = subprocess.run(
+            [*base, "ls-files", "--error-unmatch", "--", source.relative_to(root).as_posix()],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        if tracked.returncode != 0:
+            return None, None, None
         rev = subprocess.run(
             [*base, "rev-parse", "HEAD"],
             capture_output=True,
