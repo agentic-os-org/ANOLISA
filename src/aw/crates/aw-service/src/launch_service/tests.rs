@@ -145,6 +145,85 @@ fn snapshots_keep_original_bytes_and_reject_existing_content_changes() {
     assert!(files::snapshot(&paths, &document).is_err());
 }
 
+fn snapshot_config(state: &Path) -> (ServicePaths, Vec<u8>) {
+    let mut value = config();
+    value["spec"]["daemon"]["state_dir"] = json!(state);
+    let document = bytes(&value);
+    (resolve(&document, None).unwrap(), document)
+}
+
+#[test]
+fn failed_snapshot_write_leaves_directory_clean_for_retry() {
+    const CHILD_STATE: &str = "AW_TEST_FAILED_SNAPSHOT_WRITE_STATE";
+    if let Some(state) = std::env::var_os(CHILD_STATE) {
+        let (paths, document) = snapshot_config(Path::new(&state));
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: the limit pointers are valid. Signal and limit changes are
+        // confined to this child so parallel tests and the retry are unaffected.
+        unsafe {
+            libc::alarm(30);
+            assert_ne!(libc::signal(libc::SIGXFSZ, libc::SIG_IGN), libc::SIG_ERR);
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit), 0);
+            limit.rlim_cur = 16;
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+        }
+        let error = files::snapshot(&paths, &document).unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Io(e) if e.kind() == io::ErrorKind::FileTooLarge),
+            "{error}"
+        );
+        let path = paths
+            .state_dir
+            .join(format!("config-{}.yaml", paths.config_revision));
+        assert!(!path.try_exists().unwrap());
+        assert_eq!(fs::read_dir(&paths.state_dir).unwrap().count(), 0);
+        return;
+    }
+
+    let fixture = Fixture::new();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(std::thread::current().name().unwrap())
+        .env(CHILD_STATE, &fixture.0)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let (paths, document) = snapshot_config(&fixture.0);
+    let path = files::snapshot(&paths, &document).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), document);
+    assert_eq!(fs::metadata(path).unwrap().mode() & 0o7777, 0o400);
+}
+
+#[test]
+fn concurrent_snapshots_publish_one_complete_file() {
+    let fixture = Fixture::new();
+    let (paths, document) = snapshot_config(&fixture.0);
+    let expected = paths
+        .state_dir
+        .join(format!("config-{}.yaml", paths.config_revision));
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    let path = files::snapshot(&paths, &document).unwrap();
+                    assert_eq!(path, expected);
+                    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o400);
+                    assert_eq!(fs::read(path).unwrap(), document);
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+    assert_eq!(fs::read_dir(&paths.state_dir).unwrap().count(), 1);
+}
+
 #[test]
 fn startup_lock_obeys_deadline_and_rejects_symlink_replacement() {
     let fixture = Fixture::new();
