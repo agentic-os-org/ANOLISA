@@ -691,7 +691,12 @@ class DeliveryTests(unittest.TestCase):
         result = self.make("-n", "build")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("cargo build --release", result.stdout)
-        self.assertIn("cd dsh-plugin && npm install && npm run build", result.stdout)
+        build_commands = " ".join(result.stdout.replace("\\\n", " ").split())
+        self.assertRegex(
+            build_commands,
+            r"cd dsh-plugin && npm exec --yes --package=pnpm@\d+\.\d+\.\d+ -- "
+            r"pnpm install --frozen-lockfile --ignore-scripts && npm run build",
+        )
         self.assertIn("target/delivery/agentsight-enforcer", result.stdout)
         for target in (
             "stage-package",
