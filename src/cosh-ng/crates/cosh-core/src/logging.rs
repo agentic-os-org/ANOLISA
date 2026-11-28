@@ -34,6 +34,13 @@ pub fn init_logging(level: &str) {
         // so probe first and degrade to stderr: logging is optional persistence
         // and must never take the process down.
         if ensure_private_log_dir(dir).is_err() || !dir_is_writable(dir) {
+            // One line on real stderr, as the issue's suggested fix asks: the
+            // file logger is the thing that cannot start here, so without this
+            // notice the degradation would be silent.
+            eprintln!(
+                "[cosh-core] log directory {} is not writable; logging to stderr",
+                dir.display()
+            );
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
@@ -585,6 +592,59 @@ mod tests {
         let total = managed_log_bytes(&home.path().join(".copilot-shell/logs"));
         assert!(total > 0, "positive control: Core must write logs");
         assert!(total <= 20 * 1024 * 1024, "Core wrote {total} bytes");
+    }
+
+    /// The end-to-end contract from issue #3945: against a blocked log
+    /// directory, `init_logging` must not panic and must select the stderr
+    /// fallback, and the selection must be observable as the notice line on
+    /// the child's stderr, not merely as survival. The probe components are
+    /// covered by `unwritable_log_directory_is_detected` below; this test
+    /// runs the initializer itself, in a child process, because the installed
+    /// subscriber is a process-global the parent test process still needs.
+    #[test]
+    fn init_logging_falls_back_to_stderr_when_log_dir_is_a_file() {
+        if std::env::var_os("COSH_TEST_CORE_LOG_FALLBACK_CHILD").is_some() {
+            init_logging("info");
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        // `~/.copilot-shell/logs` occupied by a regular file: the
+        // deterministic unusable shape from the issue, holding for every uid,
+        // root included, unlike a mode-only denial.
+        let shell_dir = home.path().join(".copilot-shell");
+        std::fs::create_dir(&shell_dir).unwrap();
+        std::fs::write(shell_dir.join("logs"), b"").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logging::tests::init_logging_falls_back_to_stderr_when_log_dir_is_a_file",
+            ])
+            .arg("--nocapture")
+            .env("HOME", home.path())
+            .env("COSH_TEST_CORE_LOG_FALLBACK_CHILD", "1")
+            .env_remove("COSH_LOG")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "init_logging must not panic when the log path is blocked"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("log directory") && stderr.contains("logging to stderr"),
+            "the stderr fallback must announce itself, got: {stderr}"
+        );
+        let created: Vec<_> = std::fs::read_dir(&shell_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            created
+                .iter()
+                .all(|name| !name.to_string_lossy().starts_with("cosh-core.log")),
+            "no log file may be created under a blocked log path, found {created:?}"
+        );
     }
 
     #[test]
