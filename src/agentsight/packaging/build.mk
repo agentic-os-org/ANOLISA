@@ -36,7 +36,9 @@ build-all: build-frontend ## Build frontend, AgentSight, and enforcer
 
 .PHONY: build-dsh-plugin
 build-dsh-plugin: ## Build the optional DSH plugin resources
-	cd dsh-plugin && npm install && npm run build
+	cd dsh-plugin && \
+		npm exec --yes --package=pnpm@11.25.0 -- pnpm install --frozen-lockfile --ignore-scripts && \
+		npm run build
 
 .PHONY: build-mac
 build-mac: build-frontend ## Build macOS local viewer (serve only; no eBPF)
