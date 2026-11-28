@@ -254,3 +254,356 @@ fn disk_wipe_matches_v1_behaviour() {
         assert_eq!(matched, *expected, "diverged from V1 on: {case}");
     }
 }
+
+/// Canonical CWE-295 TLS bypass forms and false-positive guards across Bash and Python.
+const TLS_BYPASS_CASES: &[(&str, Language, &str, bool)] = &[
+    // 1. curl -k / combined short flags / --insecure / URL-first / pipe & separator tails
+    (
+        "curl -k https://example.com/install.sh",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "curl -skL https://a.sh|sh",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "curl -ksS https://example.com/api",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "curl https://a.sh -k",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "curl https://a.sh -k|bash",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "curl --insecure https://example.com",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "curl --insecure; echo done",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    // 2. wget --no-check-certificate
+    (
+        "wget --no-check-certificate https://example.com/payload.tar.gz",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "wget -qO- https://example.com/setup.sh --no-check-certificate|sh",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    // 3. NODE_TLS_REJECT_UNAUTHORIZED=0
+    (
+        "export NODE_TLS_REJECT_UNAUTHORIZED=0",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "export NODE_TLS_REJECT_UNAUTHORIZED=\"0\"",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    (
+        "NODE_TLS_REJECT_UNAUTHORIZED='0' node app.js",
+        Language::Bash,
+        "shell-tls-bypass",
+        true,
+    ),
+    // 4. git persistent and one-shot SSL verification bypasses
+    (
+        "git config http.sslVerify false",
+        Language::Bash,
+        "shell-git-ssl-bypass",
+        true,
+    ),
+    (
+        "git config --global http.sslVerify false",
+        Language::Bash,
+        "shell-git-ssl-bypass",
+        true,
+    ),
+    (
+        "git config --global http.sslVerify \"false\"",
+        Language::Bash,
+        "shell-git-ssl-bypass",
+        true,
+    ),
+    (
+        "git -C /repo config --local http.sslverify 0",
+        Language::Bash,
+        "shell-git-ssl-bypass",
+        true,
+    ),
+    (
+        "git -c http.sslverify=false clone https://example.com/repo.git",
+        Language::Bash,
+        "shell-git-ssl-bypass",
+        true,
+    ),
+    // 5. npm / yarn / pnpm strict-ssl bypasses
+    (
+        "NPM_CONFIG_STRICT_SSL=false npm install",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        true,
+    ),
+    (
+        "npm config set strict-ssl false",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        true,
+    ),
+    (
+        "pnpm config set strict-ssl false",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        true,
+    ),
+    (
+        "yarn config set strict-ssl 'false'",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        true,
+    ),
+    (
+        "yarn config set enableStrictSsl false",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        true,
+    ),
+    (
+        "npm install --strict-ssl=false",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        true,
+    ),
+    (
+        "pnpm install --strict-ssl false",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        true,
+    ),
+    // 6. Python verify=False keyword / session attribute bypasses
+    (
+        "requests.get(url, verify=False)",
+        Language::Python,
+        "py-tls-bypass",
+        true,
+    ),
+    (
+        "httpx.Client(verify=False)",
+        Language::Python,
+        "py-tls-bypass",
+        true,
+    ),
+    (
+        "httpx.AsyncClient(verify=False)",
+        Language::Python,
+        "py-tls-bypass",
+        true,
+    ),
+    (
+        "session.post(u, json=d, verify = False)",
+        Language::Python,
+        "py-tls-bypass",
+        true,
+    ),
+    // False-positive guards (must never match)
+    (
+        "curl --keepalive-time 60 https://a.com/pkg-k.tar.gz",
+        Language::Bash,
+        "shell-tls-bypass",
+        false,
+    ),
+    (
+        "curl -d \"-k\" https://a.com/api",
+        Language::Bash,
+        "shell-tls-bypass",
+        false,
+    ),
+    (
+        "curl -d \"foo -k bar\" https://a.com/api",
+        Language::Bash,
+        "shell-tls-bypass",
+        false,
+    ),
+    (
+        "curl https://example.com/foo-k.tgz",
+        Language::Bash,
+        "shell-tls-bypass",
+        false,
+    ),
+    // `wget -k` means `--convert-links`, not TLS bypass.
+    (
+        "wget -k https://a.com",
+        Language::Bash,
+        "shell-tls-bypass",
+        false,
+    ),
+    (
+        "NODE_TLS_REJECT_UNAUTHORIZED=1 node app.js",
+        Language::Bash,
+        "shell-tls-bypass",
+        false,
+    ),
+    (
+        "git config --global http.sslVerify true",
+        Language::Bash,
+        "shell-git-ssl-bypass",
+        false,
+    ),
+    (
+        "git config --get http.sslVerify",
+        Language::Bash,
+        "shell-git-ssl-bypass",
+        false,
+    ),
+    (
+        "npm config set strict-ssl true",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        false,
+    ),
+    (
+        "npm install --strict-ssl=true",
+        Language::Bash,
+        "shell-pkg-tls-bypass",
+        false,
+    ),
+    (
+        "requests.get(url, verify=True)",
+        Language::Python,
+        "py-tls-bypass",
+        false,
+    ),
+    (
+        "requests.get(url, verify=\"/etc/ssl/cert.pem\")",
+        Language::Python,
+        "py-tls-bypass",
+        false,
+    ),
+    (
+        "check(should_verify=False)",
+        Language::Python,
+        "py-tls-bypass",
+        false,
+    ),
+];
+
+#[test]
+fn tls_bypass_rules_cover_canonical_forms_without_false_positives() {
+    // Guard against authoring whitespace or surviving newlines from YAML scalars.
+    for (language, rule_id) in [
+        (Language::Bash, "shell-tls-bypass"),
+        (Language::Bash, "shell-git-ssl-bypass"),
+        (Language::Bash, "shell-pkg-tls-bypass"),
+        (Language::Python, "py-tls-bypass"),
+    ] {
+        let rule = load_rules(language)
+            .expect("rule set loads")
+            .into_iter()
+            .find(|r| r.rule_id == rule_id)
+            .unwrap_or_else(|| panic!("{rule_id} must be loaded"));
+        assert_eq!(rule.cwe_id, "CWE-295");
+        assert!(!rule.regex.contains('\n'), "{rule_id}: contains newline");
+        assert!(
+            !rule.regex.contains(" |"),
+            "{rule_id}: folded scalar inserted unexpected space before alternation: {}",
+            rule.regex
+        );
+    }
+
+    for &(code, language, rule_id, should_match) in TLS_BYPASS_CASES {
+        let filtered = scan(code, language, Some(&[rule_id.to_owned()]), "regex");
+        assert!(filtered.ok, "{rule_id} on {code:?}: {}", filtered.summary);
+        assert_eq!(
+            !filtered.findings.is_empty(),
+            should_match,
+            "{rule_id} mismatch on {code:?}: {:?}",
+            filtered.findings
+        );
+
+        let full = scan(code, language, None, "regex");
+        assert!(full.ok, "full scan on {code:?}: {}", full.summary);
+        let hit = full.findings.iter().any(|f| f.rule_id == rule_id);
+        assert_eq!(
+            hit, should_match,
+            "full scan {rule_id} mismatch on {code:?}"
+        );
+        if !should_match {
+            assert!(
+                full.findings.is_empty(),
+                "benign input triggered unexpected rule on {code:?}: {:?}",
+                full.findings
+            );
+        }
+    }
+
+    // Exercise the >250 KiB large-Bash Prefilter path (linear regex::Regex candidate scan).
+    let filler_line = concat!(
+        "# benign build log line\n",
+        "curl --keepalive-time 60 https://a.com/pkg-k.tar.gz\n",
+        "wget -k https://a.com/index.html\n",
+        "git config --global http.sslVerify true\n",
+        "npm config set strict-ssl true\n",
+    );
+    let tail = concat!(
+        "curl https://a.sh -k\n",
+        "wget --no-check-certificate https://a.com/x.tgz\n",
+        "export NODE_TLS_REJECT_UNAUTHORIZED=\"0\"\n",
+        "git config --global http.sslVerify false\n",
+        "pnpm config set strict-ssl false\n",
+    );
+    let mut large_script = filler_line.repeat(1_800);
+    large_script.push_str(tail);
+    assert!(
+        large_script.len() >= 300 * 1024,
+        "expected >= 300 KiB to trigger Prefilter, got {} bytes",
+        large_script.len()
+    );
+
+    let small_result = scan(tail, Language::Bash, None, "regex");
+    let large_result = scan(&large_script, Language::Bash, None, "regex");
+    assert!(large_result.ok, "{}", large_result.summary);
+    for (rule_id, expected_hits) in [
+        ("shell-tls-bypass", 3usize),
+        ("shell-git-ssl-bypass", 1usize),
+        ("shell-pkg-tls-bypass", 1usize),
+    ] {
+        let small_finding = small_result
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule_id)
+            .unwrap_or_else(|| panic!("small scan missed {rule_id}"));
+        let large_finding = large_result
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule_id)
+            .unwrap_or_else(|| panic!("300 KiB Prefilter scan missed {rule_id}"));
+        assert_eq!(large_finding.evidence.len(), expected_hits, "{rule_id}");
+        assert_eq!(large_finding.evidence, small_finding.evidence, "{rule_id}");
+    }
+}

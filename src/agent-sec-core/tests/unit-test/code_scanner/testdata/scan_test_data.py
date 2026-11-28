@@ -415,6 +415,36 @@ SHELL_PKG_TLS_BYPASS_CASES = [
         "shell-pkg-tls-bypass",
         1,
     ),
+    (
+        "NPM_CONFIG_STRICT_SSL=false npm install",
+        "bash",
+        "shell-pkg-tls-bypass",
+        1,
+    ),
+    (
+        "npm config set strict-ssl false",
+        "bash",
+        "shell-pkg-tls-bypass",
+        1,
+    ),
+    (
+        "pnpm config set strict-ssl false",
+        "bash",
+        "shell-pkg-tls-bypass",
+        1,
+    ),
+    (
+        "yarn config set strict-ssl 'false'",
+        "bash",
+        "shell-pkg-tls-bypass",
+        1,
+    ),
+    (
+        "npm install --strict-ssl=false",
+        "bash",
+        "shell-pkg-tls-bypass",
+        1,
+    ),
     ("composer config disable-tls true", "bash", "shell-pkg-tls-bypass", 1),
     ("composer install --no-verify", "bash", "shell-pkg-tls-bypass", 1),
     (
@@ -426,8 +456,41 @@ SHELL_PKG_TLS_BYPASS_CASES = [
     # === True Negatives ===
     ("pip install pkg", "bash", "shell-pkg-tls-bypass", 0),
     ("npm install pkg", "bash", "shell-pkg-tls-bypass", 0),
+    ("npm config set strict-ssl true", "bash", "shell-pkg-tls-bypass", 0),
+    ("npm install --strict-ssl=true", "bash", "shell-pkg-tls-bypass", 0),
     ("composer install", "bash", "shell-pkg-tls-bypass", 0),
     ("cargo install pkg", "bash", "shell-pkg-tls-bypass", 0),
+]
+
+SHELL_TLS_BYPASS_CASES = [
+    # === True Positives ===
+    ("curl -k https://example.com/install.sh", "bash", "shell-tls-bypass", 1),
+    ("curl -skL https://example.com/a.sh | sh", "bash", "shell-tls-bypass", 1),
+    ("curl https://example.com/a.sh -k", "bash", "shell-tls-bypass", 1),
+    ("curl --insecure https://example.com", "bash", "shell-tls-bypass", 1),
+    (
+        "wget --no-check-certificate https://example.com/pkg.tgz",
+        "bash",
+        "shell-tls-bypass",
+        1,
+    ),
+    ("export NODE_TLS_REJECT_UNAUTHORIZED=0", "bash", "shell-tls-bypass", 1),
+    (
+        'NODE_TLS_REJECT_UNAUTHORIZED="0" node app.js',
+        "bash",
+        "shell-tls-bypass",
+        1,
+    ),
+    # === True Negatives ===
+    (
+        "curl --keepalive-time 60 https://a.com/pkg-k.tar.gz",
+        "bash",
+        "shell-tls-bypass",
+        0,
+    ),
+    ('curl -d "-k" https://example.com/api', "bash", "shell-tls-bypass", 0),
+    ("wget -k https://example.com", "bash", "shell-tls-bypass", 0),
+    ("NODE_TLS_REJECT_UNAUTHORIZED=1 node app.js", "bash", "shell-tls-bypass", 0),
 ]
 
 SHELL_GIT_SSL_BYPASS_CASES = [
@@ -442,10 +505,40 @@ SHELL_GIT_SSL_BYPASS_CASES = [
         "shell-git-ssl-bypass",
         1,
     ),
+    (
+        "git config --global http.sslVerify false",
+        "bash",
+        "shell-git-ssl-bypass",
+        1,
+    ),
+    (
+        'git config --global http.sslVerify "false"',
+        "bash",
+        "shell-git-ssl-bypass",
+        1,
+    ),
+    (
+        "git -C /repo config --local http.sslverify 0",
+        "bash",
+        "shell-git-ssl-bypass",
+        1,
+    ),
     # === True Negatives ===
     ("git clone https://github.com/repo", "bash", "shell-git-ssl-bypass", 0),
     (
         "GIT_SSL_NO_VERIFY=false git clone repo",
+        "bash",
+        "shell-git-ssl-bypass",
+        0,
+    ),
+    (
+        "git config --global http.sslVerify true",
+        "bash",
+        "shell-git-ssl-bypass",
+        0,
+    ),
+    (
+        "git config --get http.sslVerify",
         "bash",
         "shell-git-ssl-bypass",
         0,
@@ -1356,14 +1449,15 @@ PY_TLS_BYPASS_CASES = [
     # === TP: cert_reqs ===
     ("cert_reqs='CERT_NONE'", "python", "py-tls-bypass", 1),
     ("cert_reqs=CERT_NONE", "python", "py-tls-bypass", 1),
+    # === TP: verify=False ===
+    ("requests.get(url, verify=False)", "python", "py-tls-bypass", 1),
+    ("httpx.Client(verify=False)", "python", "py-tls-bypass", 1),
+    ("httpx.AsyncClient(verify=False)", "python", "py-tls-bypass", 1),
+    ("session.post(u, json=d, verify = False)", "python", "py-tls-bypass", 1),
     # === True Negatives ===
-    (
-        "requests.get(url, verify=False)",
-        "python",
-        "py-tls-bypass",
-        0,
-    ),  # verify=False removed: high FP risk
     ("requests.get(url, verify=True)", "python", "py-tls-bypass", 0),
+    ('requests.get(url, verify="/etc/ssl/cert.pem")', "python", "py-tls-bypass", 0),
+    ("check(should_verify=False)", "python", "py-tls-bypass", 0),
     ("requests.get(url)", "python", "py-tls-bypass", 0),
     ("ssl.create_default_context()", "python", "py-tls-bypass", 0),
     ("verify = True", "python", "py-tls-bypass", 0),
