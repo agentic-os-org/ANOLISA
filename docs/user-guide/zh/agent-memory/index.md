@@ -85,9 +85,35 @@ make install       # install to ~/.local
 运行时仅支持 Linux（依赖 user_namespace、mount(2)、cgroup v2、inotify、journald）。macOS / Windows 请用远端构建：
 
 ```bash
-make remote-build   # push 分支并 ssh 到 Linux 主机执行 cargo build
-make remote-test    # 同上 + 跑测试 + clippy
+make remote-build   # push memory 分支并 ssh 到 Linux 主机执行 cargo build
+make remote-test    # 同上 + 适配器安装测试 + cargo test --release + clippy
 ```
+
+这两个目标通过 SSH 驱动 Linux 主机上的一个专用 checkout。默认值定义在组件
+`Makefile` 中，可按次调用覆盖：
+
+| 变量 | 默认值 | 含义 |
+|------|--------|------|
+| `REMOTE_REPO` | `shiloong` | 本地 monorepo checkout 中的 Git remote 名 |
+| `REMOTE_BRANCH` | `memory` | 被 push、并在主机上检出的分支 |
+| `REMOTE_HOST` | `aos2` | Linux 主机的 SSH 目标 |
+| `REMOTE_PATH` | `/root/anolisa` | 主机上的专用 monorepo checkout |
+
+前置条件：本地 monorepo checkout 中存在名为 `REMOTE_REPO` 的 Git remote、本地
+存在 `REMOTE_BRANCH` 分支、能通过 SSH 访问 `REMOTE_HOST`，且主机上在
+`REMOTE_PATH` 处有一个完整的 monorepo checkout、其 remote 与 `REMOTE_REPO`
+一致。
+
+每个目标先把本地 `REMOTE_BRANCH` push 到 `REMOTE_REPO`（`remote-push`），再
+通过 SSH 连接：主机 fetch `REMOTE_REPO/REMOTE_BRANCH` 并把 `REMOTE_PATH`
+hard-reset 到该提交，然后执行构建；`remote-test` 则在此基础上执行适配器安装
+测试、`cargo test --release` 和 `-D warnings` 的 clippy。远端 checkout 有未
+提交改动时会拒绝 reset，避免 `remote-test` 冲掉主机上的调试现场；确认无用时
+可设 `REMOTE_FORCE=1` 覆盖。由于 reset 是硬重置，请把主机 checkout 专用于此
+流程，push 前先提交本地改动。
+
+在 Linux 上请改用本地构建与测试：在 `src/agent-memory` 运行 `make build` 和
+`make test`（见上文[源码构建](#源码构建开发者)）。
 
 ---
 
