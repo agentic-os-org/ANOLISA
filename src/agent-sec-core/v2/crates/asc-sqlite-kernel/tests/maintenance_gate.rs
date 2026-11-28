@@ -285,5 +285,21 @@ fn a_marker_write_failure_is_not_reported_as_not_due() {
         ),
         "a marker write failure is an error - the gate did not advance and the caller must retry"
     );
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("read dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.starts_with("events.db.maintenance.")
+                && std::path::Path::new(name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+        })
+        .collect();
+    assert_eq!(
+        leftovers,
+        Vec::<String>::new(),
+        "a failed marker write must not strand its temporary"
+    );
     sink.close(1002.0);
 }
