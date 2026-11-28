@@ -45,7 +45,7 @@ def _token_count(value: Any) -> int | None:
         return None
     try:
         count = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return count if count >= 0 else None
 
@@ -66,14 +66,20 @@ def session_totals(path: Path) -> dict:
             continue
         input_tokens = _token_count(u.get("input"))
         output_tokens = _token_count(u.get("output"))
-        if input_tokens is not None and output_tokens is not None:
+        total_tokens = _token_count(u.get("totalTokens", 0))
+        cache_read = _token_count(u.get("cacheRead", 0))
+        cache_write = _token_count(u.get("cacheWrite", 0))
+        if all(
+            count is not None
+            for count in (input_tokens, output_tokens, total_tokens, cache_read, cache_write)
+        ):
             measured += 1
         in_sum += input_tokens or 0
         out_sum += output_tokens or 0
-        total_sum += int(u.get("totalTokens", 0) or 0)
-        cache_r += int(u.get("cacheRead", 0) or 0)
-        cache_w += int(u.get("cacheWrite", 0) or 0)
-        last_total = u.get("totalTokens")
+        total_sum += total_tokens or 0
+        cache_r += cache_read or 0
+        cache_w += cache_write or 0
+        last_total = total_tokens if "totalTokens" in u else None
     return {
         "assistants": n_assist,
         "has_usage_evidence": n_assist > 0 and measured == n_assist,
@@ -118,9 +124,15 @@ def trace_totals(path: Path) -> dict:
         "end_total": None,
     }
     if end:
-        out["end_input"] = end.get("model_input_tokens")
-        out["end_output"] = end.get("model_output_tokens")
-        out["end_total"] = end.get("total_tokens")
+        for source, target in (
+            ("model_input_tokens", "end_input"),
+            ("model_output_tokens", "end_output"),
+            ("total_tokens", "end_total"),
+        ):
+            if source in end:
+                out[target] = _token_count(end[source])
+                if out[target] is None:
+                    out["has_usage_evidence"] = False
     return out
 
 

@@ -213,7 +213,16 @@ def test_cli_compares_only_measured_usage(tmp_path: Path, case: str, status: str
     elif case == "trace-end-only":
         trace_rows = [trace_end]
     elif case == "numeric-string-zero":
-        session["message"]["usage"] = {"input": "0", "output": "0"}
+        session["message"]["usage"] = {
+            "input": "0",
+            "output": "0",
+            "totalTokens": "0",
+            "cacheRead": "0",
+            "cacheWrite": "0",
+        }
+        trace_end.update(
+            model_input_tokens="0", model_output_tokens="0", total_tokens="0"
+        )
     elif case == "mismatch":
         session["message"]["usage"]["input"] = 1
 
@@ -243,3 +252,96 @@ def test_cli_compares_only_measured_usage(tmp_path: Path, case: str, status: str
     if status == "ok":
         fields = ("session_input", "session_output", "trace_input", "trace_output")
         assert [row[field] for field in fields] == ["0"] * 4
+
+
+OPTIONAL_COUNTERS = [
+    ("session_totals", "totalTokens", "total"),
+    ("session_totals", "cacheRead", "cache_read"),
+    ("session_totals", "cacheWrite", "cache_write"),
+    ("trace_totals", "model_input_tokens", "end_input"),
+    ("trace_totals", "model_output_tokens", "end_output"),
+    ("trace_totals", "total_tokens", "end_total"),
+]
+
+
+@pytest.mark.parametrize(("reader", "field", "result_field"), OPTIONAL_COUNTERS)
+@pytest.mark.parametrize("value", [0, "0", 7, "7"])
+def test_optional_counts_preserve_integer_values(
+    tmp_path: Path, reader: str, field: str, result_field: str, value: Any
+) -> None:
+    record = _record(reader)
+    records = [record]
+    if reader == "session_totals":
+        record["message"]["usage"][field] = value
+    else:
+        records.append({"type": "trace_end", field: value})
+    path = tmp_path / "counts.jsonl"
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in records), encoding="utf-8"
+    )
+    result = getattr(MODULE, reader)(path)
+    assert result["has_usage_evidence"] is True
+    assert result[result_field] == int(value)
+
+
+@pytest.mark.parametrize(("reader", "field", "_result_field"), OPTIONAL_COUNTERS)
+@pytest.mark.parametrize(
+    "value",
+    [None, True, -1, 1.5, "unavailable", float("inf"), float("nan")],
+)
+def test_cli_keeps_healthy_trials_after_invalid_optional_count(
+    tmp_path: Path, reader: str, field: str, _result_field: str, value: Any
+) -> None:
+    run = tmp_path / "run-one"
+    sessions = run / "sessions"
+    sessions.mkdir(parents=True)
+    for stem in ("a-invalid", "b-healthy"):
+        session = _record("session_totals")
+        session["message"]["usage"].update(cacheRead=0, cacheWrite=0)
+        trace = _record("trace_totals")
+        trace_end = {
+            "type": "trace_end",
+            "model_input_tokens": 3,
+            "model_output_tokens": 2,
+            "total_tokens": 5,
+        }
+        if stem == "a-invalid":
+            counters = (
+                session["message"]["usage"] if reader == "session_totals" else trace_end
+            )
+            counters[field] = value
+        (sessions / f"{stem}.session.jsonl").write_text(
+            json.dumps(session) + "\n", encoding="utf-8"
+        )
+        (run / f"{stem}.jsonl").write_text(
+            json.dumps(trace) + "\n" + json.dumps(trace_end) + "\n", encoding="utf-8"
+        )
+
+    output = tmp_path / "audit.csv"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--root",
+            str(tmp_path),
+            "--detail",
+            "--csv",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "  total_pairs: 2\n" in result.stdout
+    assert "  matched: 1\n" in result.stdout
+    assert "  insufficient_evidence: 1\n" in result.stdout
+    assert "[ok] run-one/b-healthy" in result.stdout
+    with output.open(encoding="utf-8", newline="") as source:
+        rows = list(csv.DictReader(source))
+    assert [(row["trial"], row["status"]) for row in rows] == [
+        ("a-invalid", "insufficient_evidence"),
+        ("b-healthy", "ok"),
+    ]
