@@ -33,6 +33,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use skillfs_core::SharedSkillStore;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -83,6 +85,24 @@ impl ActiveTarget {
         }
     }
 
+    /// Find the owning skill directory relative to the given root.
+    pub(crate) fn relative_skill_dir<'a>(&'a self, root: &Path) -> Option<&'a Path> {
+        match self {
+            Self::Current { source_dir } => source_dir.strip_prefix(root).ok(),
+            Self::Snapshot { snapshot_dir, .. } => {
+                let relative = snapshot_dir.strip_prefix(root).ok()?;
+                // Decision-command can select a nested path within versions.
+                let versions = relative
+                    .ancestors()
+                    .skip(1)
+                    .filter(|path| path.ends_with(LEDGER_SNAPSHOT_PREFIX))
+                    .last()?;
+                versions.parent()?.parent()
+            }
+            Self::Hidden { .. } => None,
+        }
+    }
+
     /// `true` when the target should be visible to `readdir`.
     pub fn is_visible(&self) -> bool {
         !matches!(self, ActiveTarget::Hidden { .. })
@@ -91,13 +111,7 @@ impl ActiveTarget {
 
 /// Errors building an [`ActiveTarget`] from a [`LedgerResolveResult`].
 ///
-/// All variants reflect an invariant that the strict ledger validator
-/// upstream **should** have caught. They are kept as explicit errors
-/// (rather than panics or `unwrap`s) because the conversion is the only
-/// place where the ledger contract meets a real on-disk `source_root` —
-/// e.g. the ledger could send a perfectly-shaped `target` whose parent
-/// `source_root` is empty. Centralized here so the consumer can render
-/// a single class of "ledger said X but we cannot honor it" errors.
+/// A valid ledger response can still fail to map to the current source.
 #[derive(Debug)]
 pub enum ActiveMappingError {
     /// Ledger returned `decision=fallback` but did not include a target.
@@ -106,6 +120,12 @@ pub enum ActiveMappingError {
     MissingFallbackTarget { skill_name: String },
     /// `source_root` was empty so we cannot build an absolute source dir.
     EmptySourceRoot,
+    /// The store changed owners while the provider was resolving the skill.
+    StaleSkillDir {
+        skill_name: String,
+        expected: PathBuf,
+        actual: PathBuf,
+    },
 }
 
 impl std::fmt::Display for ActiveMappingError {
@@ -120,6 +140,16 @@ impl std::fmt::Display for ActiveMappingError {
             ActiveMappingError::EmptySourceRoot => {
                 write!(f, "cannot build active target with empty source root")
             }
+            ActiveMappingError::StaleSkillDir {
+                skill_name,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "stale directory for skill '{skill_name}': expected {}, got {}",
+                expected.display(),
+                actual.display()
+            ),
         }
     }
 }
@@ -213,6 +243,8 @@ impl From<ActiveMappingError> for ActiveResolverError {
 /// boring on purpose.
 pub struct ActiveSkillResolver {
     source_root: PathBuf,
+    target_root: PathBuf,
+    store: Option<SharedSkillStore>,
     entries: RwLock<HashMap<String, ActiveTarget>>,
     /// Test-only counter of [`Self::get`] calls, used to assert the
     /// pinned-resolution boundary consults the resolver exactly once. Compiled
@@ -263,8 +295,11 @@ impl ActiveSkillResolver {
     /// [`ActiveSkillResolver::set_from_resolve`] call joins the ledger's
     /// relative target onto `<source_root>/<skill_name>`.
     pub fn new(source_root: impl Into<PathBuf>) -> Self {
+        let source_root = source_root.into();
         Self {
-            source_root: source_root.into(),
+            target_root: source_root.clone(),
+            source_root,
+            store: None,
             entries: RwLock::new(HashMap::new()),
             #[cfg(test)]
             get_calls: AtomicU64::new(0),
@@ -277,6 +312,44 @@ impl ActiveSkillResolver {
     /// for the event handler that wants to render absolute paths.
     pub fn source_root(&self) -> &Path {
         &self.source_root
+    }
+
+    /// Set the root used for activation targets loaded through a backing mount.
+    pub fn with_target_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.target_root = root.into();
+        self
+    }
+
+    /// Root used by activation targets, which defaults to the source root.
+    pub fn target_root(&self) -> &Path {
+        &self.target_root
+    }
+
+    /// Use the flat view's store to locate skills that live under a category.
+    /// Read the store when resolving paths so new and moved skills are visible
+    /// to activation reload and decision refresh.
+    pub fn with_store(mut self, store: SharedSkillStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Return the physical directory for this skill id under the source root.
+    pub fn skill_dir(&self, skill_id: &str) -> PathBuf {
+        self.skill_dir_under(&self.source_root, skill_id)
+    }
+
+    pub(super) fn skill_dir_under(&self, root: &Path, skill_id: &str) -> PathBuf {
+        if let Some(store) = &self.store {
+            if let Some(relative) = store
+                .read()
+                .get(skill_id)
+                .and_then(|entry| entry.source_path.parent())
+                .and_then(|dir| dir.strip_prefix(&self.source_root).ok())
+            {
+                return root.join(relative);
+            }
+        }
+        root.join(skill_id)
     }
 
     /// Insert or replace the target for `skill_name`. Pure setter — no
@@ -292,9 +365,8 @@ impl ActiveSkillResolver {
     /// `result.skill_name` equals the canonical SkillFS identity for
     /// the request that produced the response.
     ///
-    /// Production runtime callers (the CLI bootstrap, the refresh
-    /// controller, the inbox install pipeline) MUST go through
-    /// [`Self::set_from_resolve_for_expected`] so a buggy or hostile
+    /// Production runtime callers MUST use one of the checked setters
+    /// so a buggy or hostile
     /// provider cannot key the active mapping off a different name.
     /// This method is kept public only for seeding, tests, and
     /// future hook handlers that already have a typed `ActiveTarget` /
@@ -321,8 +393,7 @@ impl ActiveSkillResolver {
     /// success the target is installed under the canonical key just
     /// like [`Self::set_from_resolve`].
     ///
-    /// This is the only entry point production runtime code paths
-    /// should use to consume a resolve result. It guarantees that:
+    /// The checked setters guarantee that:
     ///
     /// * `/skills/<expected>` is the only path key the response can
     ///   ever produce — a mismatched `skillName` cannot create
@@ -334,13 +405,52 @@ impl ActiveSkillResolver {
         expected: &str,
         result: &LedgerResolveResult,
     ) -> Result<ActiveTarget, ActiveResolverError> {
+        self.install_resolve(expected, self.skill_dir(expected), result)
+    }
+
+    /// Install a response for the physical directory passed to the provider.
+    /// Check the requested skill id, directory basename, and current store owner.
+    pub fn set_from_resolve_for_skill_dir(
+        &self,
+        skill_id: &str,
+        skill_dir: PathBuf,
+        result: &LedgerResolveResult,
+    ) -> Result<ActiveTarget, ActiveResolverError> {
+        let basename = skill_dir.file_name().and_then(|name| name.to_str());
+        if basename != Some(result.skill_name.as_str()) {
+            return Err(ActiveResolverError::SkillNameMismatch {
+                expected: basename.unwrap_or_default().to_owned(),
+                actual: result.skill_name.clone(),
+            });
+        }
+        if self.store.is_some() && result.skill_name == skill_id {
+            let expected = self.skill_dir(skill_id);
+            if skill_dir != expected {
+                return Err(ActiveMappingError::StaleSkillDir {
+                    skill_name: skill_id.to_owned(),
+                    expected,
+                    actual: skill_dir,
+                }
+                .into());
+            }
+        }
+        self.install_resolve(skill_id, skill_dir, result)
+    }
+
+    fn install_resolve(
+        &self,
+        expected: &str,
+        skill_dir: PathBuf,
+        result: &LedgerResolveResult,
+    ) -> Result<ActiveTarget, ActiveResolverError> {
         if result.skill_name != expected {
             return Err(ActiveResolverError::SkillNameMismatch {
                 expected: expected.to_string(),
                 actual: result.skill_name.clone(),
             });
         }
-        let target = self.set_from_resolve(result)?;
+        let target = self.target_from_resolve_in_dir(skill_dir, result)?;
+        self.set(expected, target.clone());
         Ok(target)
     }
 
@@ -350,10 +460,17 @@ impl ActiveSkillResolver {
         &self,
         result: &LedgerResolveResult,
     ) -> Result<ActiveTarget, ActiveMappingError> {
+        self.target_from_resolve_in_dir(self.skill_dir(&result.skill_name), result)
+    }
+
+    fn target_from_resolve_in_dir(
+        &self,
+        skill_dir: PathBuf,
+        result: &LedgerResolveResult,
+    ) -> Result<ActiveTarget, ActiveMappingError> {
         if self.source_root.as_os_str().is_empty() {
             return Err(ActiveMappingError::EmptySourceRoot);
         }
-        let skill_dir = self.source_root.join(&result.skill_name);
         match result.decision {
             LedgerDecision::Current => Ok(ActiveTarget::Current {
                 source_dir: skill_dir,
@@ -667,6 +784,49 @@ mod tests {
             }
         );
         assert_eq!(r.get("demo-weather").unwrap(), target);
+    }
+
+    #[test]
+    fn resolve_for_previous_store_owner_is_rejected() {
+        use skillfs_core::{parser::parse_skill_file, store::SkillStore};
+
+        let source = tempfile::tempdir().unwrap();
+        let name = "demo-weather";
+        let old_dir = source.path().join("cat_a").join(name);
+        let new_dir = source.path().join("cat_b").join(name);
+        let store = std::sync::Arc::new(RwLock::new(SkillStore::new()));
+        let load = |dir: &Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            let manifest = dir.join("SKILL.md");
+            std::fs::write(
+                &manifest,
+                "---\nname: demo-weather\ndescription: Test skill\n---\n",
+            )
+            .unwrap();
+            store.write().upsert(parse_skill_file(&manifest).unwrap());
+        };
+        let resolver = ActiveSkillResolver::new(source.path()).with_store(store.clone());
+        load(&old_dir);
+        let current = make_current();
+        let approved = resolver
+            .set_from_resolve_for_skill_dir(name, old_dir.clone(), &current)
+            .unwrap();
+
+        load(&new_dir);
+        for decision in [current, make_fallback()] {
+            let err = resolver
+                .set_from_resolve_for_skill_dir(name, old_dir.clone(), &decision)
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                ActiveResolverError::Mapping(ActiveMappingError::StaleSkillDir {
+                    skill_name,
+                    expected,
+                    actual,
+                }) if skill_name == name && expected == new_dir && actual == old_dir
+            ));
+            assert_eq!(resolver.get(name).as_ref(), Some(&approved));
+        }
     }
 
     #[test]

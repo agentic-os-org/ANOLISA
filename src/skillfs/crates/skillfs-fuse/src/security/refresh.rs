@@ -386,11 +386,11 @@ impl Inner {
     fn run_one(&self, state: PendingState) {
         let observation = state.observation;
         let skill = observation.skill_name.clone();
-        let skill_dir = self.resolver.source_root().join(&skill);
+        let skill_dir = self.resolver.skill_dir(&skill);
         let fs_hook = observation.fs_hook_label();
         match self.adapter.scan(&skill_dir) {
             Ok(()) => match self.adapter.resolve(&skill_dir) {
-                Ok(parsed) => self.handle_resolve_ok(&skill, &fs_hook, parsed),
+                Ok(parsed) => self.handle_resolve_ok(&skill, &fs_hook, skill_dir, parsed),
                 Err(err) => {
                     self.handle_decision_err(&skill, &fs_hook, "scan -> resolve failed", &err)
                 }
@@ -402,7 +402,7 @@ impl Inner {
     }
 
     /// Install a successful resolve through the checked
-    /// [`ActiveSkillResolver::set_from_resolve_for_expected`] API.
+    /// [`ActiveSkillResolver::set_from_resolve_for_skill_dir`] API.
     ///
     /// The checked API enforces the N1/D1.6 canonical identity contract
     /// at the resolver boundary, so a `skillName` mismatch here cannot
@@ -415,9 +415,18 @@ impl Inner {
     /// keeps the existing "ledger target could not be installed"
     /// hide-on-failure path so a structurally-bad active target never
     /// degrades into a current decision.
-    fn handle_resolve_ok(&self, skill: &str, fs_hook: &str, result: LedgerResolveResult) {
+    fn handle_resolve_ok(
+        &self,
+        skill: &str,
+        fs_hook: &str,
+        skill_dir: PathBuf,
+        result: LedgerResolveResult,
+    ) {
         let status_label = result.status.as_str().to_string();
-        match self.resolver.set_from_resolve_for_expected(skill, &result) {
+        match self
+            .resolver
+            .set_from_resolve_for_skill_dir(skill, skill_dir, &result)
+        {
             Ok(target) => {
                 info!(
                     skill,

@@ -728,7 +728,7 @@ pub fn bootstrap_activation(
 ) -> Vec<(String, Result<ActiveTarget, ActivationError>)> {
     let mut results = Vec::with_capacity(skill_names.len());
     for name in skill_names {
-        let skill_dir = source_root.join(name);
+        let skill_dir = resolver.skill_dir_under(source_root, name);
         let outcome = load_activation_prefer_xattr(&skill_dir);
         let target = match &outcome {
             Ok(t) => t.clone(),

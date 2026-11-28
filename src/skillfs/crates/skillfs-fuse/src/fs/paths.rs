@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use fuser::{FUSE_ROOT_ID, FileType};
 
 use super::SkillFs;
+use crate::SkillLayout;
 use crate::path::{PathType, is_hermes_management_path, is_skill_discover_path};
 use crate::security::{
     inbox::{is_inbox_dir_name, is_valid_inbox_skill_name},
@@ -76,17 +77,31 @@ impl SkillFs {
 
     /// Resolve the physical directory containing a skill's files.
     ///
-    /// In in-place mode uses `source_base()` (the pre-opened fd path) so
-    /// reads bypass the FUSE mount layer.
+    /// Hermes top-level slots are independent of categorized skills with
+    /// the same leaf name. Only Flat uses the store to locate the owner.
     pub(super) fn skill_physical_dir(&self, skill_name: &str) -> PathBuf {
-        if self.in_place {
-            // Always go through the fd to bypass the FUSE mount.
-            self.source_base().join(skill_name)
-        } else {
-            self.skill_source_path(skill_name)
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                .unwrap_or_else(|| self.source.join(skill_name))
+        let flat_slot = self.source_base().join(skill_name);
+        if self.skill_layout == SkillLayout::Hermes {
+            return flat_slot;
         }
+        if let Some(path) = self.flat_skill_source_path(skill_name) {
+            if let Some(dir) = path.parent() {
+                let physical = self
+                    .activation_fd_path(dir)
+                    .unwrap_or_else(|| dir.to_path_buf());
+                // In-place authoring without activation has a direct path to an
+                // existing root slot even when a category owns the store key.
+                if self.in_place
+                    && self.active_resolver.is_none()
+                    && physical != flat_slot
+                    && flat_slot.is_dir()
+                {
+                    return flat_slot;
+                }
+                return physical;
+            }
+        }
+        flat_slot
     }
 
     /// The in-place mount's `/proc/self/fd/{n}` spelling of the source
@@ -98,6 +113,14 @@ impl SkillFs {
         })
     }
 
+    /// Address a source path through the pre-opened fd in-place.
+    /// Separate backing-root paths need no rewrite.
+    pub(super) fn activation_fd_path(&self, path: &Path) -> Option<PathBuf> {
+        let root = self.source_alias_root()?;
+        let relative = path.strip_prefix(&self.source).ok()?;
+        Some(root.join(relative))
+    }
+
     /// Rewrite a physical path's in-place fd alias back to the canonical
     /// source-root spelling.
     ///
@@ -105,13 +128,9 @@ impl SkillFs {
     /// (the pre-opened `/proc/self/fd/{n}` dirfd) so it bypasses the FUSE
     /// over-mount, but the store keys and compares entries by
     /// `source_path`, and the initial scan records the real source-root
-    /// spelling. Inserting the fd spelling would make one manifest look
-    /// like two different sources: the duplicate-name rule would compare
-    /// `/home/.../SKILL.md` against `/proc/self/fd/N/SKILL.md` and drop
-    /// or steal the post-write refresh by alias ordering, so the live
-    /// store would diverge from a fresh discovery scan. Store identity
-    /// and ordering always use the canonical spelling; only the I/O keeps
-    /// the fd alias.
+    /// spelling. Using the fd alias in the store would make the duplicate-name
+    /// rule treat the post-write refresh as a second source. Store identity
+    /// and ordering use the canonical spelling so they agree with a fresh scan.
     pub(super) fn canonical_source_spelling(&self, physical: &Path) -> PathBuf {
         if let Some(alias) = self.source_alias_root() {
             if let Ok(rest) = physical.strip_prefix(&alias) {
@@ -173,8 +192,8 @@ impl SkillFs {
         true
     }
 
-    /// Resolve the physical SKILL.md path for a skill via the store.
-    pub(super) fn skill_source_path(&self, skill_name: &str) -> Option<PathBuf> {
+    /// Resolve the Flat view's SKILL.md through the store's leaf owner.
+    pub(super) fn flat_skill_source_path(&self, skill_name: &str) -> Option<PathBuf> {
         let store = self.store.read();
         store.get(skill_name).map(|e| e.source_path.clone())
     }
@@ -190,13 +209,6 @@ impl SkillFs {
             let store = self.store.read();
             store.list().iter().map(|s| s.to_string()).collect()
         }
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn skill_physical_path(&self, skill_name: &str) -> Option<PathBuf> {
-        let store = self.store.read();
-        let entry = store.get(skill_name)?;
-        Some(entry.source_path.parent()?.to_path_buf())
     }
 
     /// Build the canonical FUSE path from a parent inode and child name.

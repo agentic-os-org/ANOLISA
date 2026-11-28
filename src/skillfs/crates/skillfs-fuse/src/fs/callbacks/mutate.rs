@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
 use crate::path::{
-    PathType, hermes_nested_marker_is_regular, hermes_nested_sync_eligible,
+    PathType, SkillLayout, hermes_nested_marker_is_regular, hermes_nested_sync_eligible,
     is_hermes_management_path, is_skill_discover_path,
 };
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
@@ -1234,7 +1234,7 @@ impl SkillFs {
                         skill_name: new_name,
                         ..
                     },
-                ) if self.skill_layout == crate::path::SkillLayout::Hermes
+                ) if self.skill_layout == SkillLayout::Hermes
                     && matcher.is_staging_root(old_name) =>
                 {
                     if !crate::security::install::is_valid_staging_rename_target(new_name, matcher)
@@ -1307,7 +1307,8 @@ impl SkillFs {
                 PathType::SkillDir {
                     skill_name: new_name,
                 },
-            ) if self.skill_source_path(new_name).is_none()
+            ) if self.skill_layout == SkillLayout::Flat
+                && self.flat_skill_source_path(new_name).is_none()
                 && matches!(
                     std::fs::symlink_metadata(&resolved_new_physical),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound
@@ -1452,10 +1453,8 @@ impl SkillFs {
                         // directory. A flat `/skills` slot resolves through
                         // the store entry itself and accepts any depth
                         // below the source root (categorized source behind
-                        // a flat mount); inbox and Hermes nested renames
-                        // must match the entry's FULL relative chain below
-                        // the source root (category component included for
-                        // nested skills).
+                        // a flat mount). Inbox and Hermes renames must match
+                        // the entry's full relative chain below the source root.
                         let exact_chain: Vec<String> = match &old_type {
                             PathType::NestedSkillDir {
                                 category,
@@ -1464,7 +1463,9 @@ impl SkillFs {
                             _ => vec![old_name.clone()],
                         };
                         let identity = match &old_type {
-                            PathType::SkillDir { .. } => RenameSourceIdentity::FlatSlot,
+                            PathType::SkillDir { .. } if self.skill_layout == SkillLayout::Flat => {
+                                RenameSourceIdentity::FlatSlot
+                            }
                             _ => RenameSourceIdentity::ExactChain(&exact_chain),
                         };
                         if !self.rename_source_backs_store_entry(old_name, identity) {

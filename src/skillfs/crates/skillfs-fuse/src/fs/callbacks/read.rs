@@ -13,7 +13,7 @@ use crate::handles::open_options_from_flags;
 use crate::path::{PathType, hermes_nested_sync_eligible, is_skill_discover_path};
 use crate::security::{SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
-use crate::sys::{errno, openat_leaf};
+use crate::sys::{errno, open_parent_dir_for_physical, openat_leaf};
 
 impl SkillFs {
     pub(in crate::fs) fn read_impl(
@@ -442,69 +442,28 @@ impl SkillFs {
             }
         }
 
-        // For non-virtual paths, resolve physical path
-        let mut physical = match self.resolve_physical_path(&path) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::EROFS);
-                return;
-            }
-        };
-
-        // D1.1: ledger-aware read redirection. Hidden skills refuse to
-        // open even on a stale inode; snapshot skills serve passthrough
-        // reads from the snapshot directory.
-        //
-        // Crucially, the redirect only kicks in for **non-mutating**
-        // opens. `O_RDONLY | O_TRUNC` is mutating from the kernel's
-        // perspective (the access mode is read-only but the open also
-        // truncates the file), so `is_write == false` is *not* a safe
-        // signal — we must use `is_mutating_open`. If we redirected on
-        // `!is_write` alone, the truncate branch further down would
-        // truncate the snapshot file, violating the D1.1 invariant
-        // "snapshots are read-only; writes/create/rename/unlink/setattr
-        // still target live source". Mutating opens stay pointed at the
-        // live source physical path (write to live, read from snapshot
-        // is enforced separately via lookup/getattr/read).
-        let mut pinned_target: Option<crate::security::ActiveTarget> = None;
-        match &path_type {
+        let mut pinned_target = None;
+        let mut physical = match &path_type {
             PathType::SkillMd { skill_name } | PathType::Passthrough { skill_name, .. } => {
-                // I2: staging roots bypass the active resolver entirely.
-                // Pending installs use the same bypass.
-                if !self.is_staging_skill_root(skill_name) && !self.is_pending_install(skill_name) {
-                    // TOCTOU-safe: read the activation target exactly once and
-                    // drive both the open-time decision and the handle's pinned
-                    // target from that single snapshot, so a `Current -> Snapshot`
-                    // change cannot let the open be judged against one target
-                    // while reads serve another.
-                    let (target, resolution) = self.resolve_skill_read_pinned(skill_name);
+                let relative = match &path_type {
+                    PathType::Passthrough { relative_path, .. } => relative_path.as_path(),
+                    _ => Path::new("SKILL.md"),
+                };
+                if self.is_staging_skill_root(skill_name) || self.is_pending_install(skill_name) {
+                    self.skill_physical_dir(skill_name).join(relative)
+                } else {
+                    let (target, resolution, live_dir) = self.resolve_skill_open_pinned(skill_name);
                     pinned_target = target;
-                    let grace_rel = match &path_type {
-                        PathType::Passthrough { relative_path, .. } => {
-                            Some(relative_path.as_path())
-                        }
-                        // SkillMd is never grace-allowed: use the literal
-                        // "SKILL.md" path so the whitelist check rejects it.
-                        PathType::SkillMd { .. } => Some(Path::new("SKILL.md")),
-                        _ => None,
-                    };
-                    // Best-effort runtime metrics. `skill_hit` fires for any
-                    // agent-visible read open of a real skill file; `policy_*`
-                    // fires only when an active resolver actually made a
-                    // security decision — plain non-security passthrough (no
-                    // resolver) is NOT counted as an allow. `.skill-meta/**` and
-                    // skill-discover are excluded.
                     let is_discover = skill_name == "skill-discover";
-                    let is_meta = matches!(
-                        &path_type,
-                        PathType::Passthrough { relative_path, .. }
-                            if crate::security::is_skill_meta_path(relative_path)
-                    );
+                    let is_meta = crate::security::is_skill_meta_path(relative);
                     let record_hit = !is_discover && !is_meta && !is_mutating_open;
                     let policy_decided = self.active_resolver.is_some() && !is_discover && !is_meta;
-                    match resolution {
+
+                    let read_dir = match resolution {
                         ReadResolution::Hidden
-                            if !self.is_post_publish_grace_allowed(skill_name, grace_rel) =>
+                            if live_dir.is_none()
+                                || !self
+                                    .is_post_publish_grace_allowed(skill_name, Some(relative)) =>
                         {
                             if policy_decided {
                                 self.metric_policy_denied();
@@ -512,56 +471,46 @@ impl SkillFs {
                             reply.error(libc::ENOENT);
                             return;
                         }
-                        ReadResolution::Hidden => {
-                            // I4: grace bypass — serve from source (allowed).
-                            if record_hit {
-                                self.metric_skill_hit();
-                            }
-                            if policy_decided {
-                                self.metric_policy_allow();
-                            }
-                        }
-                        ReadResolution::Snapshot { dir, .. } if !is_mutating_open => {
-                            if record_hit {
-                                self.metric_skill_hit();
-                            }
+                        ReadResolution::Snapshot { dir, .. } => {
                             if policy_decided {
                                 self.metric_policy_fallback();
                             }
-                            if matches!(&path_type, PathType::SkillMd { .. }) {
-                                physical = dir.join("SKILL.md");
-                            }
-                            if let PathType::Passthrough { relative_path, .. } = &path_type {
-                                // I4: grace bypass — if the path matches the
-                                // post-publish whitelist, open from physical
-                                // source instead of the snapshot.
-                                if !self.is_post_publish_grace_allowed(
-                                    skill_name,
-                                    Some(relative_path.as_path()),
-                                ) {
-                                    physical = dir.join(relative_path);
-                                }
+                            // Mutating and grace opens use the validated live directory.
+                            if !is_mutating_open
+                                && !self.is_post_publish_grace_allowed(skill_name, Some(relative))
+                            {
+                                Some(dir)
+                            } else {
+                                live_dir
                             }
                         }
-                        ReadResolution::Snapshot { .. } => {
-                            // Mutating open resolving to a snapshot: the write
-                            // still targets live source; count the fallback
-                            // decision but not a read hit.
-                            if policy_decided {
-                                self.metric_policy_fallback();
-                            }
-                        }
-                        ReadResolution::Source => {
-                            if record_hit {
-                                self.metric_skill_hit();
-                            }
+                        ReadResolution::Hidden | ReadResolution::Source => {
                             if policy_decided {
                                 self.metric_policy_allow();
                             }
+                            live_dir
                         }
+                    };
+                    let Some(dir) = read_dir else {
+                        reply.error(libc::ENOENT);
+                        return;
+                    };
+                    if record_hit {
+                        self.metric_skill_hit();
                     }
+                    dir.join(relative)
                 }
             }
+            _ => {
+                let Some(physical) = self.resolve_physical_path(&path) else {
+                    reply.error(libc::EROFS);
+                    return;
+                };
+                physical
+            }
+        };
+
+        match &path_type {
             PathType::NestedSkillMd {
                 category,
                 skill_name,
@@ -956,9 +905,9 @@ impl SkillFs {
             {
                 Ok(f) => Ok(f),
                 Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
-                    match self.open_parent_dir_for(&path) {
+                    match open_parent_dir_for_physical(&physical) {
                         Ok((parent_fd, leaf)) => {
-                            openat_leaf(&parent_fd, &leaf, libc::O_WRONLY | libc::O_TRUNC, 0)
+                            openat_leaf(&parent_fd, leaf, libc::O_WRONLY | libc::O_TRUNC, 0)
                         }
                         Err(_) => Err(e),
                     }
@@ -1005,8 +954,8 @@ impl SkillFs {
         let final_open = match primary_open {
             Ok(f) => Ok(f),
             Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
-                match self.open_parent_dir_for(&path) {
-                    Ok((parent_fd, leaf)) => openat_leaf(&parent_fd, &leaf, flags, 0),
+                match open_parent_dir_for_physical(&physical) {
+                    Ok((parent_fd, leaf)) => openat_leaf(&parent_fd, leaf, flags, 0),
                     Err(_) => Err(e),
                 }
             }

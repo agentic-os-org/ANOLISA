@@ -432,6 +432,8 @@ skills = ["apple-notes", "blogwatcher"]
 
 default view 会直接出现在挂载后的 skill 视图中。Secondary views 由虚拟
 `skill-discover` skill 列出，其 `SKILL.md` 包含 skill 名称和 source path。
+启用安全激活后，`skill-discover/SKILL.md` 会省略 `Hidden` 和没有激活映射的
+skill，secondary view 中已激活的 skill 仍可发现。
 
 未分配到任何 view 的 skill 会纳入内存中的有效 default view。挂载不改写
 `skillfs-views.toml`；需要持久化分配时显式编辑配置，修改视图配置后重挂载生效。
@@ -861,6 +863,10 @@ scan 和 resolve 决策。
 
 Decision-command mode 与 activation file mode、`--notify-socket`、
 `--activation-events-log`、`--ledger-backing-root` 和 `--control-socket` 互斥。
+
+对分类 source 原位挂载时（`SOURCE` 和 `MOUNTPOINT` 指向同一目录），
+SkillFS 会在启动时拒绝 `--decision-command`。原位挂载后，刷新子进程访问的是扁平 FUSE 视图，无法读取 `<source>/<category>/<skill>`。
+请使用独立挂载点，或在原位挂载时使用 `--activation-mode file --ledger-backing-root`。
 
 ## Install 协议
 

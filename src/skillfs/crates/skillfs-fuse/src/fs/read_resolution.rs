@@ -7,14 +7,15 @@
 //! snapshot directory, and `Hidden` instructs callers to surface
 //! `ENOENT` (lookup/getattr) or to drop the entry (readdir).
 //!
-//! Write paths intentionally bypass this module — D1.1 is read-only by
-//! design.
+//! Mutating opens use the live directory selected during authorization.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use skillfs_core::store::SkillStore;
+
 use super::SkillFs;
-use crate::security::ActiveTarget;
+use crate::{SkillLayout, security::ActiveTarget};
 
 /// Whether a physical `SKILL.md` of `len` bytes may be served under `limit`.
 ///
@@ -66,13 +67,42 @@ pub(super) fn read_skill_md_bounded(
     Ok((raw, metadata))
 }
 
+/// Whether a flat activation targets the directory currently selected by the store.
+pub(super) fn active_target_matches_store(
+    store: &SkillStore,
+    source_root: &Path,
+    target_root: &Path,
+    skill_name: &str,
+    target: &ActiveTarget,
+) -> bool {
+    let expected = match store.get(skill_name) {
+        Some(entry) => entry
+            .source_path
+            .parent()
+            .and_then(|dir| dir.strip_prefix(source_root).ok()),
+        None => Some(Path::new(skill_name)),
+    };
+    expected.is_some_and(|relative| {
+        active_target_matches_relative_dir(relative, source_root, target_root, target)
+    })
+}
+
+fn active_target_matches_relative_dir(
+    relative: &Path,
+    source_root: &Path,
+    target_root: &Path,
+    target: &ActiveTarget,
+) -> bool {
+    target.relative_skill_dir(target_root) == Some(relative)
+        || (target_root != source_root && target.relative_skill_dir(source_root) == Some(relative))
+}
+
 /// Outcome of [`SkillFs::resolve_skill_read`].
 #[derive(Debug, Clone)]
 pub(super) enum ReadResolution {
     /// Read the live source directory. Returned outside demo mode and
-    /// for [`ActiveTarget::Current`]; the actual directory is computed
-    /// by [`SkillFs::skill_physical_dir`] at the call site so existing
-    /// flat/categorized-layout handling stays in one place.
+    /// for [`ActiveTarget::Current`]. Callers use the pinned directory
+    /// when present and the live store path otherwise.
     Source,
     /// Read the snapshot directory. `dir` is already rewritten through
     /// [`SkillFs::source_base`] so in-place mounts bypass FUSE.
@@ -146,10 +176,10 @@ impl SkillFs {
         let physical = match resolution {
             ReadResolution::Hidden => return None,
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
-            ReadResolution::Source if category.is_some() || self.in_place => {
+            ReadResolution::Source if category.is_some() => {
                 self.source_base().join(&id).join("SKILL.md")
             }
-            ReadResolution::Source => self.skill_source_path(&id)?,
+            ReadResolution::Source => self.live_skill_md_path(&id, target.as_ref())?,
         };
         let (content, metadata) = self
             .load_transformed(&id, &physical, target.as_ref())
@@ -171,16 +201,10 @@ impl SkillFs {
         if skill_name == "skill-discover" {
             return Some(self.get_skill_discover_content());
         }
-        let physical_path = match self.resolve_skill_read(skill_name) {
+        let (target, resolution) = self.resolve_skill_read_pinned(skill_name);
+        let physical_path = match resolution {
             ReadResolution::Hidden => return None,
-            ReadResolution::Source => {
-                if self.in_place {
-                    // Bypass the FUSE layer via the pre-opened fd.
-                    self.source_base().join(skill_name).join("SKILL.md")
-                } else {
-                    self.skill_source_path(skill_name)?
-                }
-            }
+            ReadResolution::Source => self.live_skill_md_path(skill_name, target.as_ref())?,
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
         let raw = read_skill_md_bounded(&physical_path, self.max_skill_size)
@@ -202,19 +226,11 @@ impl SkillFs {
     /// (live source or snapshot) physically contains it, within the
     /// mount's `max_skill_size` — an oversize file is refused by every read
     /// path, so listing it would be the same phantom entry.
-    pub(super) fn skill_md_listable(&self, skill_name: &str) -> bool {
-        if skill_name == "skill-discover" {
-            return true;
-        }
-        match self.skill_read_dir(skill_name) {
-            Some(dir) => {
-                skillfs_core::store::has_regular_skill_md(&dir)
-                    && std::fs::symlink_metadata(dir.join("SKILL.md")).is_ok_and(|meta| {
-                        skill_md_within_size_limit(meta.len(), self.max_skill_size)
-                    })
-            }
-            None => false,
-        }
+    pub(super) fn skill_md_listable_in_dir(&self, skill_name: &str, dir: &Path) -> bool {
+        skill_name == "skill-discover"
+            || (skillfs_core::store::has_regular_skill_md(dir)
+                && std::fs::symlink_metadata(dir.join("SKILL.md"))
+                    .is_ok_and(|meta| skill_md_within_size_limit(meta.len(), self.max_skill_size)))
     }
 
     /// Whether a Hermes nested skill listing may show the physical entry
@@ -237,25 +253,36 @@ impl SkillFs {
 
     /// Physical directory to read **content from** for `skill_name`.
     ///
-    /// For an unattached resolver (default) and for
-    /// [`ActiveTarget::Current`] this is the live skill directory
-    /// returned by [`Self::skill_physical_dir`]. For
-    /// [`ActiveTarget::Snapshot`] it is the snapshot directory rewritten
-    /// through [`Self::source_base`] so in-place mounts continue to
-    /// bypass the FUSE over-mount via `/proc/self/fd/{n}`. Returns
-    /// `None` when the resolver marks the skill as hidden so the caller
-    /// can surface `ENOENT` instead of leaking a path.
+    /// Current and snapshot targets supply their own directory. Without a
+    /// resolver, use [`Self::skill_physical_dir`]. In-place mounts address
+    /// directories under the source through the pre-opened source fd.
+    /// Hidden skills return `None`.
     ///
     /// Skill-discover bypasses ledger gating entirely and always reads
     /// from the virtual skill-discover dir.
     pub(super) fn skill_read_dir(&self, skill_name: &str) -> Option<PathBuf> {
-        if skill_name == "skill-discover" {
-            return Some(self.skill_physical_dir(skill_name));
-        }
-        match self.resolve_skill_read(skill_name) {
+        let (_, resolution, live_dir) = self.resolve_skill_open_pinned(skill_name);
+        match resolution {
             ReadResolution::Hidden => None,
-            ReadResolution::Source => Some(self.skill_physical_dir(skill_name)),
+            ReadResolution::Source => live_dir,
             ReadResolution::Snapshot { dir, .. } => Some(dir),
+        }
+    }
+
+    fn live_skill_md_path(
+        &self,
+        skill_name: &str,
+        target: Option<&ActiveTarget>,
+    ) -> Option<PathBuf> {
+        if self.skill_layout == SkillLayout::Hermes {
+            return Some(self.skill_physical_dir(skill_name).join("SKILL.md"));
+        }
+        if let Some(dir) = self.current_skill_read_dir(target) {
+            Some(dir.join("SKILL.md"))
+        } else if self.in_place {
+            Some(self.skill_physical_dir(skill_name).join("SKILL.md"))
+        } else {
+            self.flat_skill_source_path(skill_name)
         }
     }
 
@@ -268,19 +295,12 @@ impl SkillFs {
         if skill_name == "skill-discover" {
             return Some(self.get_skill_discover_content());
         }
-        let resolution = match pinned {
-            Some(target) => self.resolve_from_target(skill_name, target),
-            None => self.resolve_skill_read(skill_name),
+        let Some(target) = pinned else {
+            return self.compiled_skill_md(skill_name);
         };
-        let physical_path = match resolution {
+        let physical_path = match self.resolve_from_target(target) {
             ReadResolution::Hidden => return None,
-            ReadResolution::Source => {
-                if self.in_place {
-                    self.source_base().join(skill_name).join("SKILL.md")
-                } else {
-                    self.skill_source_path(skill_name)?
-                }
-            }
+            ReadResolution::Source => self.live_skill_md_path(skill_name, Some(target))?,
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
         let raw = read_skill_md_bounded(&physical_path, self.max_skill_size)
@@ -290,7 +310,7 @@ impl SkillFs {
     }
 
     /// Resolve from an explicit `ActiveTarget` without consulting the resolver.
-    fn resolve_from_target(&self, skill_name: &str, target: &ActiveTarget) -> ReadResolution {
+    fn resolve_from_target(&self, target: &ActiveTarget) -> ReadResolution {
         match target {
             ActiveTarget::Hidden { .. } => ReadResolution::Hidden,
             ActiveTarget::Current { .. } => ReadResolution::Source,
@@ -298,7 +318,7 @@ impl SkillFs {
                 snapshot_dir,
                 version,
             } => {
-                let dir = self.snapshot_read_dir(skill_name, snapshot_dir);
+                let dir = self.snapshot_read_dir(snapshot_dir);
                 ReadResolution::Snapshot {
                     dir,
                     version: version.clone(),
@@ -331,52 +351,87 @@ impl SkillFs {
         &self,
         skill_name: &str,
     ) -> (Option<ActiveTarget>, ReadResolution) {
-        if skill_name == "skill-discover" {
-            return (None, ReadResolution::Source);
-        }
-        let resolver = match self.active_resolver.as_ref() {
-            Some(r) => r,
-            None => return (None, ReadResolution::Source),
-        };
-        let target = resolver.get(skill_name);
-        // Default: skills the ledger has no opinion on are treated as
-        // not-yet-certified and stay hidden until a future hook handler
-        // installs a target for them.
-        let resolution = match &target {
-            None => ReadResolution::Hidden,
-            Some(t) => self.resolve_from_target(skill_name, t),
-        };
+        let (target, resolution, _) = self.resolve_skill_open_pinned(skill_name);
         (target, resolution)
     }
 
-    /// Rewrite a `snapshot_dir` from the resolver so reads bypass the
-    /// FUSE layer in in-place mode.
+    /// Return the live directory checked alongside the pinned activation.
     ///
-    /// The resolver constructs
-    /// `snapshot_dir = source_root.join(skill).join(<rel>)` against the
-    /// `source_root` it was built with. The CLI / tests build that
-    /// resolver from the same `source` path the FUSE mount uses, so the
-    /// prefix matches exactly and the relative segment after
-    /// `<skill>/` can be safely rejoined against
-    /// [`Self::source_base`]. In normal mode `source_base()` is the
-    /// plain source path so the rewrite is a no-op; in in-place mode it
-    /// becomes `/proc/self/fd/{n}`, which reads the underlying inode
-    /// instead of re-entering the FUSE over-mount (which would deny
-    /// `.skill-meta/**` mutations and would not even resolve through
-    /// the virtual layer).
-    ///
-    /// If the prefix does not match (operator passed a canonicalized vs
-    /// non-canonicalized source, or a future package starts handing the
-    /// resolver an absolute path it did not build), the original
-    /// `snapshot_dir` is returned verbatim. Either it resolves and the
-    /// operator is happy, or the underlying syscall surfaces a real
-    /// errno — no silent fallback to live source.
-    pub(super) fn snapshot_read_dir(&self, skill_name: &str, snapshot_dir: &Path) -> PathBuf {
-        let prefix = self.source.join(skill_name);
-        match snapshot_dir.strip_prefix(&prefix) {
-            Ok(rel) => self.source_base().join(skill_name).join(rel),
-            Err(_) => snapshot_dir.to_path_buf(),
+    /// Snapshot reads use the snapshot directory. Writes and post-publish
+    /// grace access use the live directory selected for this layout.
+    pub(super) fn resolve_skill_open_pinned(
+        &self,
+        skill_name: &str,
+    ) -> (Option<ActiveTarget>, ReadResolution, Option<PathBuf>) {
+        let Some(resolver) = self
+            .active_resolver
+            .as_ref()
+            .filter(|_| skill_name != "skill-discover")
+        else {
+            return (
+                None,
+                ReadResolution::Source,
+                Some(self.skill_physical_dir(skill_name)),
+            );
+        };
+
+        // get() releases the resolver lock before we read the store.
+        let target = resolver.get(skill_name);
+        let expected = if self.skill_layout == SkillLayout::Hermes {
+            Some(self.source.join(skill_name))
+        } else {
+            match self.flat_skill_source_path(skill_name) {
+                Some(manifest) => manifest.parent().map(Path::to_path_buf),
+                None => Some(self.source.join(skill_name)),
+            }
+        };
+        if self.skill_layout == SkillLayout::Flat
+            && target.as_ref().is_some_and(|target| {
+                target.is_visible()
+                    && !expected
+                        .as_deref()
+                        .and_then(|dir| dir.strip_prefix(&self.source).ok())
+                        .is_some_and(|relative| {
+                            active_target_matches_relative_dir(
+                                relative,
+                                &self.source,
+                                resolver.target_root(),
+                                target,
+                            )
+                        })
+            })
+        {
+            return (None, ReadResolution::Hidden, None);
         }
+
+        // An unmapped skill stays hidden except for post-publish grace.
+        let resolution = target
+            .as_ref()
+            .map_or(ReadResolution::Hidden, |t| self.resolve_from_target(t));
+        let current_dir = if self.skill_layout == SkillLayout::Flat {
+            self.current_skill_read_dir(target.as_ref())
+        } else {
+            None
+        };
+        let live_dir = current_dir
+            .or_else(|| expected.map(|dir| self.activation_fd_path(&dir).unwrap_or(dir)));
+        (target, resolution, live_dir)
+    }
+
+    /// Use the selected live directory, through the source fd in-place.
+    fn current_skill_read_dir(&self, target: Option<&ActiveTarget>) -> Option<PathBuf> {
+        let Some(ActiveTarget::Current { source_dir }) = target else {
+            return None;
+        };
+        Some(
+            self.activation_fd_path(source_dir)
+                .unwrap_or_else(|| source_dir.clone()),
+        )
+    }
+
+    fn snapshot_read_dir(&self, snapshot_dir: &Path) -> PathBuf {
+        self.activation_fd_path(snapshot_dir)
+            .unwrap_or_else(|| snapshot_dir.to_path_buf())
     }
 
     /// Resolve read for a Hermes nested skill leaf.
@@ -419,7 +474,7 @@ impl SkillFs {
         let target = resolver.get(&nested_id);
         let resolution = match &target {
             None => ReadResolution::Hidden,
-            Some(t) => self.resolve_from_target(&nested_id, t),
+            Some(t) => self.resolve_from_target(t),
         };
         (target, resolution)
     }
@@ -441,10 +496,7 @@ impl SkillFs {
             // Non-skill category children (e.g. `apple/docs`) are plain
             // passthrough and never gated; keep them on the source path.
             Some(_) if !self.hermes_nested_is_skill(category, skill_name) => ReadResolution::Source,
-            Some(target) => {
-                let nested_id = Self::hermes_skill_id(category, skill_name);
-                self.resolve_from_target(&nested_id, target)
-            }
+            Some(target) => self.resolve_from_target(target),
             None => self.resolve_hermes_nested_read(category, skill_name),
         };
         let physical_path = match resolution {
@@ -679,6 +731,50 @@ mod tests {
             !out.contains("@if"),
             "directive markers must be stripped: {out}"
         );
+    }
+
+    #[test]
+    fn pinned_current_manifest_keeps_its_original_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path();
+        let store = Arc::new(RwLock::new(SkillStore::new()));
+        let load = |category: &str, body: &str| {
+            let dir = src.join(category).join("web");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("SKILL.md");
+            std::fs::write(
+                &path,
+                format!("---\nname: web\ndescription: Test\n---\n{body}\n"),
+            )
+            .unwrap();
+            store
+                .write()
+                .upsert(skillfs_core::parser::parse_skill_file(&path).unwrap());
+        };
+
+        load("cat_a", "original");
+        let resolver = Arc::new(ActiveSkillResolver::new(src));
+        resolver.set(
+            "web",
+            ActiveTarget::Current {
+                source_dir: src.join("cat_a/web"),
+            },
+        );
+        let fs = SkillFs::new_with_pipeline(
+            src.into(),
+            src.into(),
+            store.clone(),
+            false,
+            TransformPipeline::empty(),
+        )
+        .with_active_resolver(resolver);
+        let (pinned, resolution) = fs.resolve_skill_read_pinned("web");
+        assert!(matches!(resolution, ReadResolution::Source));
+
+        load("cat_b", "replacement");
+        assert!(fs.compiled_skill_md("web").is_none());
+        let content = fs.compiled_skill_md_pinned("web", pinned.as_ref()).unwrap();
+        assert!(content.ends_with("original\n"), "{content}");
     }
 
     /// Building block: the flat pinned-resolution helper consults the resolver
@@ -1023,7 +1119,10 @@ mod tests {
             assert!(attr.size > default as u64);
             assert!(fs.capture_transformed("big", &physical, None).is_ok());
             assert!(fs.compiled_skill_md_pinned("big", None).is_some());
-            assert!(fs.skill_md_listable("big"), "listed (cached={cached})");
+            assert!(
+                fs.skill_md_listable_in_dir("big", &fs.skill_read_dir("big").unwrap()),
+                "listed (cached={cached})"
+            );
         }
     }
 
@@ -1043,7 +1142,10 @@ mod tests {
             );
             assert!(fs.capture_transformed("big", &physical, None).is_err());
             assert!(fs.compiled_skill_md_pinned("big", None).is_none());
-            assert!(!fs.skill_md_listable("big"), "not listed (cached={cached})");
+            assert!(
+                !fs.skill_md_listable_in_dir("big", &fs.skill_read_dir("big").unwrap()),
+                "not listed (cached={cached})"
+            );
             write_skill_of_size(tmp.path(), 512);
         }
     }

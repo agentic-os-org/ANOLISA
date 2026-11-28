@@ -204,7 +204,7 @@ fn promotion_only_discovers_regular_manifests_within_the_configured_ceiling() {
 }
 
 #[test]
-fn hermes_promotion_preserves_duplicate_name_ordering() {
+fn hermes_promotion_preserves_paths_and_store_ordering() {
     skip_if_no_fuse!();
     for target in ["aaa", "zzz"] {
         let source = tempfile::tempdir().unwrap();
@@ -230,12 +230,18 @@ fn hermes_promotion_preserves_duplicate_name_ordering() {
         wait_for_mount(mountpoint.path());
         let root = mountpoint.path().join("skills");
         std::fs::rename(root.join("demo/nested"), root.join(target)).unwrap();
-        let content = std::fs::read_to_string(root.join(target).join("SKILL.md")).unwrap();
-        assert!(content.contains(if target == "aaa" {
-            "name: nested"
-        } else {
-            "name: zzz"
-        }));
+        let top_manifest = root.join(target).join("SKILL.md");
+        let categorized_manifest = root.join("middle").join(target).join("SKILL.md");
+        assert!(
+            std::fs::read_to_string(top_manifest)
+                .expect("read promoted top-level manifest")
+                .contains("name: nested")
+        );
+        assert!(
+            std::fs::read_to_string(categorized_manifest)
+                .expect("read same-named categorized manifest")
+                .contains(&format!("name: {target}"))
+        );
         handle.unmount().unwrap();
         assert_matches_fresh(&store, source.path());
     }
