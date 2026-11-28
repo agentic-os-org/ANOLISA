@@ -3,6 +3,7 @@
 # Usage: ./test-module.sh <module_name> [module_params...]
 # Example: ./test-module.sh hello_module
 #          ./test-module.sh param_module greeting="Welcome" repeat_count=3
+#          ./test-module.sh param_module 'greeting=Hello World' 'pattern=*'
 
 set -e
 
@@ -15,7 +16,10 @@ NC='\033[0m'
 # Parse arguments
 MODULE_NAME="${1:?Usage: $0 <module_name> [module_params...]}"
 shift
-MODULE_PARAMS="$*"
+# Keep the parameters as separate arguments. Joining them into a string and
+# re-expanding it would word-split values containing spaces and glob-expand
+# values containing *, ? or [] against the current directory.
+MODULE_PARAMS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
@@ -39,8 +43,8 @@ echo "========================================"
 echo ""
 echo "Module: $MODULE_NAME"
 echo "Path:   $MODULE_FILE"
-if [ -n "$MODULE_PARAMS" ]; then
-    echo "Params: $MODULE_PARAMS"
+if [ "${#MODULE_PARAMS[@]}" -gt 0 ]; then
+    echo "Params: ${MODULE_PARAMS[*]}"
 fi
 echo ""
 
@@ -77,9 +81,9 @@ echo ""
 
 # Load module
 echo -e "${BLUE}Step 3: Loading Module${NC}"
-if [ -n "$MODULE_PARAMS" ]; then
-    echo "Loading with parameters: $MODULE_PARAMS"
-    insmod "$MODULE_FILE" $MODULE_PARAMS
+if [ "${#MODULE_PARAMS[@]}" -gt 0 ]; then
+    echo "Loading with parameters: ${MODULE_PARAMS[*]}"
+    insmod "$MODULE_FILE" "${MODULE_PARAMS[@]}"
 else
     insmod "$MODULE_FILE"
 fi
