@@ -142,6 +142,7 @@ pub fn convert_qoder_events(
                 .map(String::from);
             let mut step_model: Option<String> = None;
             let mut step_metrics: Option<Metrics> = None;
+            let mut latest_activity = None;
 
             for index in turn_events {
                 let te = &events[index];
@@ -149,6 +150,22 @@ pub fn convert_qoder_events(
                     Some(m) => m,
                     None => continue,
                 };
+                if let Some((time, raw)) = te
+                    .get("timestamp")
+                    .and_then(|value| value.as_str())
+                    .and_then(|raw| {
+                        chrono::DateTime::parse_from_rfc3339(raw)
+                            .ok()
+                            .map(|time| (time, raw))
+                    })
+                {
+                    if latest_activity
+                        .as_ref()
+                        .is_none_or(|(previous, _)| time > *previous)
+                    {
+                        latest_activity = Some((time, raw));
+                    }
+                }
                 if step_model.is_none() {
                     step_model = msg.get("model").and_then(|v| v.as_str()).map(String::from);
                 }
@@ -271,6 +288,9 @@ pub fn convert_qoder_events(
                 total_cached_tokens += m.cached_tokens.unwrap_or(0);
             }
 
+            let extra = latest_activity
+                .filter(|(_, raw)| Some(*raw) != step_timestamp.as_deref())
+                .map(|(_, raw)| HashMap::from([("end_timestamp".into(), raw.into())]));
             steps.push(Step {
                 step_id,
                 timestamp: step_timestamp,
@@ -286,7 +306,7 @@ pub fn convert_qoder_events(
                 },
                 observation: None,
                 metrics: step_metrics,
-                extra: None,
+                extra,
                 llm_call_count: None,
                 is_copied_context: None,
             });
