@@ -41,8 +41,25 @@ export function toPosix(filePath) {
 }
 
 export function titleFromMarkdown(markdown, fallback) {
-  const heading = markdown.match(/^#\s+(.+)$/m)?.[1];
-  return heading?.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim() || fallback;
+  let closingFence;
+  for (const line of markdown.split(/\r?\n/)) {
+    if (closingFence) {
+      if (closingFence.test(line)) closingFence = undefined;
+      continue;
+    }
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence && (fence[1][0] !== '`' || !fence[2].includes('`'))) {
+      closingFence = new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}[ \\t]*$`);
+      continue;
+    }
+    const heading = line.match(/^ {0,3}#(?:[ \t]+(.*))?$/);
+    if (heading) {
+      return (heading[1] || '')
+        .replace(/(?:^|[ \t]+)#+[ \t]*$/, '')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim() || fallback;
+    }
+  }
+  return fallback;
 }
 
 export function kebabCase(value) {
