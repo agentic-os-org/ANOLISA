@@ -598,6 +598,137 @@ fn raw_cli_bash_recovered_history_keeps_ordinary_commands() {
 }
 
 #[test]
+fn raw_cli_bash_recovered_history_keeps_piped_commands() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let home = TempReplayHome::new("recovered-history-pipe", "");
+    home.enable_bash_history();
+    let piped = "echo cosh_pipe_10282 | grep -c cosh_pipe_10282";
+    let clean = "echo cosh_clean_pipe_10282 | grep -c cosh_clean_pipe_10282";
+    run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", home.home.as_str()),
+            ("INPUTRC", home.inputrc.as_str()),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_RECOMMENDATIONS_ENABLED", "0"),
+        ],
+        vec![
+            (b":\r".to_vec(), Duration::from_millis(1_200)),
+            (b"\x1b[H".to_vec(), Duration::from_millis(600)),
+            (
+                format!("{piped}\r").into_bytes(),
+                Duration::from_millis(1_200),
+            ),
+            (
+                format!("{clean}\r").into_bytes(),
+                Duration::from_millis(1_200),
+            ),
+            (b"exit\r".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    let history = fs::read_to_string(home.root.join(".bash_history")).expect("history file");
+    assert_eq!(
+        history.lines().filter(|line| *line == piped).count(),
+        1,
+        "dirty piped command must stay recorded exactly once\n{history:?}"
+    );
+    assert_eq!(
+        history.lines().filter(|line| *line == clean).count(),
+        1,
+        "clean piped command must stay recorded exactly once\n{history:?}"
+    );
+}
+
+#[test]
+fn raw_cli_bash_chunked_pipe_dirty_keeps_history_exact() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let home = TempReplayHome::new("chunked-pipe-history", "");
+    home.enable_bash_history();
+    let command = "echo cosh_chunk_pipe_10282 | grep -c cosh_chunk_pipe_10282";
+    run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", home.home.as_str()),
+            ("INPUTRC", home.inputrc.as_str()),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_RECOMMENDATIONS_ENABLED", "0"),
+        ],
+        vec![
+            (b":\r".to_vec(), Duration::from_millis(1_200)),
+            (b"\x1b[H".to_vec(), Duration::from_millis(600)),
+            (
+                b"echo cosh_chunk_pipe_10282 ".to_vec(),
+                Duration::from_millis(400),
+            ),
+            (
+                b"| grep -c cosh_chunk_pipe_10282".to_vec(),
+                Duration::from_millis(400),
+            ),
+            (b"\r".to_vec(), Duration::from_millis(1_200)),
+            (b"exit\r".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    let history = fs::read_to_string(home.root.join(".bash_history")).expect("history file");
+    assert_eq!(
+        history.lines().filter(|line| *line == command).count(),
+        1,
+        "chunked piped command must stay recorded exactly once\n{history:?}"
+    );
+}
+
+#[test]
+fn raw_cli_bash_recalled_piped_command_keeps_history_exact() {
+    let piped = "echo cosh_pipe_recall_10282 | grep -c cosh_pipe_recall_10282";
+    let edited = format!("{piped} ");
+    let home = TempReplayHome::new("recalled-history-pipe", "set enable-bracketed-paste on\n");
+    home.seed_bash_history(piped);
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", home.home.as_str()),
+            ("INPUTRC", home.inputrc.as_str()),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+        vec![
+            (b"\x1b[A".to_vec(), Duration::from_millis(600)),
+            (b" \r".to_vec(), Duration::from_millis(1_200)),
+            (b"exit\r".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(
+        output.contains("\r1\r\n"),
+        "recalled piped command did not execute\n{output:?}"
+    );
+    let history = fs::read_to_string(home.root.join(".bash_history")).expect("history file");
+    assert_eq!(
+        history.lines().filter(|line| *line == piped).count(),
+        1,
+        "seeded piped entry must stay intact\n{history:?}\n{output:?}"
+    );
+    // The edited recall executes under the privacy leading blank; the
+    // recovered re-add must store the accepted line byte-exactly.
+    assert_eq!(
+        history.lines().filter(|line| *line == edited).count(),
+        1,
+        "edited piped recall must be re-added byte-exactly\n{history:?}\n{output:?}"
+    );
+}
+
+#[test]
 fn raw_cli_bash_preserves_user_leading_whitespace_for_provider() {
     if !bash_supports_command_not_found_handler() {
         return;
