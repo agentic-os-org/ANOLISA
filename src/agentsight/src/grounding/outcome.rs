@@ -155,12 +155,16 @@ pub fn classify_call(call: &ToolCall, result: Option<&ObservationResult>) -> Cal
 
     let text = result_text(result);
     let nested = nested_error(&text);
+    let exit_code = last_exit_code(&text);
+    let completed_successfully =
+        result.is_error() != Some(true) && exit_code.is_some_and(|(code, _)| code == 0);
 
-    // R2 first — a user or policy stop must never be attributed to the agent.
+    // R2 — a genuine user or policy stop must never be attributed to the agent.
     // This deliberately outranks the provider flag: a live capture shows a
     // pending permission prompt arriving with `is_error: true`, so checking the
     // flag first would turn the user's own refusal into an agent failure.
-    if let Some(idx) = find_any(&text, INTERCEPTION_MARKERS) {
+    // A successful command receipt distinguishes quoted output from an interception.
+    if let Some(idx) = find_any(&text, INTERCEPTION_MARKERS).filter(|_| !completed_successfully) {
         return with_nested(
             verdict(
                 CallStatus::Blocked,
@@ -200,7 +204,7 @@ pub fn classify_call(call: &ToolCall, result: Option<&ObservationResult>) -> Cal
     }
 
     // R3 — a structured exit code beats any text reading, in both directions.
-    if let Some((code, idx)) = last_exit_code(&text) {
+    if let Some((code, idx)) = exit_code {
         if code == 0 {
             // Deliberate short-circuit: error words in the body of a
             // successful command (a grep hit, a log line) are not this call's
