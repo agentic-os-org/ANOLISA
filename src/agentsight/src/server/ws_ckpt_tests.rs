@@ -703,6 +703,50 @@ async fn api_joins_cli_pages_and_rejects_mixed_revisions() {
 }
 
 #[actix_web::test]
+async fn snapshot_list_reports_client_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = fixture_cli(dir.path(), false);
+    fixture_trajectory(dir.path(), &data);
+    let app = awtest::init_service(App::new().app_data(data).service(get_snapshots)).await;
+
+    let list = "/ws-ckpt/trajectory/fixture-session/snapshots";
+    let non_json = URL_SAFE_NO_PAD.encode(b"not JSON");
+    for (uri, status, message) in [
+        (
+            "/ws-ckpt/other/fixture-session/snapshots".to_owned(),
+            StatusCode::BAD_REQUEST,
+            "invalid trajectory source",
+        ),
+        (
+            "/ws-ckpt/trajectory/missing/snapshots".to_owned(),
+            StatusCode::NOT_FOUND,
+            "trajectory not found",
+        ),
+        (
+            format!("{list}?cursor=!"),
+            StatusCode::BAD_REQUEST,
+            "invalid snapshot cursor",
+        ),
+        (
+            format!("{list}?cursor={non_json}"),
+            StatusCode::BAD_REQUEST,
+            "invalid snapshot cursor",
+        ),
+    ] {
+        let request = awtest::TestRequest::get().uri(&uri).to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(response.status(), status, "{uri}");
+        let error: Value = awtest::read_body_json(response).await;
+        assert_eq!(error, json!({"error": message}), "{uri}");
+    }
+
+    fixture_json(dir.path(), "first", json!({"snapshots": "invalid"}));
+    let request = awtest::TestRequest::get().uri(list).to_request();
+    let response = awtest::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[actix_web::test]
 async fn incompatible_cli_hides_workspace_snapshots_and_restore() {
     for failure in [
         "--guarded",
