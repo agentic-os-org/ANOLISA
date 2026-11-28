@@ -228,7 +228,13 @@ pub fn memory_import(
             ))
         })?;
         tracing::info!("overwrite backup saved to {}", path.display());
-        let removed = remove_all_memories(svc)?;
+        let removed = remove_all_memories(svc).map_err(|e| {
+            MemoryError::Other(format!(
+                "overwrite cleanup failed: {e}. Some old memories may already have been removed; \
+                 no archive entries were imported.\nBackup: {}",
+                path.display()
+            ))
+        })?;
         tracing::info!("overwrite strategy: removed {removed} existing memories");
         Some(path)
     } else {
@@ -443,7 +449,6 @@ fn import_single(
 /// Remove all .md files under the mount root (for overwrite strategy).
 /// Respects reserved paths (.anolisa, .git*, etc.)
 fn remove_all_memories(svc: &MemoryService) -> Result<usize> {
-    let meta_dir = svc.mount.meta_dir.clone();
     let mut removed = 0;
 
     for entry in walkdir::WalkDir::new(&svc.mount.root)
@@ -452,7 +457,7 @@ fn remove_all_memories(svc: &MemoryService) -> Result<usize> {
         .filter_entry(|e| {
             // Skip meta directory and reserved paths
             let path = e.path();
-            if path.starts_with(&meta_dir) {
+            if path.starts_with(&svc.mount.meta_dir) {
                 return false;
             }
             // Check for reserved segments (.git*, etc.)
@@ -469,10 +474,7 @@ fn remove_all_memories(svc: &MemoryService) -> Result<usize> {
             true
         })
     {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry = entry.map_err(|e| MemoryError::Other(format!("cannot scan store: {e}")))?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -481,19 +483,15 @@ fn remove_all_memories(svc: &MemoryService) -> Result<usize> {
             continue;
         }
         // Validate path is within sandbox and no symlink traversal
-        let rel_path = crate::ns::paths::relative_to_mount(&svc.mount, path);
-        if crate::safe_fs::assert_no_symlink_traversal(
-            svc.mount.root_fd.as_fd(),
-            Path::new(&rel_path),
-        )
-        .is_err()
-        {
-            tracing::warn!("skipping unsafe path during overwrite: {}", path.display());
-            continue;
-        }
-        if std::fs::remove_file(path).is_ok() {
-            removed += 1;
-        }
+        let rel_path = path.strip_prefix(&svc.mount.root).unwrap_or(path);
+        crate::safe_fs::assert_no_symlink_traversal(svc.mount.root_fd.as_fd(), rel_path)?;
+        std::fs::remove_file(path).map_err(|e| {
+            MemoryError::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot remove '{}': {e}", rel_path.display()),
+            ))
+        })?;
+        removed += 1;
     }
 
     Ok(removed)

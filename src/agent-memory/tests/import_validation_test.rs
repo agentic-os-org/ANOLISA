@@ -298,6 +298,39 @@ fn overwrite_stops_when_backup_cannot_be_persisted() {
 }
 
 #[test]
+fn overwrite_cleanup_failure_stops_import_and_returns_the_backup() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("SKIP: root bypasses directory write permissions");
+        return;
+    }
+    let (_tmp, svc) = setup();
+    svc.write("history/old.md", "old memory", false).unwrap();
+    let directory = svc.mount.root.join("history");
+    let permissions = std::fs::metadata(&directory).unwrap().permissions();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = memory_import(
+        &svc,
+        &archive(&entry("notes/new.md")),
+        ImportStrategy::Overwrite,
+        false,
+    );
+    std::fs::set_permissions(&directory, permissions).unwrap();
+
+    let error = result.expect_err("an incomplete clear must fail the import");
+    let message = error.to_string();
+    assert!(message.contains("history/old.md"), "{message}");
+    assert!(!svc.mount.root.join("notes/new.md").exists());
+    let old = directory.join("old.md");
+    assert_eq!(std::fs::read(old).unwrap(), b"old memory");
+    let (_, backup) = message.split_once("\nBackup: ").unwrap();
+    let saved = std::fs::read_to_string(backup).unwrap();
+    let (_restore_tmp, restore) = setup();
+    memory_import(&restore, &saved, ImportStrategy::SkipExisting, false).unwrap();
+    let restored = restore.mount.root.join("history/old.md");
+    assert_eq!(std::fs::read(restored).unwrap(), b"old memory");
+}
+
+#[test]
 fn overwrite_preserves_file_ancestors_excluded_from_the_wipe() {
     for ancestor in ["notes/data.txt", ".github/old.md"] {
         let (_tmp, svc) = setup();
