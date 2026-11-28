@@ -107,6 +107,20 @@ pub(crate) enum ConnectionState {
     },
 }
 
+impl ConnectionState {
+    /// Capture source retained while a request header block is incomplete.
+    pub(super) fn pending_header_source(&self) -> Option<&Rc<SslEvent>> {
+        None
+    }
+}
+
+impl HttpConnectionAggregator {
+    /// Original capture bytes owned by an incomplete request header block.
+    pub(crate) fn accepts_request_header_bytes(&self, _event: &SslEvent) -> bool {
+        false
+    }
+}
+
 /// Snapshot of memory and lifecycle state retained by HTTP correlation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ConnectionMetrics {
