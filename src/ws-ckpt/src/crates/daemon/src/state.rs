@@ -1311,20 +1311,27 @@ impl DaemonState {
                     Some(w) => Some((
                         w.last_activity(),
                         w.quiescence_evidence(),
-                        w.delivery_settling(),
                         w.is_degraded(),
                         std::sync::Arc::clone(w.shared()),
                     )),
                     None => None,
                 }
             };
-            let Some((activity, evidence, settling, degraded, shared)) = sampled else {
+            let Some((activity, evidence, degraded, shared)) = sampled else {
                 return Quiescence::Safe;
             };
+            // Test-only: force the "barrier replies between sampling and the
+            // readiness check" interleaving.
+            #[cfg(test)]
+            shared.run_gate_sample_hook_for_test();
             // Monitoring is unavailable: quiescence cannot be established.
             if degraded {
                 return Quiescence::MonitoringUnavailable;
             }
+            // A barrier that never spawned leaves its walk uncovered; re-arm
+            // it here so the gate recovers without waiting for another
+            // directory event (#8494 review).
+            shared.cover_pending_walk();
             // A walk pauses delivery for the shared instance, so the
             // watermark may stay stale only because its events are still
             // queued. A check must not decide during one (#8448); the retry
@@ -1338,7 +1345,16 @@ impl DaemonState {
             }
             let still_current =
                 || self.quiescence_observation_still_current(ws_id, &activity, &evidence);
-            match crate::fs_watcher::observe_once(&activity, settling, still_current).await {
+            // The settle state is read at the shortcut, not from the sample:
+            // a barrier that replied after we sampled must still disable the
+            // idle shortcut (#9777 review).
+            match crate::fs_watcher::observe_once(
+                &activity,
+                || shared.delivery_settling(),
+                still_current,
+            )
+            .await
+            {
                 crate::fs_watcher::ObservationAttempt::Quiet => return Quiescence::Safe,
                 crate::fs_watcher::ObservationAttempt::Active => return Quiescence::Writing,
                 // The window overlapped a write, a registration walk, or a
@@ -3278,6 +3294,48 @@ mod tests {
         assert_eq!(
             state.check_workspace_quiescent("ws", Some(&anchor)).await,
             Quiescence::Safe
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_reobserves_after_a_fast_barrier_reply() {
+        // #9777 review: a barrier that replies after the gate sampled its
+        // quiescence inputs must still disable the idle shortcut. The hook
+        // releases the held reply between the sample and the readiness check,
+        // which is exactly the interleaving that used to return Safe without
+        // waiting a quiet window.
+        let (_root, state, anchor) = watcher_fixture();
+        let watcher = crate::fs_watcher::WorkspaceWatcher::start(&anchor).expect("arm watch");
+        let shared = std::sync::Arc::clone(watcher.shared());
+        state.register_watcher("ws".to_string(), watcher);
+        // Age the watermark past the quiet window: only then can the idle
+        // shortcut fire, which is the behaviour under test.
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+
+        let (release, held) = std::sync::mpsc::channel();
+        shared.hold_barrier_reply_for_test(held);
+        shared.stall_barrier_for_test();
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Writing,
+            "a walk with no barrier must not be reported Safe"
+        );
+
+        let hook_shared = std::sync::Arc::clone(&shared);
+        shared.set_gate_sample_hook_for_test(Box::new(move || {
+            release.send(()).unwrap();
+            hook_shared.wait_until_walk_covered_for_test();
+        }));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            state.check_workspace_quiescent("ws", Some(&anchor)).await,
+            Quiescence::Safe
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(190),
+            "a barrier that replied after the sample must still disable the idle shortcut \
+             (took {:?})",
+            started.elapsed()
         );
     }
 
