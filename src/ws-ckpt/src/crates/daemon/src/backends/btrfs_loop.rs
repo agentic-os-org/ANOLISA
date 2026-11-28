@@ -597,14 +597,10 @@ impl StorageBackend for BtrfsLoopBackend {
         .await;
 
         if img_existed_before {
-            if let Err(e) =
-                reconcile_img_size(&img_path_str, &mount_path_str, config, sweep_outcome).await
-            {
-                warn!(
-                    "Failed to reconcile btrfs image size: {:#}. Continuing with current size.",
-                    e
-                );
-            }
+            let outcome =
+                reconcile_img_size(&img_path_str, &mount_path_str, config, sweep_outcome).await;
+            handle_reconcile_outcome(outcome, &mount_path_str, || is_mounted(&mount_path_str))
+                .await?;
         }
 
         let snapshots_dir = self.mount_path.join(SNAPSHOTS_DIR);
@@ -1336,6 +1332,175 @@ fn compute_target_size(img_size_gb: u64, img_max_percent: f64, total_bytes: u64)
     std::cmp::min(by_size, by_percent)
 }
 
+/// Failure from `reconcile_img_size`, distinguishing whether the btrfs loop
+/// mount remained active or was unmounted before the error occurred.
+#[derive(Debug)]
+enum ReconcileError {
+    /// Failed before unmounting (or after remounting), so the btrfs image mount
+    /// should still be active and bootstrap may continue if mount state is intact.
+    MountIntact(anyhow::Error),
+    /// Failed after `umount` succeeded and before `mount` re-established the
+    /// btrfs image; bootstrap must fail closed instead of operating on the
+    /// unmounted parent filesystem.
+    Unmounted(anyhow::Error),
+}
+
+/// Resolve the outcome of `reconcile_img_size` for `BtrfsLoopBackend::bootstrap`.
+///
+/// Pre-`umount` (or post-remount) failures warn and continue only when
+/// `mount_path` is still mounted; post-`umount` failures or any missing /
+/// unverifiable mount fail closed so `bootstrap` never writes `snapshots/` into
+/// an unmounted host directory (or an exposed underlying stacked mount).
+async fn handle_reconcile_outcome<F, Fut>(
+    outcome: Result<(), ReconcileError>,
+    mount_path: &str,
+    check_mounted: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
+{
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(ReconcileError::Unmounted(e)) => Err(e).with_context(|| {
+            format!(
+                "Btrfs image size reconcile failed after unmounting {}; \
+                 refusing to continue bootstrap with unmounted storage",
+                mount_path
+            )
+        }),
+        Err(ReconcileError::MountIntact(e)) => match check_mounted().await {
+            Ok(true) => {
+                warn!(
+                    "Failed to reconcile btrfs image size: {:#}. Continuing with current size.",
+                    e
+                );
+                Ok(())
+            }
+            Ok(false) => Err(e).with_context(|| {
+                format!(
+                    "Btrfs image size reconcile failed and {} is no longer mounted; \
+                     refusing to continue bootstrap",
+                    mount_path
+                )
+            }),
+            Err(mount_err) => Err(e).with_context(|| {
+                format!(
+                    "Btrfs image size reconcile failed and mount state of {} could not be \
+                     verified ({:#}); refusing to continue bootstrap",
+                    mount_path, mount_err
+                )
+            }),
+        },
+    }
+}
+
+/// Operations executed during the shrink-and-remount phase of `reconcile_img_size`.
+#[async_trait]
+trait ShrinkOps: Sync {
+    async fn resize_fs(&self, mount_path: &str, target: u64) -> anyhow::Result<()>;
+    async fn find_loop(&self, img_path: &str) -> anyhow::Result<String>;
+    async fn umount(&self, mount_path: &str) -> anyhow::Result<()>;
+    async fn detach_loop(&self, loop_device: &str) -> anyhow::Result<()>;
+    async fn truncate_img(&self, img_path: &str, target: u64) -> anyhow::Result<()>;
+    async fn attach_loop(&self, img_path: &str) -> anyhow::Result<String>;
+    async fn mount(&self, loop_device: &str, mount_path: &str) -> anyhow::Result<()>;
+}
+
+struct RealShrinkOps;
+
+#[async_trait]
+impl ShrinkOps for RealShrinkOps {
+    async fn resize_fs(&self, mount_path: &str, target: u64) -> anyhow::Result<()> {
+        run_command_checked(
+            "btrfs",
+            &["filesystem", "resize", &target.to_string(), mount_path],
+        )
+        .await
+    }
+
+    async fn find_loop(&self, img_path: &str) -> anyhow::Result<String> {
+        find_loop_device_for(img_path).await
+    }
+
+    async fn umount(&self, mount_path: &str) -> anyhow::Result<()> {
+        run_command_checked("umount", &[mount_path]).await
+    }
+
+    async fn detach_loop(&self, loop_device: &str) -> anyhow::Result<()> {
+        run_command_checked("losetup", &["-d", loop_device]).await
+    }
+
+    async fn truncate_img(&self, img_path: &str, target: u64) -> anyhow::Result<()> {
+        run_command_checked("truncate", &["-s", &target.to_string(), img_path]).await
+    }
+
+    async fn attach_loop(&self, img_path: &str) -> anyhow::Result<String> {
+        attach_loop(img_path).await
+    }
+
+    async fn mount(&self, loop_device: &str, mount_path: &str) -> anyhow::Result<()> {
+        run_command_checked("mount", &[loop_device, mount_path]).await
+    }
+}
+
+/// Execute the shrink-and-remount sequence after pre-flight guards pass.
+///
+/// Failures before `umount` succeeds return `ReconcileError::MountIntact`; any
+/// failure after `umount` and before `mount` succeeds returns
+/// `ReconcileError::Unmounted` so callers fail closed.
+async fn shrink_and_remount<O: ShrinkOps>(
+    ops: &O,
+    img_path: &str,
+    mount_path_str: &str,
+    target: u64,
+) -> Result<(), ReconcileError> {
+    // Shrink fs first — fails cleanly if used bytes exceed target, no data loss.
+    ops.resize_fs(mount_path_str, target)
+        .await
+        .context("Failed to shrink btrfs filesystem (data may exceed new size)")
+        .map_err(ReconcileError::MountIntact)?;
+    let loop_device = ops
+        .find_loop(img_path)
+        .await
+        .context("Failed to locate loop device for image")
+        .map_err(ReconcileError::MountIntact)?;
+    ops.umount(mount_path_str)
+        .await
+        .context("Failed to unmount for image shrink")
+        .map_err(ReconcileError::MountIntact)?;
+
+    // Past `umount`: the loop btrfs mount is offline until `mount` below
+    // succeeds. Any failure here must be reported as `Unmounted` so bootstrap
+    // fails closed instead of writing to the parent filesystem or an exposed
+    // underlying stacked mount.
+    ops.detach_loop(&loop_device)
+        .await
+        .context("Failed to detach loop device")
+        .map_err(ReconcileError::Unmounted)?;
+    ops.truncate_img(img_path, target)
+        .await
+        .context("Failed to truncate image file")
+        .map_err(ReconcileError::Unmounted)?;
+    let new_loop = ops
+        .attach_loop(img_path)
+        .await
+        .context("Failed to reattach loop device")
+        .map_err(ReconcileError::Unmounted)?;
+    if let Err(e) = ops.mount(&new_loop, mount_path_str).await {
+        if let Err(detach_err) = ops.detach_loop(&new_loop).await {
+            warn!(
+                "Failed to detach loop {} after remount failure: {:#}",
+                new_loop, detach_err
+            );
+        }
+        return Err(ReconcileError::Unmounted(
+            e.context("Failed to remount after image shrink"),
+        ));
+    }
+    Ok(())
+}
+
 /// Reconcile on-disk img size against computed target.
 ///
 /// - Equal: no-op (still runs a final `btrfs fs resize max` for self-healing).
@@ -1346,19 +1511,26 @@ async fn reconcile_img_size(
     mount_path_str: &str,
     config: &DaemonConfig,
     sweep_outcome: btrfs_common::ZombieSweepOutcome,
-) -> anyhow::Result<()> {
+) -> Result<(), ReconcileError> {
     let current = tokio::fs::metadata(img_path)
         .await
-        .with_context(|| format!("Failed to stat image {}", img_path))?
+        .with_context(|| format!("Failed to stat image {}", img_path))
+        .map_err(ReconcileError::MountIntact)?
         .len();
 
-    let img_dir =
-        derive_img_dir(img_path).context("Failed to derive image directory from img_path")?;
+    let img_dir = derive_img_dir(img_path)
+        .context("Failed to derive image directory from img_path")
+        .map_err(ReconcileError::MountIntact)?;
     let df_output = run_command("df", &["-P", "-B1", &img_dir])
         .await
-        .context("Failed to get host partition info for reconcile")?;
-    let total = parse_df_total(&df_output).context("Failed to parse df total")?;
-    let avail = parse_df_available(&df_output).context("Failed to parse df available")?;
+        .context("Failed to get host partition info for reconcile")
+        .map_err(ReconcileError::MountIntact)?;
+    let total = parse_df_total(&df_output)
+        .context("Failed to parse df total")
+        .map_err(ReconcileError::MountIntact)?;
+    let avail = parse_df_available(&df_output)
+        .context("Failed to parse df available")
+        .map_err(ReconcileError::MountIntact)?;
 
     let target = compute_target_size(config.img_size, config.img_max_percent, total);
 
@@ -1381,13 +1553,16 @@ async fn reconcile_img_size(
             info!("Growing btrfs image: {} -> {} bytes", current, target);
             run_command_checked("truncate", &["-s", &target.to_string(), img_path])
                 .await
-                .context("Failed to grow sparse image file")?;
+                .context("Failed to grow sparse image file")
+                .map_err(ReconcileError::MountIntact)?;
             let loop_device = find_loop_device_for(img_path)
                 .await
-                .context("Failed to locate loop device for image")?;
+                .context("Failed to locate loop device for image")
+                .map_err(ReconcileError::MountIntact)?;
             run_command_checked("losetup", &["-c", &loop_device])
                 .await
-                .context("Failed to refresh loop device capacity")?;
+                .context("Failed to refresh loop device capacity")
+                .map_err(ReconcileError::MountIntact)?;
             // Final `btrfs fs resize max` runs below; on failure state is recoverable.
             grew_to = Some(target);
         }
@@ -1418,31 +1593,7 @@ async fn reconcile_img_size(
                 return Ok(());
             }
             warn!("Shrinking btrfs image: {} -> {} bytes", current, target);
-            // Shrink fs first — fails cleanly if used bytes exceed target, no data loss.
-            run_command_checked(
-                "btrfs",
-                &["filesystem", "resize", &target.to_string(), mount_path_str],
-            )
-            .await
-            .context("Failed to shrink btrfs filesystem (data may exceed new size)")?;
-            let loop_device = find_loop_device_for(img_path)
-                .await
-                .context("Failed to locate loop device for image")?;
-            run_command_checked("umount", &[mount_path_str])
-                .await
-                .context("Failed to unmount for image shrink")?;
-            run_command_checked("losetup", &["-d", &loop_device])
-                .await
-                .context("Failed to detach loop device")?;
-            run_command_checked("truncate", &["-s", &target.to_string(), img_path])
-                .await
-                .context("Failed to truncate image file")?;
-            let new_loop = attach_loop(img_path)
-                .await
-                .context("Failed to reattach loop device")?;
-            run_command_checked("mount", &[&new_loop, mount_path_str])
-                .await
-                .context("Failed to remount after image shrink")?;
+            shrink_and_remount(&RealShrinkOps, img_path, mount_path_str, target).await?;
             info!("Btrfs image shrunk to {} bytes", target);
         }
     }
@@ -1451,7 +1602,8 @@ async fn reconcile_img_size(
     // half-done grow (truncate+losetup -c succeeded but btrfs resize died).
     run_command_checked("btrfs", &["filesystem", "resize", "max", mount_path_str])
         .await
-        .context("Failed to sync btrfs filesystem size to loop capacity")?;
+        .context("Failed to sync btrfs filesystem size to loop capacity")
+        .map_err(ReconcileError::MountIntact)?;
     if let Some(t) = grew_to {
         info!("Btrfs image grown to {} bytes", t);
     }
@@ -1663,9 +1815,10 @@ fn parse_df_total(output: &str) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_target_size, derive_img_dir, loop_node_mknod_args, normalize_free_loop_dev,
-        parse_df_available, parse_df_total, parse_losetup_j, parse_sysfs_dev_numbers,
-        reconcile_img_size, BtrfsLoopBackend,
+        compute_target_size, derive_img_dir, handle_reconcile_outcome, loop_node_mknod_args,
+        normalize_free_loop_dev, parse_df_available, parse_df_total, parse_losetup_j,
+        parse_sysfs_dev_numbers, reconcile_img_size, shrink_and_remount, BtrfsLoopBackend,
+        ReconcileError, ShrinkOps,
     };
     use ws_ckpt_common::{DaemonConfig, SNAPSHOTS_DIR};
 
@@ -2018,6 +2171,285 @@ mod tests {
         assert_eq!(
             loop_node_mknod_args("/dev/loop8", "7", "128"),
             ["-m", "0660", "/dev/loop8", "b", "7", "128"]
+        );
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ShrinkFailStep {
+        None,
+        ResizeFs,
+        FindLoop,
+        Umount,
+        DetachLoop,
+        TruncateImg,
+        AttachLoop,
+        Mount,
+    }
+
+    struct MockShrinkOps {
+        fail_at: ShrinkFailStep,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MockShrinkOps {
+        fn new(fail_at: ShrinkFailStep) -> Self {
+            Self {
+                fail_at,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, entry: impl Into<String>) {
+            self.calls.lock().unwrap().push(entry.into());
+        }
+
+        fn recorded_calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ShrinkOps for MockShrinkOps {
+        async fn resize_fs(&self, _mount_path: &str, _target: u64) -> anyhow::Result<()> {
+            self.record("resize_fs");
+            if self.fail_at == ShrinkFailStep::ResizeFs {
+                anyhow::bail!("simulated resize failure");
+            }
+            Ok(())
+        }
+
+        async fn find_loop(&self, _img_path: &str) -> anyhow::Result<String> {
+            self.record("find_loop");
+            if self.fail_at == ShrinkFailStep::FindLoop {
+                anyhow::bail!("simulated find_loop failure");
+            }
+            Ok("/dev/loop0".to_string())
+        }
+
+        async fn umount(&self, _mount_path: &str) -> anyhow::Result<()> {
+            self.record("umount");
+            if self.fail_at == ShrinkFailStep::Umount {
+                anyhow::bail!("simulated umount busy");
+            }
+            Ok(())
+        }
+
+        async fn detach_loop(&self, loop_device: &str) -> anyhow::Result<()> {
+            self.record(format!("detach_loop:{loop_device}"));
+            if self.fail_at == ShrinkFailStep::DetachLoop {
+                anyhow::bail!("simulated losetup -d failure");
+            }
+            Ok(())
+        }
+
+        async fn truncate_img(&self, _img_path: &str, _target: u64) -> anyhow::Result<()> {
+            self.record("truncate_img");
+            if self.fail_at == ShrinkFailStep::TruncateImg {
+                anyhow::bail!("simulated truncate failure");
+            }
+            Ok(())
+        }
+
+        async fn attach_loop(&self, _img_path: &str) -> anyhow::Result<String> {
+            self.record("attach_loop");
+            if self.fail_at == ShrinkFailStep::AttachLoop {
+                anyhow::bail!("simulated attach_loop failure");
+            }
+            Ok("/dev/loop9".to_string())
+        }
+
+        async fn mount(&self, loop_device: &str, _mount_path: &str) -> anyhow::Result<()> {
+            self.record(format!("mount:{loop_device}"));
+            if self.fail_at == ShrinkFailStep::Mount {
+                anyhow::bail!("simulated mount failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn shrink_and_remount_pre_umount_failures_keep_mount_intact() {
+        for (step, expected_ctx) in [
+            (
+                ShrinkFailStep::ResizeFs,
+                "Failed to shrink btrfs filesystem",
+            ),
+            (ShrinkFailStep::FindLoop, "Failed to locate loop device"),
+            (ShrinkFailStep::Umount, "Failed to unmount for image shrink"),
+        ] {
+            let ops = MockShrinkOps::new(step);
+            let err = shrink_and_remount(&ops, "/var/lib/ws-ckpt/data.img", "/mnt/ws", GB)
+                .await
+                .expect_err("pre-umount failure must return Err");
+            match err {
+                ReconcileError::MountIntact(e) => {
+                    assert!(
+                        format!("{e:#}").contains(expected_ctx),
+                        "{step:?}: unexpected error {e:#}"
+                    );
+                }
+                ReconcileError::Unmounted(e) => {
+                    panic!("{step:?} failed before umount completed, expected MountIntact, got Unmounted({e:#})");
+                }
+            }
+            let calls = ops.recorded_calls();
+            assert!(
+                !calls.iter().any(|c| c.starts_with("detach_loop")),
+                "{step:?} must not proceed past umount: {calls:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shrink_and_remount_post_umount_failures_report_unmounted() {
+        for (step, expected_ctx) in [
+            (ShrinkFailStep::DetachLoop, "Failed to detach loop device"),
+            (ShrinkFailStep::TruncateImg, "Failed to truncate image file"),
+            (ShrinkFailStep::AttachLoop, "Failed to reattach loop device"),
+            (
+                ShrinkFailStep::Mount,
+                "Failed to remount after image shrink",
+            ),
+        ] {
+            let ops = MockShrinkOps::new(step);
+            let err = shrink_and_remount(&ops, "/var/lib/ws-ckpt/data.img", "/mnt/ws", GB)
+                .await
+                .expect_err("post-umount failure must return Err");
+            match err {
+                ReconcileError::Unmounted(e) => {
+                    assert!(
+                        format!("{e:#}").contains(expected_ctx),
+                        "{step:?}: unexpected error {e:#}"
+                    );
+                }
+                ReconcileError::MountIntact(e) => {
+                    panic!(
+                        "{step:?} failed after umount, expected Unmounted, got MountIntact({e:#})"
+                    );
+                }
+            }
+            if step == ShrinkFailStep::Mount {
+                let calls = ops.recorded_calls();
+                assert!(
+                    calls.iter().any(|c| c == "detach_loop:/dev/loop9"),
+                    "remount failure should detach newly attached loop: {calls:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shrink_and_remount_success_executes_expected_order() {
+        let ops = MockShrinkOps::new(ShrinkFailStep::None);
+        shrink_and_remount(&ops, "/var/lib/ws-ckpt/data.img", "/mnt/ws", GB)
+            .await
+            .expect("full shrink sequence should succeed");
+        assert_eq!(
+            ops.recorded_calls(),
+            vec![
+                "resize_fs",
+                "find_loop",
+                "umount",
+                "detach_loop:/dev/loop0",
+                "truncate_img",
+                "attach_loop",
+                "mount:/dev/loop9",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_reconcile_outcome_warns_and_continues_for_pre_umount_error_while_mounted() {
+        let mount_checked = std::sync::atomic::AtomicBool::new(false);
+        handle_reconcile_outcome(Ok(()), "/mnt/ws", || async {
+            mount_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(false)
+        })
+        .await
+        .expect("Ok outcome must succeed without querying mount");
+        assert!(!mount_checked.load(std::sync::atomic::Ordering::SeqCst));
+
+        let pre_umount_err = Err(ReconcileError::MountIntact(anyhow::anyhow!(
+            "Failed to shrink btrfs filesystem"
+        )));
+        handle_reconcile_outcome(pre_umount_err, "/mnt/ws", || async { Ok(true) })
+            .await
+            .expect("pre-umount failure with intact mount should warn and continue");
+    }
+
+    #[tokio::test]
+    async fn handle_reconcile_outcome_fails_closed_for_post_umount_error() {
+        // Even if check_mounted would return Ok(true) (e.g. an underlying
+        // stacked mount became exposed after umount), Unmounted must still fail
+        // closed without trusting check_mounted.
+        let probe_called = std::sync::atomic::AtomicBool::new(false);
+        let outcome = Err(ReconcileError::Unmounted(anyhow::anyhow!(
+            "Failed to remount after image shrink"
+        )));
+        let err = handle_reconcile_outcome(outcome, "/mnt/ws", || async {
+            probe_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        })
+        .await
+        .expect_err("post-umount reconcile failure must fail closed");
+
+        assert!(
+            !probe_called.load(std::sync::atomic::Ordering::SeqCst),
+            "Unmounted errors must fail closed unconditionally"
+        );
+        let chain = format!("{err:#}");
+        assert!(chain.contains("after unmounting"), "{chain}");
+        assert!(
+            chain.contains("Failed to remount after image shrink"),
+            "{chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_reconcile_outcome_fails_closed_when_mount_lost_or_unverifiable() {
+        let err = handle_reconcile_outcome(
+            Err(ReconcileError::MountIntact(anyhow::anyhow!(
+                "Failed to unmount for image shrink"
+            ))),
+            "/mnt/ws",
+            || async { Ok(false) },
+        )
+        .await
+        .expect_err("missing mount after reconcile failure must fail closed");
+        assert!(format!("{err:#}").contains("is no longer mounted"));
+
+        let err = handle_reconcile_outcome(
+            Err(ReconcileError::MountIntact(anyhow::anyhow!(
+                "Failed to unmount for image shrink"
+            ))),
+            "/mnt/ws",
+            || async { Err(anyhow::anyhow!("cannot read /proc/mounts")) },
+        )
+        .await
+        .expect_err("unverifiable mount state after reconcile failure must fail closed");
+        let chain = format!("{err:#}");
+        assert!(chain.contains("could not be verified"), "{chain}");
+        assert!(chain.contains("cannot read /proc/mounts"), "{chain}");
+    }
+
+    #[tokio::test]
+    async fn reconcile_img_size_pre_umount_failure_is_mount_intact() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.img");
+        let config = DaemonConfig::default();
+
+        let err = reconcile_img_size(
+            missing.to_str().unwrap(),
+            "/not-a-btrfs-mount",
+            &config,
+            crate::backends::btrfs_common::ZombieSweepOutcome::Clear,
+        )
+        .await
+        .expect_err("missing image should fail reconcile");
+
+        assert!(
+            matches!(err, ReconcileError::MountIntact(_)),
+            "pre-umount stat failure should be MountIntact, got {err:?}"
         );
     }
 }
