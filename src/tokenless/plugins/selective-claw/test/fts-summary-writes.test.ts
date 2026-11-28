@@ -204,6 +204,75 @@ describe("summary writes and the full-text index", () => {
     );
   });
 
+  it("keeps a legacy archive usable while another connection holds the write lock", () => {
+    const directory = mkdtempSync(join(tmpdir(), "selective-claw-fts-busy-"));
+    directories.push(directory);
+    const path = join(directory, "archive.db");
+    const { db, store } = open(path);
+    store.createMessage({
+      sessionId: "a",
+      seq: 1,
+      turnSeq: 1,
+      role: "user",
+      content: "archivedword",
+      tokenCount: 1,
+    });
+    installLegacyTrigger(db);
+    db.exec("PRAGMA busy_timeout = 0");
+    const schemaVersion = db.prepare("PRAGMA schema_version").get();
+    const writer = createConnection(path);
+    connections.push(writer);
+
+    writer.exec("BEGIN IMMEDIATE");
+    try {
+      expect(() => runMigrations(db)).not.toThrow();
+      expect(() => db.exec("BEGIN; ROLLBACK")).not.toThrow();
+      expect(db.prepare("PRAGMA schema_version").get()).toEqual(schemaVersion);
+      expect(store.searchMessages("a", "archivedword", 10)).toHaveLength(1);
+    } finally {
+      writer.exec("ROLLBACK");
+    }
+
+    db.exec("UPDATE messages SET content = 'replacementword'");
+    expect(store.searchMessages("a", "archivedword", 10)).toEqual([]);
+    expect(store.searchMessages("a", "replacementword", 10)).toHaveLength(1);
+    runMigrations(db);
+    const before = changes(db);
+    store.setTurnSummary("a", 1, "retried upgrade");
+    expect(changes(db) - before).toBe(1);
+  });
+
+  it.each(["missing", "unknown"])(
+    "propagates a write lock error when the update trigger is %s",
+    (trigger) => {
+      const directory = mkdtempSync(join(tmpdir(), "selective-claw-fts-busy-"));
+      directories.push(directory);
+      const path = join(directory, "archive.db");
+      const { db } = open(path);
+      db.exec("DROP TRIGGER messages_au");
+      if (trigger === "unknown") {
+        db.exec(
+          "CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN SELECT 1; END",
+        );
+      }
+      db.exec("PRAGMA busy_timeout = 0");
+      const writer = createConnection(path);
+      connections.push(writer);
+
+      writer.exec("BEGIN IMMEDIATE");
+      try {
+        expect(() => runMigrations(db)).toThrow(
+          expect.objectContaining({ errcode: 5 }),
+        );
+        expect(() => db.exec("BEGIN; ROLLBACK")).not.toThrow();
+      } finally {
+        writer.exec("ROLLBACK");
+      }
+
+      expect(() => runMigrations(db)).not.toThrow();
+    },
+  );
+
   it("restores the legacy trigger if creating its replacement fails", () => {
     const { db, store } = open();
     store.createMessage({

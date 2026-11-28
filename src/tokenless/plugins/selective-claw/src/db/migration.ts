@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
+// The guard must cover every indexed column and the external-content row ID.
 const FTS_UPDATE_TRIGGER_SQL = `CREATE TRIGGER messages_au AFTER UPDATE ON messages
   WHEN old.message_id IS NOT new.message_id OR old.content IS NOT new.content
   BEGIN
@@ -8,6 +9,23 @@ const FTS_UPDATE_TRIGGER_SQL = `CREATE TRIGGER messages_au AFTER UPDATE ON messa
     INSERT INTO messages_fts(rowid, content)
       VALUES (new.message_id, new.content);
   END`;
+
+const LEGACY_FTS_UPDATE_TRIGGER_SQL = `CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.message_id, old.content);
+  INSERT INTO messages_fts(rowid, content) VALUES (new.message_id, new.content);
+END`.replace(/\s+/g, " ");
+
+const SQLITE_BUSY = 5;
+
+function isSqliteBusy(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "errcode" in error &&
+    typeof error.errcode === "number" &&
+    // SQLite puts the primary result code in the low byte.
+    (error.errcode & 0xff) === SQLITE_BUSY
+  );
+}
 
 function columnExists(db: DatabaseSync, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -18,7 +36,7 @@ function upgradeFtsUpdateTrigger(db: DatabaseSync): void {
   const trigger = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_au'",
   ).get() as { sql: string } | undefined;
-  // Keep ordinary archive opens read-only with respect to the trigger schema.
+  // Skip the schema write when the installed definition already matches.
   if (trigger?.sql === FTS_UPDATE_TRIGGER_SQL) return;
 
   db.exec("SAVEPOINT selective_claw_fts_update");
@@ -35,6 +53,19 @@ function upgradeFtsUpdateTrigger(db: DatabaseSync): void {
         "[selective-claw] FTS trigger upgrade failed; cleanup also failed",
         cleanupError,
       );
+      throw error;
+    }
+    // The old trigger is still correct after rollback. Defer the optimization
+    // only for this known definition, so a missing or invalid trigger cannot
+    // leave writes running against an unsynchronized index.
+    if (
+      isSqliteBusy(error) &&
+      trigger?.sql.trim().replace(/\s+/g, " ") === LEGACY_FTS_UPDATE_TRIGGER_SQL
+    ) {
+      console.warn(
+        "[selective-claw] FTS trigger upgrade deferred: archive is busy",
+      );
+      return;
     }
     throw error;
   }
