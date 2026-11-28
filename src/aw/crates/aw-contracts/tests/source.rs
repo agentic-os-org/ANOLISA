@@ -263,6 +263,46 @@ fn capability_cell_projection_covers_all_16_semantic_hooks() {
 }
 
 #[test]
+fn capability_cell_validation_ignores_source_order_for_sight_restriction() {
+    // A mixed Sight + Native cell claims control authority through its
+    // non-Sight sources, so validation must not depend on the order the
+    // sources were declared in.
+    let build = |sources: Vec<SourceKind>| CapabilityCell {
+        adapter: "qwenpaw".into(),
+        event: "tool.before".into(),
+        status: CapabilityStatus::Supported,
+        sources,
+        mode: Some(HookAuthority::Control),
+        effects: vec![HookEffect::Observe, HookEffect::Block],
+        failure_actions: Vec::new(),
+    };
+    build(vec![SourceKind::Native, SourceKind::Sight])
+        .validate()
+        .unwrap();
+    build(vec![SourceKind::Sight, SourceKind::Native])
+        .validate()
+        .unwrap();
+    // Sight alone still cannot claim control authority.
+    assert!(build(vec![SourceKind::Sight]).validate().is_err());
+    // Observe mode stays valid regardless of order.
+    let observe = |sources: Vec<SourceKind>| CapabilityCell {
+        adapter: "qwenpaw".into(),
+        event: "tool.before".into(),
+        status: CapabilityStatus::Supported,
+        sources,
+        mode: Some(HookAuthority::Observe),
+        effects: vec![HookEffect::Observe],
+        failure_actions: Vec::new(),
+    };
+    observe(vec![SourceKind::Sight, SourceKind::Native])
+        .validate()
+        .unwrap();
+    observe(vec![SourceKind::Native, SourceKind::Sight])
+        .validate()
+        .unwrap();
+}
+
+#[test]
 fn cross_language_vectors_match_in_rust_python_and_node() {
     let fixture_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
