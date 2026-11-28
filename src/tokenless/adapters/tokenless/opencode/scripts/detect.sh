@@ -21,7 +21,9 @@ if [ ! -f "$PLUGIN_SOURCE" ]; then
     exit 2
 fi
 
-VERSION="$($OPENCODE_BIN --version 2>/dev/null || true)"
+# Quote the executable so a path containing spaces stays one shell word;
+# an unquoted expansion would split it and report no version at all.
+VERSION="$("$OPENCODE_BIN" --version 2>/dev/null || true)"
 if [ -z "$VERSION" ]; then
     echo "[${COMPONENT}] ${AGENT}: opencode CLI did not report a version" >&2
     exit 2
