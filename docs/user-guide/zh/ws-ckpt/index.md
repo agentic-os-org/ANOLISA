@@ -282,6 +282,24 @@ ws-ckpt init -w /path/to/workspace
 两条命令默认要求交互确认；`--force` 仅跳过确认，不允许覆盖冲突数据，也不会让
 `unregister` 接受仍有 live 子卷的工作区。
 
+### 快照索引无法解码的工作区
+
+如果 daemon 启动时无法解码某个已注册工作区的活动快照索引，
+`ws-ckpt status -w /path/to/workspace --format json` 会在
+`unavailable_workspaces` 中显示该工作区的 ID、路径和原因。此时快照数未知。
+daemon 保留该工作区的注册记录、索引原始字节、工作树和快照。工作树沿用原有文件系统权限。
+
+索引不可用期间，ws-ckpt 拒绝该工作区的快照查询、evidence 查询、策略操作，
+以及 `checkpoint`、`cleanup`、`recover` 和 `unregister` 等管理命令。
+可以用 `-w` 列出或删除可用工作区的快照。全局 `list`（含 `--orphans` 和分页）、
+全局 `delete` 以及 `recover --all` 会在所有已注册索引可用后恢复。工作区策略汇总不可用时，
+可用 `config -g` 查看全局设置。
+
+要恢复该工作区，先停止 daemon，保留损坏的
+`<state-dir>/indexes/<ws_id>/index.json` 的副本。修复活动索引或换回确认有效的副本后，
+重启 daemon。确认带 `-w` 的 `status` 显示快照数，并用
+`list -w /path/to/workspace` 核对快照，再恢复管理操作。
+
 ### diff 输出标记
 
 默认仍为文本输出。程序读取文件变化时可使用 JSON：

@@ -132,7 +132,7 @@ pub async fn is_mounted(mount_path: &str) -> anyhow::Result<bool> {
 /// Ensure every registered workspace's user-facing path is a symlink pointing at
 /// `data_root/<ws_id>`; rebuild if missing or wrong target.
 pub async fn ensure_symlinks(state: &DaemonState) {
-    let all_ws = state.all_workspaces();
+    let all_ws = state.ready_workspaces();
     for arc in all_ws {
         let ws = arc.read().await;
         let expected_subvol_path = state.backend.data_root().join(&ws.ws_id);

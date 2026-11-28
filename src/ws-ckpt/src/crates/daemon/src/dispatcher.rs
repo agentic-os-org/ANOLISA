@@ -1,4 +1,4 @@
-use crate::state::DaemonState;
+use crate::state::{DaemonState, WorkspaceRegistration};
 use std::sync::Arc;
 use ws_ckpt_common::backend::{CreateAdmissionRefused, DiffError};
 use ws_ckpt_common::{
@@ -165,6 +165,9 @@ pub(crate) async fn dispatch_with_context(
                     crate::workspace_mgr::delete_snapshot(state, &ws, &snapshot, force).await
                 }
                 None => {
+                    if let Some(error) = state.incomplete_snapshot_scope_error() {
+                        return error;
+                    }
                     // Global lookup: find snapshot across all workspaces
                     match state.resolve_snapshot_globally(&snapshot).await {
                         Some((ws_path, resolved_id)) => {
@@ -179,7 +182,7 @@ pub(crate) async fn dispatch_with_context(
                         None => {
                             // Check if it's ambiguous or truly not found
                             let mut match_count = 0usize;
-                            for entry in state.all_workspaces() {
+                            for entry in state.ready_workspaces() {
                                 let ws = entry.read().await;
                                 if ws.index.snapshots.contains_key(&snapshot) {
                                     match_count += 1;
@@ -244,8 +247,10 @@ pub(crate) async fn dispatch_with_context(
             }
         },
         Request::Status { workspace } => {
-            // Inline status query logic
-            handle_status(state, workspace.as_deref()).await
+            Ok(handle_status(state, workspace.as_deref(), false).await)
+        }
+        Request::WorkspaceStatus { workspace } => {
+            Ok(handle_status(state, workspace.as_deref(), true).await)
         }
         Request::Cleanup { workspace, keep } => match state.ensure_bootstrapped().await {
             Err(e) => Err(e),
@@ -408,8 +413,10 @@ async fn auto_init_workspace(
     state: &Arc<DaemonState>,
     workspace: &str,
 ) -> anyhow::Result<Option<Response>> {
-    if state.resolve_workspace(workspace).await.is_some() {
-        return Ok(None); // already initialized
+    match state.lookup_workspace(workspace).await {
+        Some(WorkspaceRegistration::Ready(_)) => return Ok(None),
+        Some(WorkspaceRegistration::Unavailable(entry)) => return Ok(Some(entry.response())),
+        None => {}
     }
     tracing::info!(
         "workspace not initialized, auto-initializing: {}",
@@ -433,57 +440,68 @@ async fn auto_init_workspace(
     }
 }
 
-/// Handle the Status request inline: gather daemon info, workspace list, and filesystem usage.
+/// Build the same status fields for both protocol versions.
 async fn handle_status(
     state: &Arc<DaemonState>,
     workspace: Option<&str>,
-) -> anyhow::Result<Response> {
-    let uptime_secs = state.start_time.elapsed().as_secs();
-
-    let workspaces = if let Some(ws_str) = workspace {
-        // Single-workspace mode: resolve by ID, absolute path, or relative path
-        let arc = match state.resolve_workspace(ws_str).await {
-            Some(a) => a,
-            None => {
-                return Ok(Response::Error {
-                    code: ErrorCode::WorkspaceNotFound,
-                    message: format!("workspace not found: {}", ws_str),
-                });
+    include_unavailable: bool,
+) -> Response {
+    let (workspaces, unavailable_workspaces) = if let Some(workspace) = workspace {
+        match state.lookup_workspace(workspace).await {
+            Some(WorkspaceRegistration::Ready(arc)) => {
+                // Scoped status must not describe a stale subvolume as live.
+                // Global status still lists detached registrations for recover --all.
+                if let Some(error) = state.detached_registration_error(&arc).await {
+                    return error;
+                }
+                let ws = arc.read().await;
+                (
+                    vec![WorkspaceInfo {
+                        ws_id: ws.ws_id.clone(),
+                        path: ws.path.to_string_lossy().into_owned(),
+                        snapshot_count: ws.index.snapshots.len() as u32,
+                    }],
+                    Vec::new(),
+                )
             }
-        };
-        // Detached-registration guard: reporting snapshot counts for a stale
-        // subvolume would look healthy while the user's directory is not the
-        // one being described. Global status stays unguarded so `recover
-        // --all` can still enumerate detached workspaces to repair them.
-        if let Some(resp) = state.detached_registration_error(&arc).await {
-            return Ok(resp);
+            Some(WorkspaceRegistration::Unavailable(entry)) if include_unavailable => {
+                (Vec::new(), vec![entry.info()])
+            }
+            Some(WorkspaceRegistration::Unavailable(entry)) => return entry.response(),
+            None => {
+                return Response::Error {
+                    code: ErrorCode::WorkspaceNotFound,
+                    message: format!("workspace not found: {workspace}"),
+                }
+            }
         }
-
-        let ws = arc.read().await;
-        vec![WorkspaceInfo {
-            ws_id: ws.ws_id.clone(),
-            path: ws.path.to_string_lossy().to_string(),
-            snapshot_count: ws.index.snapshots.len() as u32,
-        }]
     } else {
-        // Global mode: return all workspaces
-        state.get_all_workspace_info().await
+        let unavailable = state.unavailable_workspaces();
+        if !include_unavailable && !unavailable.is_empty() {
+            // Older clients also use this request to enumerate recover --all targets.
+            return Response::Error {
+                code: ErrorCode::IoError,
+                message: "global status and recover --all require every workspace index to be available. Run status with a current ws-ckpt CLI for diagnostics".into(),
+            };
+        }
+        (state.get_all_workspace_info().await, unavailable)
     };
 
-    // Try to get filesystem usage; fallback to zeros on error (e.g., macOS)
-    let (fs_total_bytes, fs_used_bytes) = match state.backend.get_usage().await {
-        Ok((total, used)) => (total, used),
-        Err(_) => (0, 0),
+    let (fs_total_bytes, fs_used_bytes) = state.backend.get_usage().await.unwrap_or_default();
+    let report = StatusReport {
+        uptime_secs: state.start_time.elapsed().as_secs(),
+        workspaces,
+        fs_total_bytes,
+        fs_used_bytes,
     };
-
-    Ok(Response::StatusOk {
-        report: StatusReport {
-            uptime_secs,
-            workspaces,
-            fs_total_bytes,
-            fs_used_bytes,
-        },
-    })
+    if include_unavailable {
+        Response::WorkspaceStatusOk {
+            report,
+            unavailable_workspaces,
+        }
+    } else {
+        Response::StatusOk { report }
+    }
 }
 
 /// Handle the WatcherHealth request: name the workspaces running without a
@@ -536,8 +554,14 @@ fn build_config_report(state: &Arc<DaemonState>) -> ConfigReport {
 /// Handle ConfigOverview: global cfg + ws override roll-up. Walks every ws
 /// under read locks (cheap; no disk I/O — caller should reload first if alignment matters).
 async fn handle_config_overview(state: &Arc<DaemonState>) -> Response {
+    if state.has_unavailable_workspaces() {
+        return Response::Error {
+            code: ErrorCode::IoError,
+            message: "workspace policy totals are unavailable while a workspace index is unavailable. Use config -g for global settings or config -w for an available workspace".into(),
+        };
+    }
     let config = build_config_report(state);
-    let arcs = state.all_workspaces();
+    let arcs = state.ready_workspaces();
     let ws_total = arcs.len();
     let mut ws_with_override = 0;
     for arc in arcs {
@@ -728,15 +752,10 @@ async fn resolve_ws_for_policy(
     state: &Arc<DaemonState>,
     workspace: &str,
 ) -> Result<PolicyCtx, Response> {
-    let arc = match state.resolve_workspace(workspace).await {
-        Some(a) => a,
-        None => {
-            return Err(Response::Error {
-                code: ErrorCode::WorkspaceNotFound,
-                message: format!("workspace not found: {}", workspace),
-            });
-        }
-    };
+    let arc = state
+        .require_ready_workspace(workspace)
+        .await
+        .map_err(|error| error.response(workspace))?;
     let Some((_, mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await else {
         return Err(Response::Error {
             code: ErrorCode::WorkspaceNotFound,
@@ -1148,7 +1167,7 @@ mod tests {
             "the joined path must never escape the per-workspace snapshot namespace"
         );
         assert!(
-            state.all_workspaces().is_empty(),
+            state.ready_workspaces().is_empty(),
             "an unsafe id must not even auto-initialize the workspace"
         );
     }
@@ -1178,7 +1197,7 @@ mod tests {
                 other => panic!("expected rejection for {id:?}, got {other:?}"),
             }
             assert!(backend.create_ids().is_empty());
-            assert!(state.all_workspaces().is_empty());
+            assert!(state.ready_workspaces().is_empty());
             assert!(!ws.symlink_metadata().unwrap().file_type().is_symlink());
             assert_eq!(
                 std::fs::read(ws.join("payload")).unwrap(),
@@ -1209,7 +1228,7 @@ mod tests {
                 "no record may be created for {id:?}"
             );
             assert!(
-                state.all_workspaces().is_empty(),
+                state.ready_workspaces().is_empty(),
                 "an unsafe id must not even auto-initialize the workspace"
             );
         }
@@ -2102,6 +2121,284 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unavailable_registration_rejects_workspace_operations_and_incomplete_global_scopes() {
+        use ws_ckpt_common::{
+            persist, GuardedCheckpointRejectionCodeV2, GuardedRollbackRejectionCodeV2,
+            SnapshotIndex, WorkspaceGenerationTokenV2, INDEX_FILE,
+        };
+
+        let (original, ws_id, path, temp) = live_topology("ws-aaaaaa");
+        let workspace = path.to_str().unwrap().to_owned();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        let live_b = original.backend.data_root().join("ws-bbbbbb");
+        let path_b = temp.path().join("other-workspace");
+        std::fs::create_dir(&live_b).unwrap();
+        std::os::unix::fs::symlink(&live_b, &path_b).unwrap();
+        original
+            .register_workspace(
+                "ws-bbbbbb".into(),
+                path_b.clone(),
+                SnapshotIndex::new(path_b),
+            )
+            .unwrap();
+
+        let Response::RecoverPreviewOk { preview } = dispatch(
+            &original,
+            Request::RecoverPreview {
+                workspace: workspace.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("expected preview before index corruption");
+        };
+        original.save_manifest().await.unwrap();
+        let index_dir = original.index_dir(&ws_id);
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let index_path = index_dir.join(INDEX_FILE);
+        std::fs::write(&index_path, b"{broken").unwrap();
+        let policy_path = index_dir.join("policy.toml");
+        std::fs::write(&policy_path, b"auto_cleanup = false\n").unwrap();
+        let manifest = persist::load_state(&original.state_dir).unwrap().unwrap();
+        let state = Arc::new(
+            DaemonState::rebuild_from_persisted(
+                &manifest,
+                test_config(),
+                original.backend.clone(),
+                original.state_dir.clone(),
+                "persisted",
+            )
+            .await
+            .unwrap(),
+        );
+        state.mark_bootstrapped();
+
+        let alias = alias.to_str().unwrap().to_owned();
+        for target in [&ws_id, &workspace, &alias] {
+            for request in [
+                Request::Init {
+                    workspace: target.clone(),
+                },
+                checkpoint_request(std::path::Path::new(target), "snapshot"),
+                Request::Unregister {
+                    workspace: target.clone(),
+                },
+                Request::Recover {
+                    workspace: target.clone(),
+                },
+                Request::RecoverPreview {
+                    workspace: target.clone(),
+                },
+                Request::List {
+                    workspace: Some(target.clone()),
+                    format: None,
+                },
+                Request::ListOrphans {
+                    workspace: Some(target.clone()),
+                },
+                Request::ListPage {
+                    workspace: Some(target.clone()),
+                    orphans_only: false,
+                    limit: 10,
+                    cursor: None,
+                },
+                Request::Cleanup {
+                    workspace: target.clone(),
+                    keep: Some(1),
+                },
+                Request::Delete {
+                    workspace: Some(target.clone()),
+                    snapshot: "snapshot".into(),
+                    force: true,
+                },
+                Request::Rollback {
+                    workspace: target.clone(),
+                    to: Some("snapshot".into()),
+                    num_ancestors: None,
+                },
+                Request::RollbackPreview {
+                    workspace: target.clone(),
+                    to: Some("snapshot".into()),
+                    num_ancestors: None,
+                },
+                Request::Diff {
+                    workspace: target.clone(),
+                    from: "snapshot".into(),
+                    to: None,
+                },
+                Request::GetWorkspacePolicy {
+                    workspace: target.clone(),
+                },
+                Request::ReloadWorkspacePolicy {
+                    workspace: target.clone(),
+                },
+                Request::ResetWorkspacePolicy {
+                    workspace: target.clone(),
+                },
+                Request::PatchWorkspacePolicy {
+                    workspace: target.clone(),
+                    auto_cleanup: PolicyFieldOp::Set(true),
+                    auto_cleanup_keep: PolicyFieldOp::Unchanged,
+                },
+            ] {
+                let response = dispatch(&state, request.clone()).await;
+                assert!(
+                    matches!(response, Response::Error { code: ErrorCode::IoError, ref message }
+                    if message.contains(&ws_id) && message.contains("parse snapshot index")),
+                    "{request:?}: {response:?}"
+                );
+            }
+            let response = dispatch(
+                &state,
+                Request::WorkspaceStatus {
+                    workspace: Some(target.clone()),
+                },
+            )
+            .await;
+            assert!(
+                matches!(response, Response::WorkspaceStatusOk { report, unavailable_workspaces }
+                if report.workspaces.is_empty() && unavailable_workspaces[0].path == workspace)
+            );
+        }
+        assert!(
+            matches!(dispatch(&state, Request::RecoverConfirmed { preview }).await,
+            Response::Error { code: ErrorCode::IoError, message } if message.contains(&ws_id))
+        );
+
+        for request in [
+            Request::List {
+                workspace: None,
+                format: None,
+            },
+            Request::ListOrphans { workspace: None },
+            Request::ListPage {
+                workspace: None,
+                orphans_only: false,
+                limit: 10,
+                cursor: None,
+            },
+            Request::Delete {
+                workspace: None,
+                snapshot: "snapshot".into(),
+                force: true,
+            },
+        ] {
+            assert!(matches!(dispatch(&state, request).await,
+                Response::Error { code: ErrorCode::IoError, message } if message.contains("--workspace/-w")));
+        }
+        assert!(matches!(
+            dispatch(&state, Request::ConfigOverview).await,
+            Response::Error { code: ErrorCode::IoError, message } if message.contains("config -g")
+        ));
+        assert!(matches!(
+            dispatch(&state, Request::Config).await,
+            Response::ConfigOk { .. }
+        ));
+        assert!(
+            matches!(dispatch(&state, Request::Status { workspace: None }).await,
+            Response::Error { code: ErrorCode::IoError, message } if message.contains("recover --all"))
+        );
+        assert!(
+            matches!(dispatch(&state, Request::WorkspaceStatus { workspace: None }).await,
+            Response::WorkspaceStatusOk { report, unavailable_workspaces }
+                if report.workspaces.len() == 1 && report.workspaces[0].ws_id == "ws-bbbbbb"
+                    && unavailable_workspaces.len() == 1 && unavailable_workspaces[0].ws_id == ws_id)
+        );
+        assert!(matches!(
+            dispatch(
+                &state,
+                Request::List {
+                    workspace: Some("ws-bbbbbb".into()),
+                    format: None
+                }
+            )
+            .await,
+            Response::ListOk { .. }
+        ));
+
+        let generation = WorkspaceGenerationTokenV2::from_bytes([1; 32]);
+        let context = DispatchContext::new(Some(1000));
+        for request in [
+            Request::WorkspaceIdentityV2 {
+                registration_path: workspace.clone(),
+            },
+            Request::GuardedCheckpointV2 {
+                ws_id: ws_id.clone(),
+                expected_generation: generation,
+                checkpoint_id: "snapshot".into(),
+                operation_digest: [0; 32],
+                message: None,
+                metadata: None,
+                pin: false,
+            },
+            Request::CheckpointEvidenceV2 {
+                ws_id: ws_id.clone(),
+                expected_generation: generation,
+                checkpoint_id: "snapshot".into(),
+                operation_digest: [0; 32],
+            },
+        ] {
+            let response = dispatch_with_context(&state, request, context).await;
+            assert!(matches!(response, Response::GuardedCheckpointV2Rejected {
+                code: GuardedCheckpointRejectionCodeV2::DaemonNotReady, message
+            } if message.contains(&ws_id) && message.contains("parse snapshot index")));
+        }
+        for request in [
+            Request::GuardedRollbackPreviewV2 {
+                registered_path: workspace.clone(),
+                ws_id: ws_id.clone(),
+                expected_generation: generation,
+                target_snapshot_id: "snapshot".into(),
+            },
+            Request::GuardedRollbackV2 {
+                registered_path: workspace.clone(),
+                ws_id: ws_id.clone(),
+                expected_generation: generation,
+                target_snapshot_id: "snapshot".into(),
+                expected_diff_digest: [0; 32],
+                operation_id: "operation".into(),
+                operation_digest: [0; 32],
+            },
+            Request::GuardedRollbackEvidenceV2 {
+                ws_id: ws_id.clone(),
+                operation_id: "operation".into(),
+                operation_digest: [0; 32],
+            },
+        ] {
+            let response = dispatch_with_context(&state, request, context).await;
+            assert!(matches!(response, Response::GuardedRollbackV2Rejected {
+                code: GuardedRollbackRejectionCodeV2::DaemonNotReady, message
+            } if message.contains(&ws_id) && message.contains("parse snapshot index")));
+        }
+        let invalid = Request::CheckpointEvidenceV2 {
+            ws_id,
+            expected_generation: generation,
+            checkpoint_id: "../bad".into(),
+            operation_digest: [0; 32],
+        };
+        assert!(matches!(
+            dispatch_with_context(&state, invalid.clone(), context).await,
+            Response::GuardedCheckpointV2Rejected {
+                code: GuardedCheckpointRejectionCodeV2::InvalidCheckpointId,
+                ..
+            }
+        ));
+        assert!(matches!(
+            dispatch(&state, invalid).await,
+            Response::GuardedCheckpointV2Rejected {
+                code: GuardedCheckpointRejectionCodeV2::PeerCredentialsUnavailable,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read(&index_path).unwrap(), b"{broken");
+        assert_eq!(
+            std::fs::read(&policy_path).unwrap(),
+            b"auto_cleanup = false\n"
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_checkpoint_refuses_detached_registration() {
         let (state, _ws_id, ws_link, _temp) = live_topology("ws-dispatch");
         // Detach: replace the symlink with a plain directory (issue #3059 repro).
@@ -2390,7 +2687,7 @@ mod tests {
         assert!(matches!(response, Response::StatusOk { report }
             if report.workspaces.len() == 1 && report.workspaces[0].snapshot_count == 1));
         assert_eq!(arc.read().await.index.snapshots.len(), 1);
-        assert_eq!(state.all_workspaces().len(), 1);
+        assert_eq!(state.ready_workspaces().len(), 1);
         assert!(ws_link.is_dir());
     }
 
@@ -2481,7 +2778,7 @@ mod tests {
         );
         assert!(preserved.join("old-data").is_file());
         assert!(!backup.exists());
-        assert_eq!(state.all_workspaces().len(), 1);
+        assert_eq!(state.ready_workspaces().len(), 1);
     }
 
     #[tokio::test]
@@ -3067,7 +3364,7 @@ mod tests {
             )
             .unwrap();
         state.seed_health_advisory_snapshot(2, 1_000, 750, std::time::Duration::ZERO);
-        let workspace = state.all_workspaces().pop().unwrap();
+        let workspace = state.ready_workspaces().pop().unwrap();
         let _write_guard = workspace.write().await;
         assert!(state
             .refresh_health_advisory_with_timeout(std::time::Duration::from_millis(20))

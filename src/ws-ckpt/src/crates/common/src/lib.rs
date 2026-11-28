@@ -240,6 +240,11 @@ pub enum Request {
     /// positionally, so inserting a field would break older clients and
     /// the cosh-ng mirror of the status layout.
     WatcherHealth,
+    /// Status including registrations whose active snapshot index could not be decoded.
+    WorkspaceStatus {
+        /// Workspace path or ID; absent means all registered workspaces.
+        workspace: Option<String>,
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -432,6 +437,13 @@ pub enum Response {
         /// daemon treats every watched workspace as actively written
         /// across an overflow until quiescence is re-observed.
         watcher_queue_overflows: u64,
+    },
+    /// Reply to [`Request::WorkspaceStatus`].
+    WorkspaceStatusOk {
+        /// The existing status fields, with snapshot counts for available workspaces.
+        report: StatusReport,
+        /// Registered workspaces whose snapshot counts are unknown.
+        unavailable_workspaces: Vec<UnavailableWorkspaceInfo>,
     },
 }
 
@@ -1152,6 +1164,17 @@ pub struct WorkspaceInfo {
     pub ws_id: String,
     pub path: String,
     pub snapshot_count: u32,
+}
+
+/// A registered workspace whose active snapshot index could not be decoded.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableWorkspaceInfo {
+    /// Workspace ID.
+    pub ws_id: String,
+    /// Normalized registration path.
+    pub path: String,
+    /// Index recovery failure.
+    pub reason: String,
 }
 
 /// Status report for the daemon and its managed workspaces.

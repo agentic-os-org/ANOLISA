@@ -212,6 +212,10 @@ export class CommandExecutor {
       const output = await this.status(workspace, "json");
       if (output.exitCode !== 0) throw new Error(output.stderr || output.stdout);
       const report = JSON.parse(output.stdout);
+      const unavailable = report?.unavailable_workspaces;
+      if (Array.isArray(unavailable) && typeof unavailable[0]?.reason === "string") {
+        throw new Error(`workspace index is unavailable: ${unavailable[0].reason}`);
+      }
       const entries = report?.workspaces;
       if (!Array.isArray(entries) || entries.length !== 1
           || typeof entries[0]?.path !== "string" || !isAbsolute(entries[0].path)) {

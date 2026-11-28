@@ -204,7 +204,7 @@ fn age_cutoff(
 /// workspace `RwLock` guards are acquired only inside that serialized region.
 async fn auto_cleanup(state: &DaemonState) {
     info!("Running auto-cleanup pass (per-ws effective retention)...");
-    let all_ws = state.all_workspaces();
+    let all_ws = state.ready_workspaces();
     let now = chrono::Utc::now();
 
     for ws_arc in &all_ws {
@@ -284,7 +284,7 @@ async fn auto_cleanup(state: &DaemonState) {
 /// can catch it. Message building lives in [`assess_usage_health`] so the
 /// branches are coverable with stub backends (#3053 review P2).
 async fn health_check(state: &DaemonState) {
-    if state.all_workspaces().is_empty() {
+    if !state.has_registrations() {
         debug!("Health check skipped: no workspace registered");
         return;
     }
@@ -1429,6 +1429,69 @@ mod tests {
         error_state.seed_health_advisory_snapshot(2, 10, 1, std::time::Duration::from_secs(61));
         assert!(error_state.refresh_health_advisory().await.is_err());
         assert!(error_state.health_advisory_snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_cleanup_processes_ready_workspace_and_leaves_unavailable_workspace_intact() {
+        use super::auto_cleanup;
+        use crate::{index_store, snapshot_mgr, state::DaemonState};
+        use ws_ckpt_common::{persist, Response, SnapshotIndex, INDEX_FILE};
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = UsageProbeBackend::new(Ok((100, 1)), Ok(vec![]));
+        backend.data_root = temp.path().join("data");
+        backend.snapshots_root = temp.path().join("snapshots");
+        let backend = Arc::new(backend);
+        let config = cfg(true, CleanupRetention::Count(1));
+        let state_dir = temp.path().join("state");
+        let state = Arc::new(DaemonState::new(
+            config.clone(),
+            backend.clone(),
+            state_dir.clone(),
+        ));
+        for ws_id in ["ws-a", "ws-b"] {
+            let live = backend.data_root.join(ws_id);
+            let path = temp.path().join(ws_id);
+            std::fs::create_dir_all(&live).unwrap();
+            std::fs::write(live.join("canary"), ws_id).unwrap();
+            std::os::unix::fs::symlink(&live, &path).unwrap();
+            state
+                .register_workspace(ws_id.into(), path.clone(), SnapshotIndex::new(path))
+                .unwrap();
+            for id in ["old", "new"] {
+                assert!(matches!(
+                    snapshot_mgr::checkpoint(&state, ws_id, id, None, None, false)
+                        .await
+                        .unwrap(),
+                    Response::CheckpointOk { .. }
+                ));
+            }
+        }
+
+        let index_a = state.index_dir("ws-a").join(INDEX_FILE);
+        let old_a = backend.snapshots_root.join("ws-a/old/canary");
+        let new_a = backend.snapshots_root.join("ws-a/new/canary");
+        let broken = b"{broken";
+        std::fs::write(&index_a, broken).unwrap();
+        let manifest = persist::load_state(&state_dir).unwrap().unwrap();
+        let rebuilt = DaemonState::rebuild_from_persisted(
+            &manifest,
+            config,
+            backend.clone(),
+            state_dir,
+            "persisted",
+        )
+        .await
+        .unwrap();
+
+        auto_cleanup(&rebuilt).await;
+        let b = index_store::load(&rebuilt.index_dir("ws-b")).await.unwrap();
+        assert!(!b.snapshots.contains_key("old"));
+        assert!(b.snapshots.contains_key("new"));
+        assert!(!backend.snapshots_root.join("ws-b/old").exists());
+        assert_eq!(std::fs::read(&index_a).unwrap(), broken);
+        assert_eq!(std::fs::read_to_string(old_a).unwrap(), "ws-a");
+        assert_eq!(std::fs::read_to_string(new_a).unwrap(), "ws-a");
     }
 
     #[tokio::test]
