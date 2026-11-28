@@ -550,3 +550,140 @@ class TestMcporterDispatchStatus:
         events = self._convert(tmp_path, "Error: unknown tool: nope")
 
         assert self._virtual_dispatch(events)["response_status"] == 500
+
+
+class TestAuditSnapshotUrls:
+    """Verify audit_snapshot URLs stay isolated per service and honor port offsets."""
+
+    @staticmethod
+    def _write_minimal_session(tmp_path):
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text(
+            '{"type": "message", "timestamp": "2024-01-15T10:00:00.000Z", '
+            '"message": {"role": "user", "content": [{"type": "text", "text": "go"}]}}\n',
+            encoding="utf-8",
+        )
+        return session_file
+
+    def test_service_without_reset_endpoint_does_not_inherit_other_audit_url(self, tmp_path):
+        """Services lacking reset_endpoint or absent from task.yaml get an empty audit_url."""
+        from ce_runner.session_trace_converter import convert_session_to_trace
+
+        session_file = self._write_minimal_session(tmp_path)
+        task = {
+            "task_id": "T010",
+            "services": [
+                {"name": "gmail", "reset_endpoint": "http://localhost:9101/gmail/reset"},
+                {"name": "notes"},
+                {"name": "calendar", "reset_endpoint": "http://localhost:9102/calendar/reset"},
+            ],
+            "tools": [],
+        }
+        preloaded = {
+            "gmail": {"sent": 1},
+            "notes": {"items": []},
+            "unlisted": {"ok": True},
+            "calendar": {"events": 2},
+        }
+        output_file = tmp_path / "output.jsonl"
+        convert_session_to_trace(
+            str(session_file),
+            task,
+            str(output_file),
+            preloaded_audit_data=preloaded,
+        )
+        events = [
+            json.loads(line)
+            for line in output_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        snapshots = {
+            ev["service_name"]: ev["audit_url"]
+            for ev in events
+            if ev.get("type") == "audit_snapshot"
+        }
+        assert snapshots == {
+            "gmail": "http://localhost:9101/gmail/audit",
+            "notes": "",
+            "unlisted": "",
+            "calendar": "http://localhost:9102/calendar/audit",
+        }
+
+    def test_audit_snapshot_applies_mock_port_offset(self, tmp_path):
+        """Both preloaded and live-fetched audit_snapshot events record offset ports."""
+        from ce_runner.session_trace_converter import convert_session_to_trace
+
+        session_file = self._write_minimal_session(tmp_path)
+        task = {
+            "task_id": "T011",
+            "services": [
+                {"name": "gmail", "reset_endpoint": "http://localhost:9101/gmail/reset"},
+            ],
+            "tools": [],
+        }
+
+        preloaded_out = tmp_path / "preloaded.jsonl"
+        convert_session_to_trace(
+            str(session_file),
+            task,
+            str(preloaded_out),
+            mock_port_offset=50,
+            preloaded_audit_data={"gmail": {"messages": []}},
+        )
+        preloaded_snapshots = [
+            json.loads(line)
+            for line in preloaded_out.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("type") == "audit_snapshot"
+        ]
+        assert len(preloaded_snapshots) == 1
+        assert preloaded_snapshots[0]["audit_url"] == "http://localhost:9151/gmail/audit"
+
+        live_out = tmp_path / "live.jsonl"
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"messages": ["m1"]}
+        with patch("ce_runner.session_trace_converter.httpx.get", return_value=resp) as mock_get:
+            convert_session_to_trace(
+                str(session_file),
+                task,
+                str(live_out),
+                mock_port_offset=50,
+            )
+        mock_get.assert_called_once_with("http://localhost:9151/gmail/audit", timeout=10)
+        live_snapshots = [
+            json.loads(line)
+            for line in live_out.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("type") == "audit_snapshot"
+        ]
+        assert len(live_snapshots) == 1
+        assert live_snapshots[0]["audit_url"] == "http://localhost:9151/gmail/audit"
+
+    def test_nameless_service_entry_does_not_crash_audit_resolution(self, tmp_path):
+        """Service entries missing 'name' are skipped without raising KeyError."""
+        from ce_runner.session_trace_converter import convert_session_to_trace
+
+        session_file = self._write_minimal_session(tmp_path)
+        task = {
+            "task_id": "T012",
+            "services": [
+                {"reset_endpoint": "http://localhost:9199/unnamed/reset"},
+                {"name": "gmail", "reset_endpoint": "http://localhost:9101/gmail/reset"},
+            ],
+            "tools": [],
+        }
+        output_file = tmp_path / "output.jsonl"
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"ok": True}
+        with patch("ce_runner.session_trace_converter.httpx.get", return_value=resp) as mock_get:
+            convert_session_to_trace(str(session_file), task, str(output_file))
+
+        mock_get.assert_called_once_with("http://localhost:9101/gmail/audit", timeout=10)
+        snapshots = [
+            json.loads(line)
+            for line in output_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("type") == "audit_snapshot"
+        ]
+        assert len(snapshots) == 1
+        assert snapshots[0]["service_name"] == "gmail"
+        assert snapshots[0]["audit_url"] == "http://localhost:9101/gmail/audit"
