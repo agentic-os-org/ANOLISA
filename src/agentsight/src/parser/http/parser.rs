@@ -97,15 +97,7 @@ impl HttpParser {
         let path = req.path.context("Missing HTTP path")?.to_string();
         let version = req.version.context("Missing HTTP version")?;
 
-        let parsed_headers: HashMap<String, String> = req
-            .headers
-            .iter()
-            .map(|h| {
-                let key = h.name.to_lowercase();
-                let value = String::from_utf8_lossy(h.value).to_string();
-                (key, value)
-            })
-            .collect();
+        let parsed_headers = Self::collect_headers(req.headers);
 
         let body_len = data.len().saturating_sub(header_end);
 
@@ -143,15 +135,7 @@ impl HttpParser {
         let status_code = resp.code.context("Missing HTTP status code")?;
         let reason = resp.reason.context("Missing HTTP reason")?.to_string();
 
-        let parsed_headers: HashMap<String, String> = resp
-            .headers
-            .iter()
-            .map(|h| {
-                let key = h.name.to_lowercase();
-                let value = String::from_utf8_lossy(h.value).to_string();
-                (key, value)
-            })
-            .collect();
+        let parsed_headers = Self::collect_headers(resp.headers);
 
         let body_len = data.len().saturating_sub(header_end);
 
@@ -164,6 +148,24 @@ impl HttpParser {
             body_len,
             source_event: Rc::clone(event),
         })
+    }
+
+    fn collect_headers(headers: &[httparse::Header<'_>]) -> HashMap<String, String> {
+        let mut parsed = HashMap::<String, String>::new();
+        for header in headers {
+            let key = header.name.to_lowercase();
+            let value = String::from_utf8_lossy(header.value).into_owned();
+            // Content codings form an ordered list even across separate field lines.
+            if key == "content-encoding" {
+                if let Some(existing) = parsed.get_mut(&key) {
+                    existing.push_str(", ");
+                    existing.push_str(&value);
+                    continue;
+                }
+            }
+            parsed.insert(key, value);
+        }
+        parsed
     }
 }
 
@@ -186,6 +188,24 @@ mod tests {
             is_handshake: false,
             ssl_ptr: 0x1000,
         })
+    }
+
+    #[test]
+    fn repeated_content_codings_keep_wire_order_without_merging_other_headers() {
+        for start in ["POST /v1/chat/completions HTTP/1.1", "HTTP/1.1 200 OK"] {
+            let bytes = format!(
+                "{start}\r\nContent-Encoding: gzip, zstd\r\ncOnTeNt-EnCoDiNg: br\r\nX-Custom: first\r\nX-Custom: last\r\n\r\n"
+            );
+            let parsed = HttpParser::new()
+                .parse(make_ssl_event(bytes.as_bytes()))
+                .unwrap();
+            let headers = match parsed {
+                ParsedHttpMessage::Request(request) => request.headers,
+                ParsedHttpMessage::Response(response) => response.headers,
+            };
+            assert_eq!(headers["content-encoding"], "gzip, zstd, br");
+            assert_eq!(headers["x-custom"], "last");
+        }
     }
 
     #[test]
