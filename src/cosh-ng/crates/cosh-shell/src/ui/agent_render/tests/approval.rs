@@ -1560,6 +1560,60 @@ fn plain_approval_details_surface_secondary_git_repo_config_warning() {
 }
 
 #[test]
+fn carried_git_command_renders_card_primary_and_details_warning() {
+    use crate::tools::{assess_shell_command, AssessmentPolicy, AssessmentSource};
+
+    let policy = AssessmentPolicy::ask(AssessmentSource::ProviderShellTool);
+    let i18n = crate::I18n::new(crate::Language::EnUs);
+
+    // `eval` carries the payload with no stronger explanation of its own,
+    // so the git capability takes the card primary phrase.
+    let eval = assess_shell_command("eval 'git diff'", policy);
+    assert_eq!(
+        crate::ui::card_reason_phrase("high", eval.primary_reason(), i18n).as_deref(),
+        Some("may run repo-embedded scripts")
+    );
+
+    // `su -c` keeps privilege-escalation primary and the details panel
+    // adds the git warning as a secondary line.
+    let su = assess_shell_command("su -c 'git diff'", policy);
+    assert_eq!(su.primary_reason(), "privilege-escalation");
+    let trace = su.reason_trace();
+    let renderer = RatatuiInlineRenderer::with_width(70);
+    let text = renderer
+        .approval_details_panel_lines(ApprovalDetailsPanelModel {
+            id: "req-10499",
+            run_id: "run-10499",
+            source: "agent",
+            kind: "tool request",
+            status: "pending",
+            risk: "high",
+            subject: "tool Bash",
+            preview_label: "Tool input",
+            preview: "su -c 'git diff'",
+            request_id: None,
+            tool_use_id: None,
+            execution_path: None,
+            command_block_id: None,
+            redaction_status: None,
+            assessment: Some(CommandAssessmentSummaryModel {
+                impact: "high",
+                execution: "ask-user",
+                confidence: "high",
+                primary_reason: su.primary_reason(),
+                reason_trace: &trace,
+                auto_allow: None,
+                output_stability: "stable-snapshot",
+                output_exposure: "normal",
+            }),
+            audit_ref: None,
+        })
+        .join("\n");
+    assert!(text.contains("privilege-escalation"), "{text}");
+    assert!(text.contains("may run repo-embedded scripts"), "{text}");
+}
+
+#[test]
 fn approval_details_panel_uses_zh_catalog_labels() {
     let renderer = RatatuiInlineRenderer::with_width(70).with_language(crate::Language::ZhCn);
     let text = renderer
