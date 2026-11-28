@@ -21,7 +21,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
-use url::Url;
+use url::{Host, Url};
 
 const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
@@ -210,10 +210,7 @@ fn parse_loopback_proxy_endpoint(proxy_url: &str) -> Option<SocketAddr> {
     };
 
     let parsed = Url::parse(&candidate).ok()?;
-    let host = parsed.host_str()?;
-    if !is_loopback_host(host) {
-        return None;
-    }
+    let ip = loopback_ip(parsed.host()?)?;
 
     let scheme = parsed.scheme().to_ascii_lowercase();
     let port = parsed
@@ -223,20 +220,31 @@ fn parse_loopback_proxy_endpoint(proxy_url: &str) -> Option<SocketAddr> {
         return None;
     }
 
-    let ip = if host.eq_ignore_ascii_case("localhost") {
-        IpAddr::V4(Ipv4Addr::LOCALHOST)
-    } else {
-        host.parse::<IpAddr>().ok()?
-    };
-    if ip.is_loopback() {
-        Some(SocketAddr::new(ip, port))
-    } else {
-        None
-    }
+    Some(SocketAddr::new(ip, port))
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+/// Resolve a parsed URL host to a loopback IP address, or `None` for
+/// anything else.
+///
+/// This works on the parsed [`Host`] value rather than the serialized
+/// string: `Url::host_str` renders IPv6 addresses *with* brackets
+/// (`"[::1]"`), which no bracket-free string comparison ever matched, so
+/// every IPv6 loopback proxy endpoint was rejected. The parsed form also
+/// normalises the alternate IPv4 spellings (`http://127.1/`, `0x7f.1`) and
+/// accepts the whole `127/8` loopback range, matching how the sibling
+/// `model-service` crate validates its loopback base URL.
+fn loopback_ip(host: Host<&str>) -> Option<IpAddr> {
+    match host {
+        // `localhost` is pinned to 127.0.0.1: the in-netns bridge only
+        // listens on IPv4 loopback, so the host bridge must dial IPv4 even
+        // on hosts where the name resolves to ::1.
+        Host::Domain(name) if name.eq_ignore_ascii_case("localhost") => {
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        }
+        Host::Ipv4(ip) if ip.is_loopback() => Some(IpAddr::V4(ip)),
+        Host::Ipv6(ip) if ip.is_loopback() => Some(IpAddr::V6(ip)),
+        _ => None,
+    }
 }
 
 fn default_proxy_port(scheme: &str) -> u16 {
@@ -688,6 +696,72 @@ mod tests {
             parse_loopback_proxy_endpoint("http://example.com:3128"),
             None
         );
+    }
+
+    #[test]
+    fn parses_ipv6_loopback_proxy_endpoint() {
+        let endpoint = parse_loopback_proxy_endpoint("http://[::1]:43128")
+            .expect("IPv6 loopback proxy endpoint must be routable");
+        assert_eq!(
+            endpoint,
+            "[::1]:43128"
+                .parse::<SocketAddr>()
+                .expect("valid socket addr")
+        );
+    }
+
+    #[test]
+    fn parses_ipv6_loopback_proxy_endpoint_without_explicit_port() {
+        // No explicit port: the https default (443) applies, same as IPv4.
+        let endpoint = parse_loopback_proxy_endpoint("https://[::1]")
+            .expect("IPv6 loopback proxy endpoint without port must be routable");
+        assert_eq!(
+            endpoint,
+            "[::1]:443"
+                .parse::<SocketAddr>()
+                .expect("valid socket addr")
+        );
+    }
+
+    #[test]
+    fn plan_proxy_routes_includes_ipv6_loopback_endpoints() {
+        let mut env = HashMap::new();
+        env.insert("HTTPS_PROXY".to_string(), "http://[::1]:3128".to_string());
+
+        let plan = plan_proxy_routes(&env);
+        assert_eq!(plan.has_proxy_config, true);
+        assert_eq!(plan.routes.len(), 1);
+        assert_eq!(
+            plan.routes[0].endpoint,
+            "[::1]:3128"
+                .parse::<SocketAddr>()
+                .expect("valid socket addr")
+        );
+    }
+
+    #[test]
+    fn non_loopback_ipv6_proxy_endpoints_are_still_rejected() {
+        assert_eq!(
+            parse_loopback_proxy_endpoint("http://[2001:db8::1]:3128"),
+            None
+        );
+        // An IPv4-mapped loopback address is not an IPv6 loopback address.
+        assert_eq!(
+            parse_loopback_proxy_endpoint("http://[::ffff:127.0.0.1]:3128"),
+            None
+        );
+    }
+
+    #[test]
+    fn loopback_ipv4_aliases_are_accepted() {
+        // The whole 127/8 block is loopback (RFC 1122 §3.2.1.3); the parsed
+        // Host keeps it consistent with model-service's base URL check.
+        for proxy_url in ["http://127.0.0.2:8080", "http://127.1:8080"] {
+            assert!(
+                parse_loopback_proxy_endpoint(proxy_url).is_some(),
+                "{proxy_url} must be accepted as loopback"
+            );
+        }
     }
 
     #[test]
