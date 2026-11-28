@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -20,7 +21,7 @@ class RawPackagingTests(unittest.TestCase):
             version = tomllib.loads((source / "component.toml").read_text())["component"]["version"]
         return subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(PACKAGE),
                 "--source-dir",
                 str(source),
@@ -46,7 +47,7 @@ class RawPackagingTests(unittest.TestCase):
             if line and not line.startswith("#")
         }
         expected = {
-            f"share/anolisa/skills/{skill.name}/{path.relative_to(skill)}"
+            f"share/anolisa/skills/{skill.name}/{path.relative_to(skill).as_posix()}"
             for skill in skill_dirs
             for path in tracked_paths
             if path.is_relative_to(skill)
@@ -128,6 +129,29 @@ class RawPackagingTests(unittest.TestCase):
                 self.assertNotIn(b"experimental", contract.read())
             (skill / "SKILL.md").unlink()
             self.assertNotEqual(self.build(root, root / "bad").returncode, 0)
+
+    def test_nested_payload_uses_posix_member_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_contract = (ROOT / "component.toml").read_text()
+            version = tomllib.loads(source_contract)["component"]["version"]
+            (root / "component.toml").write_text(source_contract)
+            (root / "packaging").mkdir()
+            (root / "packaging/released-skills.txt").write_text("ai/example\n")
+            skill = root / "ai/example"
+            (skill / "nested/tools").mkdir(parents=True)
+            (skill / "SKILL.md").write_text("# Fixture\n")
+            (skill / "nested/tools/helper.py").write_text("print(1)\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            output = root / "artifacts"
+            result = self.build(root, output)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            archive = output / f"os-skills-{version}-linux-x86_64.tar.gz"
+            with tarfile.open(archive) as package:
+                names = package.getnames()
+            self.assertFalse(any("\\" in name for name in names), names)
+            self.assertIn("./share/anolisa/skills/example/nested/tools/helper.py", names)
 
 
 if __name__ == "__main__":
