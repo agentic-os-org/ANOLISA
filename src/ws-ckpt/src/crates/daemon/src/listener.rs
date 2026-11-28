@@ -1,3 +1,6 @@
+use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,26 +20,42 @@ pub async fn run_listener(
     state: Arc<DaemonState>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // 1. Clean up residual socket file
-    let _ = std::fs::remove_file(&state.socket_path);
+    let listener = prepare_socket(&state.socket_path).await?;
+    serve_listener(listener, state, cancel).await
+}
 
-    // 2. Ensure socket parent directory exists
-    if let Some(parent) = state.socket_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("Failed to create socket parent directory")?;
+pub(crate) async fn prepare_socket(socket_path: &Path) -> anyhow::Result<UnixListener> {
+    if let Err(err) = std::fs::remove_file(socket_path) {
+        // Leave directories intact and let bind report the occupied address.
+        if !matches!(err.kind(), ErrorKind::NotFound | ErrorKind::IsADirectory) {
+            return Err(err)
+                .with_context(|| format!("Failed to remove stale Unix socket at {socket_path:?}"));
+        }
     }
 
-    // 3. Bind the Unix listener
-    let listener = UnixListener::bind(&state.socket_path).context("Failed to bind Unix socket")?;
-    info!("Listening on {:?}", state.socket_path);
+    if let Some(parent) = socket_path.parent() {
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
+            format!("Failed to create parent directory for Unix socket at {socket_path:?}")
+        })?;
+    }
 
-    // 4. Set socket permissions to 0o666
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&state.socket_path, std::fs::Permissions::from_mode(0o666))
-        .context("Failed to set socket permissions")?;
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("Failed to bind Unix socket at {socket_path:?}"))?;
+    let permissions = std::fs::Permissions::from_mode(0o666);
+    if let Err(err) = std::fs::set_permissions(socket_path, permissions) {
+        let _ = std::fs::remove_file(socket_path);
+        return Err(err)
+            .with_context(|| format!("Failed to set Unix socket permissions at {socket_path:?}"));
+    }
+    info!("Listening on {:?}", socket_path);
+    Ok(listener)
+}
 
-    // 5. Accept loop
+pub(crate) async fn serve_listener(
+    listener: UnixListener,
+    state: Arc<DaemonState>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
     let mut join_set = JoinSet::new();
 
     loop {
@@ -71,7 +90,6 @@ pub async fn run_listener(
         while join_set.try_join_next().is_some() {}
     }
 
-    // 7. Wait for in-flight tasks to complete (with timeout)
     info!("Waiting for in-flight connections to complete...");
     let drain = async { while join_set.join_next().await.is_some() {} };
     if tokio::time::timeout(Duration::from_secs(10), drain)
