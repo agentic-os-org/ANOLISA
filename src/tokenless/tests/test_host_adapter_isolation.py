@@ -25,6 +25,7 @@ HOSTS = {
     "copilot-shell": "copilot-shell",
     "codex": "codex",
     "qwencode": "qwencode",
+    "workbuddy": "workbuddy",
     "unknown": "unknown",
 }
 
@@ -92,7 +93,15 @@ class HostAdapterIsolation(unittest.TestCase):
         for host in HOSTS:
             with self.subTest(host=host):
                 output = self.replay(host)
-                if host in {"codex", "qwencode", "copilot-shell", "unknown"}:
+                # workbuddy replaces only under a standalone CodeBuddy Code
+                # CLI ancestor, which this replay never runs under.
+                if host in {
+                    "codex",
+                    "qwencode",
+                    "copilot-shell",
+                    "workbuddy",
+                    "unknown",
+                }:
                     self.assertEqual(output, {})
                     continue
                 specific = output["hookSpecificOutput"]
