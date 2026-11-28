@@ -123,7 +123,13 @@ fn build_filter(args: &LogsArgs) -> Result<LogFilter, CliError> {
         component: args.component.clone(),
         operation_id: args.operation_id.clone(),
         severity_at_least,
-        object: args.object.clone(),
+        // The positional "all" selector means an unscoped query. Explicit
+        // flags still apply through their own fields in the filter.
+        object: args
+            .object
+            .as_ref()
+            .filter(|object| object.as_str() != "all")
+            .cloned(),
         since,
         limit: Some(limit),
     })
