@@ -6,4 +6,4 @@ mod frame;
 mod parser;
 
 pub use frame::{Http2FrameType, ParsedHttp2Frame};
-pub use parser::Http2Parser;
+pub use parser::{Http2Parser, Http2TrackingState};

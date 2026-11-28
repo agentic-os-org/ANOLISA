@@ -48,13 +48,28 @@ impl ReassemblyKey {
     }
 }
 
+/// Per-connection HTTP/2 tracking status returned by [`Http2Parser::tracking_state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Http2TrackingState {
+    /// No HTTP/2 history recorded for this `(pid, ssl_ptr, rw)` key.
+    Untracked,
+    /// Connection was previously identified as HTTP/2 and ended on a clean frame
+    /// boundary (empty buffer); non-HTTP/1.x reads route here, while an HTTP/1.x
+    /// start clears tracking so reused `ssl_ptr` pointers are not hijacked.
+    FrameBoundary,
+    /// Incomplete frame bytes are buffered; the next read must route here
+    /// unconditionally even if payload bytes look like HTTP/1.x.
+    MidFrame,
+}
+
 /// HTTP/2 frame parser with bounded per-connection split-frame reassembly.
 #[derive(Debug)]
 pub struct Http2Parser {
-    /// Incomplete frame tail per connection+direction. An entry with an empty
-    /// value marks a connection already identified as HTTP/2 and sitting on a
-    /// frame boundary; the entry itself routes the next read here even when it
-    /// starts inside a frame payload.
+    /// Incomplete frame tail per connection+direction. An empty value marks a
+    /// connection already identified as HTTP/2 and sitting on a clean frame
+    /// boundary (`FrameBoundary`): non-HTTP/1.x reads route here by state,
+    /// whereas HTTP/1.x prefixes clear the entry. Non-empty bytes (`MidFrame`)
+    /// route the next read here unconditionally.
     pending: RefCell<LruCache<ReassemblyKey, Vec<u8>>>,
 }
 
@@ -74,13 +89,39 @@ impl Http2Parser {
         }
     }
 
-    /// Whether `event` belongs to a connection+direction that is mid-frame or
-    /// already identified as HTTP/2, so it must be routed here by state before
-    /// any stateless heuristic.
-    pub fn is_tracking(&self, event: &SslEvent) -> bool {
-        self.pending
+    /// Return the connection+direction's current HTTP/2 tracking state in a
+    /// single LRU lookup (`Untracked`, `FrameBoundary`, or `MidFrame`).
+    pub fn tracking_state(&self, event: &SslEvent) -> Http2TrackingState {
+        match self
+            .pending
             .borrow()
-            .contains(&ReassemblyKey::from_ssl_event(event))
+            .peek(&ReassemblyKey::from_ssl_event(event))
+        {
+            None => Http2TrackingState::Untracked,
+            Some(buf) if buf.is_empty() => Http2TrackingState::FrameBoundary,
+            Some(_) => Http2TrackingState::MidFrame,
+        }
+    }
+
+    /// Whether `event` has an active HTTP/2 tracking entry (`FrameBoundary` or
+    /// `MidFrame`). Callers that distinguish clean frame boundaries from mid-frame
+    /// continuations should prefer [`Self::tracking_state`].
+    pub fn is_tracking(&self, event: &SslEvent) -> bool {
+        self.tracking_state(event) != Http2TrackingState::Untracked
+    }
+
+    /// Whether `event` belongs to a connection+direction currently holding
+    /// buffered bytes from an incomplete HTTP/2 frame.
+    pub fn has_pending_bytes(&self, event: &SslEvent) -> bool {
+        self.tracking_state(event) == Http2TrackingState::MidFrame
+    }
+
+    /// Drop any HTTP/2 reassembly/boundary tracking state for this
+    /// connection+direction (e.g. when a reused `ssl_ptr` switches to HTTP/1.x).
+    pub fn clear_tracking(&self, event: &SslEvent) {
+        self.pending
+            .borrow_mut()
+            .pop(&ReassemblyKey::from_ssl_event(event));
     }
 
     /// Parse all HTTP/2 frames from an SslEvent buffer, completing a frame
@@ -444,5 +485,41 @@ mod tests {
         assert!(frames[0].is_data());
         assert_eq!(frames[0].stream_id, 7);
         assert_eq!(frames[0].payload(), payload);
+    }
+
+    #[test]
+    fn test_tracking_state_transitions() {
+        let payload = b"hello";
+        let raw = build_frame(0, 0x01, 1, payload);
+        let cut = 5;
+        let parser = Http2Parser::new();
+        let probe_event = create_test_event(Vec::new());
+
+        assert_eq!(
+            parser.tracking_state(&probe_event),
+            Http2TrackingState::Untracked
+        );
+        assert!(
+            parser
+                .parse(create_test_event(raw[..cut].to_vec()))
+                .is_empty()
+        );
+        assert_eq!(
+            parser.tracking_state(&probe_event),
+            Http2TrackingState::MidFrame
+        );
+        assert_eq!(
+            parser.parse(create_test_event(raw[cut..].to_vec())).len(),
+            1
+        );
+        assert_eq!(
+            parser.tracking_state(&probe_event),
+            Http2TrackingState::FrameBoundary
+        );
+        parser.clear_tracking(&probe_event);
+        assert_eq!(
+            parser.tracking_state(&probe_event),
+            Http2TrackingState::Untracked
+        );
     }
 }
