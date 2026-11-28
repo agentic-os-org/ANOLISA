@@ -11,7 +11,11 @@ cd "$(git rev-parse --show-toplevel)"
 fail=0
 
 # --- 1. Bilingual naming convention -----------------------------------------
-bad=$(git ls-files '*.md' | grep -E '(_CN|_cn|-CN|-cn)\.md$|\.zh\.md$' || true)
+bad=$(while IFS= read -r -d '' path; do
+  if [[ "$path" =~ (_CN|_cn|-CN|-cn)\.md$|\.zh\.md$ ]]; then
+    printf '%s\n' "$path"
+  fi
+done < <(git ls-files -z '*.md'))
 if [ -n "$bad" ]; then
   echo "✗ Illegal Chinese doc naming — rename to *_zh.md (see specs/documentation-standard.md §1):"
   echo "$bad" | sed 's/^/    /'
