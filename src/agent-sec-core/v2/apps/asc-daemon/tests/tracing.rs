@@ -12,8 +12,11 @@ use std::os::unix::fs::DirBuilderExt as _;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::UnixStream;
 use tracing_subscriber::layer::SubscriberExt as _;
+
+mod support;
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct PausedPolicy(Mutex<mpsc::Receiver<()>>);
 impl PrincipalPolicy for PausedPolicy {
@@ -72,8 +75,7 @@ async fn tracing_span_remains_open_after_dispatch_timeout_until_work_finishes() 
         .await
         .unwrap();
     });
-    wait_for_socket(&path).await;
-    let mut stream = UnixStream::connect(&path).await.unwrap();
+    let mut stream = support::connect_when_ready(&path, STARTUP_TIMEOUT).await;
     stream
         .write_all(b"{\"method\":\"policy.templates.list\"}\n")
         .await
@@ -128,12 +130,19 @@ async fn tracing_span_remains_open_after_dispatch_timeout_until_work_finishes() 
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-async fn wait_for_socket(path: &std::path::Path) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !path.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+#[tokio::test]
+async fn waits_for_listener_when_socket_path_already_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("daemon.sock");
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+
+    let connect = support::connect_when_ready(&path, STARTUP_TIMEOUT);
+    let start_listener = async {
+        tokio::task::yield_now().await;
+        std::fs::remove_file(&path).unwrap();
+        tokio::net::UnixListener::bind(&path).unwrap()
+    };
+
+    // Poll the client first while the socket on disk has no active listener.
+    let (_client, _listener) = tokio::join!(biased; connect, start_listener);
 }

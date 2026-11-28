@@ -23,6 +23,8 @@ use tokio::{
 };
 use tracing_subscriber::layer::SubscriberExt as _;
 
+mod support;
+
 const WATCHDOG: Duration = Duration::from_secs(10);
 const CANARY: &str = "DO_NOT_EXPORT_SECRET_PAYLOAD";
 
@@ -58,22 +60,16 @@ async fn read(stream: UnixStream) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 async fn call(path: &Path, request: Value) -> Value {
-    let mut stream = UnixStream::connect(path).await.unwrap();
+    call_on_stream(UnixStream::connect(path).await.unwrap(), request).await
+}
+
+async fn call_on_stream(mut stream: UnixStream, request: Value) -> Value {
     let mut bytes = serde_json::to_vec(&request).unwrap();
     bytes.push(b'\n');
     stream.write_all(&bytes).await.unwrap();
     read(stream).await
 }
 
-async fn wait_for_socket(path: &Path) {
-    tokio::time::timeout(WATCHDOG, async {
-        while !path.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-}
 fn has_error(span: &SpanData, category: &str) -> bool {
     span.status == Status::error(category.to_owned())
         && span
@@ -135,9 +131,14 @@ async fn uds_failures_preserve_business_and_context() {
             .await
             .unwrap();
     });
-    wait_for_socket(&path).await;
+    let stream = support::connect_when_ready(&path, WATCHDOG).await;
     let list = json!({"method":"policy.templates.list"});
-    assert!(call(&path, list.clone()).await.get("result").is_some());
+    assert!(
+        call_on_stream(stream, list.clone())
+            .await
+            .get("result")
+            .is_some()
+    );
     for index in 0..12 {
         let created = call(
             &path,

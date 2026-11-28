@@ -4,12 +4,38 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 use uuid::Uuid;
+
+pub async fn connect_when_ready(path: &Path, startup_timeout: Duration) -> UnixStream {
+    tokio::time::timeout(startup_timeout, async {
+        loop {
+            match UnixStream::connect(path).await {
+                Ok(stream) => return stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!(
+                    "daemon socket connection at {} failed: {error}",
+                    path.display()
+                ),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("daemon did not accept connections at {}", path.display()))
+}
 
 pub async fn run_frozen_pap_crud_scenario(path: &Path, fixture: &Value) {
     let objects = fixture["objects"].as_object().unwrap();
