@@ -46,6 +46,59 @@ fn classify(call: &ToolCall, content: &str) -> CallVerdict {
     classify_call(call, Some(&result(content)))
 }
 
+#[test]
+fn completed_command_output_can_quote_an_interception() {
+    for marker in ["User denied permission", "you haven't granted it yet"] {
+        let text = format!("Archived event: {marker}\nExit code: 0");
+        for flag in [None, Some(false)] {
+            let mut observation = result(&text);
+            observation.extra = flag.map(|value| {
+                HashMap::from([(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(value))])
+            });
+            let verdict = classify_call(
+                &bash_call("cat archived-permissions.log"),
+                Some(&observation),
+            );
+            assert_eq!(verdict.status, CallStatus::Ok, "{marker}, flag={flag:?}");
+        }
+    }
+}
+
+#[test]
+fn genuine_interceptions_retain_precedence_without_a_successful_receipt() {
+    for (flag, text) in [
+        (None, "User denied permission"),
+        (Some(false), "User denied permission"),
+        (Some(true), "User denied permission\nExit code: 0"),
+        (None, "User denied permission\nExit code: 1"),
+    ] {
+        let mut observation = result(text);
+        observation.extra = flag
+            .map(|value| HashMap::from([(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(value))]));
+        assert_eq!(
+            classify_call(
+                &bash_call("cat archived-permissions.log"),
+                Some(&observation)
+            )
+            .status,
+            CallStatus::Blocked
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_successful_command_quoting_user_denial_is_not_blocked() {
+    let command = "printf '%s\\n' 'User denied permission'";
+    let output = std::process::Command::new("bash")
+        .args(["-c", command])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let text = format!("{}\nExit code: 0", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(classify(&bash_call(command), &text).status, CallStatus::Ok);
+}
+
 // ---------------------------------------------------------------------------
 // attribution_decision_spec.md §8 — T1..T7 (call-level fixtures)
 // ---------------------------------------------------------------------------
