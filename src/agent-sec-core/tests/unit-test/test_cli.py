@@ -522,6 +522,42 @@ def test_events_count_by_forwards_filters():
     assert captured["run_id"] == "run-abc"
 
 
+def test_events_count_ignores_offset():
+    reader = Mock()
+    reader.count.return_value = 10
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(app, ["events", "--count", "--offset", "3"])
+
+    assert result.exit_code == 0
+    assert result.output == "10\n"
+    assert "offset" not in reader.count.call_args.kwargs
+
+
+def test_events_count_by_ignores_offset():
+    reader = Mock()
+    reader.count_by.return_value = {"alpha": 5, "beta": 5}
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(
+            app, ["events", "--count-by", "category", "--offset", "8"]
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"alpha": 5, "beta": 5}
+    assert "offset" not in reader.count_by.call_args.kwargs
+
+
+def test_events_list_still_applies_offset():
+    reader = Mock()
+    reader.query.return_value = []
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        CliRunner().invoke(app, ["events", "--offset", "8", "--limit", "10"])
+
+    assert reader.query.call_args.kwargs["offset"] == 8
+
+
 def test_events_list_forwards_session_and_run_filters():
     reader = Mock()
     reader.query.return_value = []

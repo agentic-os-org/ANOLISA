@@ -292,7 +292,7 @@ agent-sec-cli events --since '2026-08-05T00:00:00Z' --until '2026-08-06T00:00:00
 | `--until` | 无 | ISO-8601 结束时间，不包含该边界 |
 | `--last-hours` | 无 | 查询最近 N 小时，可使用小数 |
 | `--limit` | `100` | 最多返回的事件数 |
-| `--offset` | `0` | 跳过的事件数 |
+| `--offset` | `0` | 列表输出跳过的事件数；`--count` / `--count-by` 始终对完整过滤集聚合，忽略该参数 |
 | `--count` | `false` | 只输出匹配事件数量 |
 | `--count-by` | 无 | 分组计数，仅支持 `category`、`event_type`、`trace_id` |
 | `--output`, `-o` | `table` | 列表输出格式：`table`、`json`、`jsonl` |
@@ -306,6 +306,7 @@ agent-sec-cli events --since '2026-08-05T00:00:00Z' --until '2026-08-06T00:00:00
 - `--count` 与 `--count-by` 互斥。
 - `--summary` 与 `--count`、`--count-by`、任何显式 `--output` 互斥。
 - `--summary` 会读取最多 10000 条匹配事件；普通列表使用 `--limit` 和 `--offset`。
+- `--offset` 只分页列表输出；`--count` 与 `--count-by` 始终统计完整过滤集，不要用它们配合 `--offset` 估算剩余数量。
 - 未知 `event_type` 或 `category` 会产生 warning，但查询仍会执行，以兼容未来新增类型。
 
 ## 事件类型与类别

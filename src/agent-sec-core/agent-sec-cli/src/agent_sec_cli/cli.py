@@ -463,7 +463,14 @@ def events(
         help="Query events from the last N hours (mutually exclusive with --since/--until).",
     ),
     limit: int = typer.Option(100, "--limit", help="Max results (default 100)."),
-    offset: int = typer.Option(0, "--offset", help="Skip N results (default 0)."),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        help=(
+            "Skip N rows in list output; ignored by --count/--count-by, "
+            "which always aggregate the full filtered set (default 0)."
+        ),
+    ),
     count: bool = typer.Option(
         False, "--count", help="Output only the count of matching events."
     ),
@@ -610,6 +617,7 @@ def events(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
 
+        # --offset pages rows; an aggregate has no rows to skip.
         result = reader.count(
             event_type=event_type,
             category=category,
@@ -618,7 +626,6 @@ def events(
             run_id=run_id,
             since=resolved_since,
             until=resolved_until,
-            offset=offset,
         )
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         raise typer.Exit(code=0)
@@ -633,6 +640,7 @@ def events(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
 
+        # Same as --count: grouping must see every event, not a page slice.
         result = reader.count_by(
             count_by,
             event_type=event_type,
@@ -642,7 +650,6 @@ def events(
             run_id=run_id,
             since=resolved_since,
             until=resolved_until,
-            offset=offset,
         )
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         raise typer.Exit(code=0)
