@@ -39,13 +39,13 @@ anolisa bug
 
 ```bash
 # 查看特定组件日志
-anolisa logs <component>
+anolisa logs agentsight
 
 # 查看 warning 和 error 记录（--level 是 --severity 的别名）
-anolisa logs <component> --severity warn
+anolisa logs agentsight --severity warn
 
 # 显示最后 N 行
-anolisa logs <component> --limit 50
+anolisa logs agentsight --limit 50
 ```
 
 ---

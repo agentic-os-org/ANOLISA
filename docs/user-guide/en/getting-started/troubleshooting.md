@@ -39,13 +39,13 @@ View component logs:
 
 ```bash
 # View logs for a specific component
-anolisa logs <component>
+anolisa logs agentsight
 
 # Show warning and error records (--level is an alias for --severity)
-anolisa logs <component> --severity warn
+anolisa logs agentsight --severity warn
 
 # Show last N lines
-anolisa logs <component> --limit 50
+anolisa logs agentsight --limit 50
 ```
 
 ---
