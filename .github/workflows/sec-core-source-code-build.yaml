@@ -33,7 +33,7 @@ jobs:
           - name: Ubuntu 22.04
             container: ''
           - name: Alinux4
-            container: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+            container: ci-images.invalid/sec-core:sha256-9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
     name: Source Build (${{ matrix.name }})
     runs-on: anolisa-k8s-general-ci-x64
     container: ${{ matrix.container || '' }}
@@ -41,15 +41,11 @@ jobs:
       - name: Configure mirrors and install base tools (Alinux4)
         if: matrix.container != ''
         run: |
-          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          dnf install -y tar git sudo bubblewrap gnupg2 jq
-          # Fix sudo PAM in container: replace with permissive config
-          cat > /etc/pam.d/sudo <<'EOF'
-          #%PAM-1.0
-          auth       sufficient   pam_rootok.so
-          account    sufficient   pam_permit.so
-          session    sufficient   pam_permit.so
-          EOF
+          # The image configures the mirrors and provides these packages.
+          # Add job-specific dnf install commands here.
+          rpm -q tar git sudo bubblewrap gnupg2 jq
+          sudo -u nobody true
+
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:

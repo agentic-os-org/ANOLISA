@@ -1,0 +1,102 @@
+name: CI test images
+
+on:
+  pull_request:
+    paths:
+      - '.github/runner-images/**'
+      - '.github/scripts/ci_image_catalog.py'
+      - '.github/workflows/sec-core-ci-image.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/runner-images/**'
+      - '.github/scripts/ci_image_catalog.py'
+      - '.github/workflows/sec-core-ci-image.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  catalog:
+    runs-on: ubuntu-24.04
+    outputs:
+      images: ${{ steps.plan.outputs.images }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -eu
+          images=$(python3 .github/scripts/ci_image_catalog.py)
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: catalog
+    if: github.event_name == 'pull_request' && needs.catalog.outputs.images != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.catalog.outputs.images) }}
+    env:
+      BUILD_CONTEXT: .github/runner-images/${{ matrix.image.context }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and run the Dockerfile checks
+        run: docker build --pull --platform linux/amd64 "$BUILD_CONTEXT"
+
+  publish:
+    needs: catalog
+    if: needs.catalog.outputs.images != '[]' && github.repository == 'agentic-os-org/ANOLISA' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: anolisa-k8s-amd-release
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.catalog.outputs.images) }}
+    env:
+      BUILD_CONTEXT: .github/runner-images/${{ matrix.image.context }}
+      IMAGE_ALIAS: ${{ matrix.image.alias }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and run the Dockerfile checks
+        run: docker build --pull --platform linux/amd64 -t ci-image:build "$BUILD_CONTEXT"
+      - id: credentials
+        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
+        with:
+          oidc-provider-arn: ${{ secrets.SEC_CORE_ACR_OIDC_PROVIDER_ARN }}
+          role-to-assume: ${{ secrets.SEC_CORE_ACR_PUBLISH_ROLE_ARN }}
+      - uses: aliyun/acr-login@3efc58f96aaffceb553f93e74d7a79221a44ceed # v1
+        with:
+          region-id: ${{ secrets.SEC_CORE_IMAGE_REGION }}
+          instance-id: ${{ secrets.SEC_CORE_IMAGE_INSTANCE }}
+          login-server: ${{ secrets.SEC_CORE_IMAGE_REGISTRY }}
+          access-key-id: ${{ steps.credentials.outputs.aliyun-access-key-id }}
+          access-key-secret: ${{ steps.credentials.outputs.aliyun-access-key-secret }}
+          security-token: ${{ steps.credentials.outputs.aliyun-security-token }}
+      - name: Push and record the immutable image reference
+        env:
+          REGISTRY: ${{ secrets.SEC_CORE_IMAGE_REGISTRY }}
+          NAMESPACE: ${{ secrets.CI_IMAGE_NAMESPACE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/$NAMESPACE/$IMAGE_ALIAS"
+          tag="$image:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag ci-image:build "$tag"
+          docker push "$tag"
+          ref=$(docker image inspect "$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -F "$image@sha256:")
+          digest=${ref#"$image"@}
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'Source commit `%s`\n\nTest image `ci-images.invalid/%s:sha256-%s`\n' "$GITHUB_SHA" "$IMAGE_ALIAS" "${digest#sha256:}" >> "$GITHUB_STEP_SUMMARY"
