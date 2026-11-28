@@ -1002,6 +1002,53 @@ test('conversation-list: session disclosure and time presets expose accessible s
 });
 
 
+
+for (const operation of ['onDelete', 'onRestart']) {
+  for (const succeeds of [true, false]) {
+    test(`health ${operation}: ${succeeds ? 'acknowledgement retires' : 'failure retains'} an in-flight poll`, async t => {
+      const driver = createHooksDriver();
+      const { calls, stubs } = deferredFetchStubs(['fetchAgentProcessHealth', 'deleteAgentHealth', 'restartAgentHealth']);
+      const { AgentStatusSection } = loadPageModule('src/pages/AgentHealthPage.tsx', {
+        '../utils/apiClient': { ...stubs, fetchLatencyMetrics: async () => [],
+          fetchEnforcementBindings: async () => ({ bindings: [] }), fetchSecurityCases: async () => ({ data: { items: [] } }) },
+        '../i18n': { useI18n: () => ({ t: key => key }), useLocaleTag: () => 'en-US', INTERRUPTION_TYPES: [] },
+        '../utils/datetime': { formatNs: String }, '../constants/policyIds': {},
+        '../components/CacheDiagnosisPanel': componentStub('CacheDiagnosisPanel'),
+      }, driver, '\nexports.AgentStatusSection = AgentStatusSection;');
+      const previousInterval = global.setInterval, previousClear = global.clearInterval;
+      let poll;
+      global.setInterval = fn => { poll = fn; return 1; };
+      global.clearInterval = () => {};
+      t.after(() => { global.setInterval = previousInterval; global.clearInterval = previousClear; });
+      const props = { addToast() {} };
+      const render = () => driver.render(AgentStatusSection, props);
+      const rows = [123, 456].map(pid => ({ pid, agent_name: `agent-${pid}`, role: 'gateway', status: 'offline', ports: [] }));
+      const fixture = { agents: rows, last_scan_time: 100 };
+      const mounted = render();
+      const cleanup = mounted.effects[0]();
+      calls.fetchAgentProcessHealth[0].resolve(fixture);
+      await settle();
+      poll();
+      const card = collectElements(render().element, node => node.props?.agent?.pid === 123)[0];
+      const pending = card.props[operation](123);
+      const mutation = calls[operation === 'onDelete' ? 'deleteAgentHealth' : 'restartAgentHealth'][0];
+      if (succeeds) mutation.resolve({ new_pid: 789 });
+      else mutation.reject(new Error('operation failed'));
+      await pending;
+      calls.fetchAgentProcessHealth[1].resolve(fixture);
+      await settle();
+      const pids = collectElements(render().element, node => node.props?.agent).map(node => node.props.agent.pid);
+      assert.deepEqual(pids, succeeds ? [456] : [123, 456], 'a pre-mutation snapshot must not resurrect the retired card');
+      // A later scan remains authoritative, including a reused PID.
+      poll();
+      calls.fetchAgentProcessHealth.at(-1).resolve(fixture);
+      await settle();
+      assert.equal(collectElements(render().element, node => node.props?.agent?.pid === 123).length, 1);
+      cleanup();
+    });
+  }
+}
+
 for (const outcome of ['success', 'failure', 'unmount']) {
   test(`agent activity: superseded poll ${outcome} cannot change the displayed snapshot`, async t => {
     const driver = createHooksDriver();
