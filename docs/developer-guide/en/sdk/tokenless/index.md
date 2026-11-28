@@ -455,10 +455,30 @@ summary = stats.summary()
 recent = stats.list(limit=20)
 
 print(status.database_path, summary.total.tokens_saved)
+scope = summary.summary_scope
+if scope is not None:
+    print(scope.records_selected, scope.records_total, scope.complete)
 if recent:
     record = stats.show(recent[0].id)
     change = stats.diff(record_id=record.id)
 ```
+
+`stats.summary()` reads at most the newest 10,000 records by default.
+Pass `limit` to choose a different window. The `summary_scope` object reports
+coverage before dry-run rows are excluded from savings.
+
+- `records_selected` counts the decoded rows in the window.
+- `records_total` counts all stored compression rows in the same snapshot.
+- `complete` is true when the window includes every retained compression row.
+
+The coverage fields describe the compression rows retained in the database.
+During automatic pruning, compression rows and retrieval events can be
+removed at different rates.
+
+When coverage is incomplete, `summary.attribution.retrieved_tokens` and
+`summary.attribution.net_savings_tokens` are `None`. Gross savings still cover
+the selected active records. Retrieval totals can also be unavailable when the
+retrieval query fails. Older native backends may return `summary_scope=None`.
 
 Use `stats.diff(session_id="...")` for a session overview,
 `stats.diff(session_id="...", tool_use_id="...")` for one tool lifecycle, and

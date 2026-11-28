@@ -562,6 +562,18 @@ tokenless stats clear --yes
 
 Without `--yes`, `stats clear` requires terminal input and output for the confirmation. Automation must pass `--yes` explicitly.
 
+Summary gross savings cover the newest selected records (10,000 by default),
+excluding dry runs. If that window omits stored rows, retrieval costs and net
+savings are omitted because whole-history costs cannot be assigned to the
+window reliably. Text output explains the omission; JSON adds `summary_scope`
+with `records_selected`, `records_total` and `complete`, counted before dry-run
+exclusion. Complete windows retain retrieval and net totals. Counts, records
+and costs are read from one SQLite snapshot; no stored data is migrated.
+The coverage fields describe the compression rows retained in the database.
+During automatic pruning, compression rows and retrieval events can be
+removed at different rates.
+
+
 Dual-run comparison:
 
 ```bash
