@@ -112,35 +112,56 @@ def _redact_text_for_observability(text: str, timeout: float) -> str | None:
     return redacted_text if isinstance(redacted_text, str) else None
 
 
-def _redact_sensitive_value(value: Any, timeout: float) -> Any:
-    if isinstance(value, str):
-        redacted = _redact_text_for_observability(value, timeout)
-        return _DROP if redacted is None else redacted
+def _redact_sensitive_value(
+    value: Any,
+    timeout: float,
+    cache: dict[str, Any] | None = None,
+) -> Any:
+    if value is None:
+        return None
 
-    redacted = _redact_text_for_observability(_json_dumps(value), timeout)
+    serialized = value if isinstance(value, str) else _json_dumps(value)
+    cache_key = f"{type(value).__name__}:{serialized}"
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    redacted = _redact_text_for_observability(serialized, timeout)
     if redacted is None:
-        return _DROP
-    try:
-        return json.loads(redacted)
-    except (json.JSONDecodeError, ValueError):
-        return redacted
+        safe_value: Any = _DROP
+    elif isinstance(value, str):
+        safe_value = redacted
+    else:
+        try:
+            safe_value = json.loads(redacted)
+        except (json.JSONDecodeError, ValueError):
+            safe_value = redacted
+
+    if cache is not None:
+        cache[cache_key] = safe_value
+    return safe_value
 
 
-def _redact_observability_value(value: Any, timeout: float) -> Any:
+def _redact_observability_value(
+    value: Any,
+    timeout: float,
+    cache: dict[str, Any] | None = None,
+) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             if key in _OBSERVABILITY_SENSITIVE_KEYS:
-                safe_item = _redact_sensitive_value(item, timeout)
+                safe_item = _redact_sensitive_value(item, timeout, cache)
             else:
-                safe_item = _redact_observability_value(item, timeout)
+                safe_item = _redact_observability_value(item, timeout, cache)
             if safe_item is not _DROP:
                 redacted[key] = safe_item
         return redacted
     if isinstance(value, list):
         return [
             item
-            for item in (_redact_observability_value(item, timeout) for item in value)
+            for item in (
+                _redact_observability_value(item, timeout, cache) for item in value
+            )
             if item is not _DROP
         ]
     return value
@@ -153,7 +174,8 @@ def _redact_observability_record(
     safe_record = dict(record)
     metrics = safe_record.get("metrics")
     if isinstance(metrics, dict):
-        safe_record["metrics"] = _redact_observability_value(metrics, timeout)
+        cache: dict[str, Any] = {}
+        safe_record["metrics"] = _redact_observability_value(metrics, timeout, cache)
     return safe_record
 
 
