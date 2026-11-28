@@ -102,10 +102,13 @@ case "$ANOLISA_INSTALL_MODE" in
 esac
 ANOLISA_PREFIX="${ANOLISA_PREFIX:-$ANOLISA_PREFIX_DEFAULT}"
 
-# Resolve the script's own directory so auto-checkout detection works when
-# install-anolisa.sh is invoked from inside a checkout.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ANOLISA_SRC_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Stdin has no source directory; using the caller's cwd could select an
+# unrelated checkout and run a build instead of fetching the release.
+ANOLISA_SRC_DEFAULT=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  ANOLISA_SRC_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 # Parsed args.
 FROM_LOCAL=""
@@ -231,7 +234,7 @@ done
 MODE=""
 if [ -n "$FROM_LOCAL" ]; then
   MODE="from-local"
-elif [ -d "$ANOLISA_SRC_DEFAULT/manifests" ] && [ -d "$ANOLISA_SRC_DEFAULT/templates" ]; then
+elif [ -n "$ANOLISA_SRC_DEFAULT" ] && [ -d "$ANOLISA_SRC_DEFAULT/manifests" ] && [ -d "$ANOLISA_SRC_DEFAULT/templates" ]; then
   MODE="auto-checkout"
   FROM_LOCAL="$ANOLISA_SRC_DEFAULT"
   log "INFO: detected checkout at $FROM_LOCAL, using local staging."
