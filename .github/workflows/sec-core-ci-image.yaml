@@ -1,0 +1,72 @@
+name: sec-core CI image
+
+on:
+  pull_request:
+    paths:
+      - '.github/runner-images/alinux4-sec-core-ci/**'
+      - '.github/workflows/sec-core-ci-image.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/runner-images/alinux4-sec-core-ci/**'
+      - '.github/workflows/sec-core-ci-image.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BUILD_CONTEXT: .github/runner-images/alinux4-sec-core-ci
+  BASE_IMAGE: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4@sha256:e3fd398154003b60e9a1649ae6a2f209dc0466bae971ba21afcc4e5c5cb5dff8
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and run the Dockerfile checks
+        run: docker build --pull --platform linux/amd64 --build-arg BASE_IMAGE "$BUILD_CONTEXT"
+
+  publish:
+    if: github.repository == 'agentic-os-org/ANOLISA' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: anolisa-k8s-amd-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and run the Dockerfile checks
+        run: docker build --pull --platform linux/amd64 --build-arg BASE_IMAGE -t sec-core-ci:build "$BUILD_CONTEXT"
+      - id: credentials
+        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
+        with:
+          oidc-provider-arn: ${{ secrets.SEC_CORE_ACR_OIDC_PROVIDER_ARN }}
+          role-to-assume: ${{ secrets.SEC_CORE_ACR_PUBLISH_ROLE_ARN }}
+      - uses: aliyun/acr-login@3efc58f96aaffceb553f93e74d7a79221a44ceed # v1
+        with:
+          region-id: ${{ secrets.SEC_CORE_IMAGE_REGION }}
+          instance-id: ${{ secrets.SEC_CORE_IMAGE_INSTANCE }}
+          login-server: ${{ secrets.SEC_CORE_IMAGE_REGISTRY }}
+          access-key-id: ${{ steps.credentials.outputs.aliyun-access-key-id }}
+          access-key-secret: ${{ steps.credentials.outputs.aliyun-access-key-secret }}
+          security-token: ${{ steps.credentials.outputs.aliyun-security-token }}
+      - name: Push and record the immutable image reference
+        env:
+          REGISTRY: ${{ secrets.SEC_CORE_IMAGE_REGISTRY }}
+          REPOSITORY: ${{ secrets.SEC_CORE_IMAGE_REPOSITORY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/$REPOSITORY"
+          tag="$image:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag sec-core-ci:build "$tag"
+          docker push "$tag"
+          ref=$(docker image inspect "$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -F "$image@sha256:")
+          digest=${ref#"$image"@}
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'Source commit `%s`\n\nImage digest `%s`\n' "$GITHUB_SHA" "$digest" >> "$GITHUB_STEP_SUMMARY"
