@@ -16,6 +16,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import {
   AGENT_MEMORY_CORPUS,
   AGENT_MEMORY_CORPUS_READ_HINT,
@@ -148,6 +149,16 @@ const STORE_PATHS = [
   "dreams.md",
   "memory/sample.md",
   "memory/nested/deep.md",
+  ".\\MEMORY.md",
+  ".\\dreams.md",
+  ".\\memory\\sample.md",
+  "MEMORY.md/",
+  "dreams.md/",
+  "notes/../MEMORY.md",
+  "notes/../dreams.md",
+  "notes/../memory/sample.md",
+  "memory\\..\\notes.md",
+  "memory/../notes.md",
   "notes/observed/01J.md",
   "observations.md",
   "strategies/rebase.md",
@@ -174,9 +185,39 @@ describe("host builtin namespace", () => {
       "  MEMORY.md  ",
       "memory\\sample.md",
       ".//memory/sample.md",
+      ".\\MEMORY.md",
+      ".\\dreams.md",
+      ".\\memory\\sample.md",
+      "MEMORY.md/",
+      "dreams.md/",
+      "memory/sample.md/",
+      "notes/../MEMORY.md",
+      "notes/../dreams.md",
+      "notes/../memory/sample.md",
+      "./notes/../MEMORY.md",
     ]) {
       assert.equal(isHostBuiltinMemoryPath(p), true, p);
     }
+  });
+
+  it("matches platform path.resolve + path.relative semantics for mixed separators", () => {
+    // On POSIX, path.resolve keeps "\" literal before path.relative replaces
+    // "\" with "/", so "memory\..\notes.md" reaches isMemoryPath as
+    // "memory/../notes.md" (true); on Win32, path.resolve collapses "..".
+    assert.equal(
+      isHostBuiltinMemoryPath("memory\\..\\notes.md", path.posix),
+      true,
+    );
+    assert.equal(
+      isHostBuiltinMemoryPath("memory\\..\\notes.md", path.win32),
+      false,
+    );
+    assert.equal(
+      isHostBuiltinMemoryPath("memory\\..\\notes.md"),
+      path.sep === "/",
+    );
+    assert.equal(isHostBuiltinMemoryPath("C:\\MEMORY.md", path.win32), false);
+    assert.equal(isHostBuiltinMemoryPath(".\\MEMORY.md", path.win32), true);
   });
 
   it("matches dreams.md case-insensitively, like the host", () => {
@@ -192,10 +233,17 @@ describe("host builtin namespace", () => {
       "notes/observed/01J.md",
       "observations.md",
       "memory",
+      "memory/",
       "memoryx/foo.md",
       "MEMORY.md.bak",
       "dreams.md.bak",
       "notes/memory/sample.md",
+      "memory/../notes.md",
+      "/MEMORY.md",
+      "\\MEMORY.md",
+      "../MEMORY.md",
+      "a/../../MEMORY.md",
+      "..MEMORY.md",
       "",
     ]) {
       assert.equal(isHostBuiltinMemoryPath(p), false, p);
@@ -211,11 +259,30 @@ describe("corpus read handle", () => {
       "agent-memory/memory/sample.md",
     );
     assert.equal(toCorpusReadHandle("dreams.md"), "agent-memory/dreams.md");
+    assert.equal(
+      toCorpusReadHandle(".\\MEMORY.md"),
+      "agent-memory/.\\MEMORY.md",
+    );
+    assert.equal(toCorpusReadHandle("MEMORY.md/"), "agent-memory/MEMORY.md/");
+    assert.equal(toCorpusReadHandle("dreams.md/"), "agent-memory/dreams.md/");
+    assert.equal(
+      toCorpusReadHandle("notes/../MEMORY.md"),
+      "agent-memory/notes/../MEMORY.md",
+    );
+    assert.equal(
+      toCorpusReadHandle("memory\\..\\notes.md"),
+      path.sep === "/"
+        ? "agent-memory/memory\\..\\notes.md"
+        : "memory\\..\\notes.md",
+    );
   });
 
   it("leaves a path that already reaches the supplement unchanged", () => {
     assert.equal(toCorpusReadHandle("notes/observed/01J.md"), "notes/observed/01J.md");
     assert.equal(toCorpusReadHandle("observations.md"), "observations.md");
+    assert.equal(toCorpusReadHandle("memory/../notes.md"), "memory/../notes.md");
+    assert.equal(toCorpusReadHandle("/MEMORY.md"), "/MEMORY.md");
+    assert.equal(toCorpusReadHandle("a/../../MEMORY.md"), "a/../../MEMORY.md");
   });
 
   it("namespaces a store path that already begins with the namespace", () => {
