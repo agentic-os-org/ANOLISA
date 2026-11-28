@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
@@ -21,6 +22,8 @@ pub(super) struct Transcript {
     end: usize,
     window_bytes: Option<usize>,
     spool: Option<File>,
+    // Absolute offsets let a failed backspace's scan survive appends and compaction.
+    checked_continuations: Range<usize>,
 }
 
 impl Transcript {
@@ -42,6 +45,7 @@ impl Transcript {
             end: 0,
             window_bytes,
             spool,
+            checked_continuations: 0..0,
         })
     }
 
@@ -88,22 +92,54 @@ impl Transcript {
         Ok(())
     }
 
-    pub(super) fn pop_last_utf8_char(&mut self) -> io::Result<()> {
-        if self.end == 0 {
+    pub(super) fn pop_last_utf8_char(&mut self, lower_bound: usize) -> io::Result<()> {
+        let floor = lower_bound.max(self.base);
+        if floor >= self.end {
             return Ok(());
         }
-        let available = self.end.saturating_sub(self.base);
-        if available == 0 {
-            return Ok(());
-        }
-        let remove = last_utf8_char_len(&self.bytes).min(available);
-        self.bytes.truncate(self.bytes.len().saturating_sub(remove));
-        self.end = self.end.saturating_sub(remove);
+
+        let start = self
+            .backspace_scan_ranges(floor)
+            .into_iter()
+            .find_map(|range| {
+                self.bytes[range.start - self.base..range.end - self.base]
+                    .iter()
+                    .rposition(|byte| byte & 0b1100_0000 != 0b1000_0000)
+                    .map(|start| range.start + start)
+            });
+        let end = match start {
+            Some(start) => start,
+            // Preserve the historical fallback for malformed bytes at absolute zero.
+            None if floor == 0 => 0,
+            // A continuation-only tail may start before the deletion boundary.
+            None => {
+                let checked = &self.checked_continuations;
+                let start = if floor <= checked.end {
+                    floor.min(checked.start)
+                } else {
+                    floor
+                };
+                self.checked_continuations = start..self.end;
+                return Ok(());
+            }
+        };
         if let Some(spool) = self.spool.as_mut() {
-            spool.set_len(self.end as u64)?;
-            spool.seek(SeekFrom::Start(self.end as u64))?;
+            spool.set_len(end as u64)?;
+        }
+        self.bytes.truncate(end - self.base);
+        self.end = end;
+        if end < self.checked_continuations.end {
+            self.checked_continuations = 0..0;
         }
         Ok(())
+    }
+
+    fn backspace_scan_ranges(&self, floor: usize) -> [Range<usize>; 2] {
+        let checked = &self.checked_continuations;
+        [
+            floor.max(checked.end)..self.end,
+            floor..floor.max(checked.start),
+        ]
     }
 
     pub(super) fn read_range(&self, start: usize, end: usize) -> io::Result<Cow<'_, [u8]>> {
@@ -215,14 +251,6 @@ impl Transcript {
     }
 }
 
-fn last_utf8_char_len(bytes: &[u8]) -> usize {
-    let mut start = bytes.len().saturating_sub(1);
-    while start > 0 && bytes[start] & 0b1100_0000 == 0b1000_0000 {
-        start -= 1;
-    }
-    bytes.len() - start
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,19 +301,134 @@ mod tests {
     }
 
     #[test]
-    fn bounded_transcript_backspace_updates_spool_and_absolute_end() {
+    fn clean_backspace_updates_compacted_spool_and_absolute_end() {
         let path = temp_path("backspace");
         let _ = std::fs::remove_file(&path);
         let mut transcript =
             Transcript::new(TranscriptRetention::Bounded { window_bytes: 4 }, &path)
                 .expect("transcript");
-        transcript.append("abc头".as_bytes()).expect("append");
-        transcript.pop_last_utf8_char().expect("pop");
-        transcript.append(b"d").expect("append replacement");
+        transcript.append(b"abcdefgh").expect("prefix");
+        transcript.append("x头".as_bytes()).expect("append");
+        assert_eq!(transcript.resident_slice(), "x头".as_bytes());
 
-        assert_eq!(transcript.position(), 4);
-        assert_eq!(transcript.read_range(0, 4).expect("range"), &b"abcd"[..]);
+        transcript
+            .pop_last_utf8_char(11)
+            .expect("crosses command start");
+        assert_eq!(transcript.position(), 12);
+        assert_eq!(
+            std::fs::read(&path).expect("spool"),
+            "abcdefghx头".as_bytes()
+        );
+
+        transcript
+            .pop_last_utf8_char(9)
+            .expect("pop whole character");
+        transcript.pop_last_utf8_char(9).expect("at command start");
+        assert_eq!(transcript.position(), 9);
+        assert_eq!(std::fs::read(&path).expect("spool"), b"abcdefghx");
+
+        transcript
+            .pop_last_utf8_char(8)
+            .expect("pop final resident byte");
+        transcript.pop_last_utf8_char(0).expect("no resident bytes");
+        assert_eq!(transcript.position(), 8);
+        assert!(transcript.resident_slice().is_empty());
+        transcript.append(b"d").expect("append replacement");
+        assert_eq!(transcript.position(), 9);
+        assert_eq!(
+            transcript.read_range(0, 9).expect("range"),
+            &b"abcdefghd"[..]
+        );
+        assert_eq!(std::fs::read(&path).expect("spool"), b"abcdefghd");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn clean_backspace_preserves_character_split_by_compaction() {
+        let path = temp_path("split-backspace");
+        let _ = std::fs::remove_file(&path);
+        let mut transcript =
+            Transcript::new(TranscriptRetention::Bounded { window_bytes: 4 }, &path)
+                .expect("transcript");
+        transcript
+            .append("abcdefgh头xyz".as_bytes())
+            .expect("append");
+        for _ in 0..4 {
+            transcript.pop_last_utf8_char(0).expect("backspace");
+        }
+
+        assert_eq!(transcript.position(), 11);
+        assert_eq!(
+            std::fs::read(&path).expect("spool"),
+            "abcdefgh头".as_bytes()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn clean_backspace_skips_checked_continuations() {
+        const WINDOW: usize = 256 * 1024;
+        const FLOOR: usize = 2;
+        let mut output = vec![0x80; 2 * WINDOW - 16];
+        output[..5].copy_from_slice("a🙂".as_bytes());
+
+        for retention in [
+            TranscriptRetention::Full,
+            TranscriptRetention::Bounded {
+                window_bytes: WINDOW,
+            },
+        ] {
+            let path = temp_path("checked-continuations");
+            let _ = std::fs::remove_file(&path);
+            let mut transcript = Transcript::new(retention, &path).expect("transcript");
+            transcript.append(&output).expect("output");
+            transcript
+                .pop_last_utf8_char(FLOOR)
+                .expect("first backspace");
+            for _ in 0..64 {
+                assert!(transcript
+                    .backspace_scan_ranges(FLOOR)
+                    .iter()
+                    .all(|r| r.is_empty()));
+                transcript
+                    .pop_last_utf8_char(FLOOR)
+                    .expect("repeated backspace");
+            }
+            assert_eq!(transcript.resident_slice(), output);
+
+            transcript.append(b"x").expect("append ordinary output");
+            transcript
+                .pop_last_utf8_char(FLOOR)
+                .expect("pop appended byte");
+            assert!(transcript
+                .backspace_scan_ranges(FLOOR)
+                .iter()
+                .all(|r| r.is_empty()));
+
+            transcript.append(b"\x80").expect("append continuation");
+            assert_eq!(
+                transcript.backspace_scan_ranges(FLOOR),
+                [output.len()..output.len() + 1, FLOOR..FLOOR]
+            );
+            transcript
+                .pop_last_utf8_char(FLOOR)
+                .expect("check appended byte");
+            assert_eq!(transcript.position(), output.len() + 1);
+
+            assert_eq!(
+                transcript.backspace_scan_ranges(1),
+                [transcript.position()..transcript.position(), 1..FLOOR]
+            );
+            transcript.pop_last_utf8_char(1).expect("earlier boundary");
+            assert_eq!(transcript.resident_slice(), b"a");
+            transcript.append(b"bc").expect("replace deleted bytes");
+            transcript.pop_last_utf8_char(1).expect("pop replacement");
+            assert_eq!(transcript.resident_slice(), b"ab");
+            if !transcript.is_full() {
+                assert_eq!(std::fs::read(&path).expect("spool"), b"ab");
+                std::fs::remove_file(&path).expect("remove spool");
+            }
+        }
     }
 
     #[test]

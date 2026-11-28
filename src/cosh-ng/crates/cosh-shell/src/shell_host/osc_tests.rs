@@ -638,6 +638,92 @@ fn parser_clean_strips_zsh_bracketed_paste_and_applies_backspace() {
 }
 
 #[test]
+fn clean_backspace_only_output_archives_an_empty_range() {
+    let prefix = b"previous output\r\ncosh-osc$ printf '\\b'\r\n";
+    let (bounded, work_dir) = bounded_parser_for_test("clean-backspace-empty", 8);
+
+    for mut parser in [parser_for_test("clean-backspace-empty"), bounded] {
+        parser.feed(prefix).expect("pre-command bytes");
+        feed_preexec(&mut parser, "printf '\\b'");
+        parser.feed(b"\x08\x08").expect("backspace-only output");
+        feed_precmd(&mut parser, 0);
+
+        assert_eq!(parser.clean.position(), prefix.len());
+        assert_eq!(
+            parser
+                .clean
+                .read_range(0, prefix.len())
+                .expect("clean prefix"),
+            &prefix[..]
+        );
+        assert_eq!(
+            parser
+                .display
+                .read_range(prefix.len(), prefix.len() + 2)
+                .expect("display output"),
+            &b"\x08\x08"[..]
+        );
+        let completed = parser
+            .events
+            .iter()
+            .find(|event| event.kind == ShellEventKind::CommandCompleted)
+            .expect("completed command");
+        assert_eq!(completed.terminal_output_bytes, Some(0));
+        let archive = completed
+            .terminal_output_ref
+            .as_deref()
+            .expect("output ref");
+        assert!(std::fs::read(archive).expect("captured output").is_empty());
+    }
+
+    let _ = std::fs::remove_dir_all(work_dir);
+}
+
+#[test]
+fn clean_backspace_preserves_followup_output_at_shell_exit() {
+    let prefix = b"previous output\r\ncosh-osc$ ";
+    let (bounded, work_dir) = bounded_parser_for_test("clean-backspace-exit", 8);
+
+    for mut parser in [parser_for_test("clean-backspace-exit"), bounded] {
+        parser.feed(prefix).expect("pre-command bytes");
+        feed_preexec(&mut parser, "printf output");
+        parser
+            .feed("头\x08\x08".as_bytes())
+            .expect("UTF-8 output and backspaces");
+        parser
+            .feed(b"\x08after\r\n")
+            .expect("output after backspace");
+        parser
+            .finish_current_on_exit(0)
+            .expect("finish on shell exit");
+
+        let completed = parser
+            .events
+            .iter()
+            .find(|event| event.kind == ShellEventKind::CommandCompleted)
+            .expect("completed command");
+        assert_eq!(completed.terminal_output_bytes, Some(7));
+        let archive = completed
+            .terminal_output_ref
+            .as_deref()
+            .expect("output ref");
+        assert_eq!(
+            std::fs::read(archive).expect("captured output"),
+            b"after\r\n"
+        );
+        assert_eq!(
+            parser
+                .clean
+                .read_range(0, prefix.len())
+                .expect("clean prefix"),
+            &prefix[..]
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(work_dir);
+}
+
+#[test]
 fn parser_clean_handles_split_zsh_bracketed_paste_control() {
     let mut parser = parser_for_test("clean-zsh-split-control");
 
