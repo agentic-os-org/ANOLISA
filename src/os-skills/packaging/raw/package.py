@@ -72,7 +72,10 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
             source_file = source / path
             if not source_file.is_file() or source_file.is_symlink():
                 raise ValueError(f"skill payload must be a regular file: {path}")
-            destination = f"share/anolisa/skills/{directory.name}/{path.relative_to(directory)}"
+            destination = (
+                f"share/anolisa/skills/{directory.name}/"
+                f"{path.relative_to(directory).as_posix()}"
+            )
             if destination in files:
                 raise ValueError(f"duplicate package path: {destination}")
             files[destination] = source_file.read_bytes()
@@ -81,7 +84,7 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
     archive = output / archive_name
     directories = {"."}
     for name in files:
-        directories.update(str(parent) for parent in Path(name).parents)
+        directories.update(parent.as_posix() for parent in Path(name).parents)
     with tempfile.TemporaryDirectory(dir=output) as temporary:
         staged = Path(temporary) / archive_name
         with staged.open("wb") as raw, gzip.GzipFile(
