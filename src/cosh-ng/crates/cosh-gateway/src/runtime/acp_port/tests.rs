@@ -25,8 +25,8 @@ use serde_json::json;
 
 use super::*;
 use crate::runtime::{
-    AcpSessionObservation, AcpSessionTerminal, AcpV1AdapterProfile, AcpV1ClientConfig, AcpV1Codec,
-    AcpV1PermissionOption, RuntimeLaunchSpec,
+    AcpSessionObservation, AcpSessionTerminal, AcpToolAccumulatorLimits, AcpV1AdapterProfile,
+    AcpV1ClientConfig, AcpV1Codec, AcpV1PermissionOption, AcpV1RequestKind, RuntimeLaunchSpec,
 };
 
 #[derive(Default)]
@@ -561,6 +561,118 @@ fn limit_result_keeps_session_open_for_another_turn() {
             }
         } if observed == second_turn
     ));
+}
+
+#[test]
+fn request_failure_releases_the_failed_turns_tool_state() {
+    let events = vec![
+        observed(AcpV1Observation::Initialized {
+            agent_info: None,
+            capabilities: Default::default(),
+        }),
+        observed(AcpV1Observation::SessionOpened {
+            session_id: "session".into(),
+        }),
+        observed_tool_call("session", "tool-1", "Run tests"),
+        observed(AcpV1Observation::RequestFailed {
+            request: AcpV1RequestKind::Prompt,
+            code: -32603,
+            message: "provider request failed".into(),
+        }),
+    ];
+    let (mut port, _state, identity) = test_port(
+        events,
+        Normalizer {
+            request_id: RequestId::new(),
+            mismatch: false,
+        },
+    );
+    open(&mut port, &identity);
+    port.next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let turn_id = prompt(&mut port, &identity);
+    let updated = port
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        updated.event,
+        AgentRuntimeEvent::ToolInvocationUpdated { .. }
+    ));
+    let failed = port
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        failed.event,
+        AgentRuntimeEvent::Completed {
+            outcome: TurnOutcome::Failed { .. },
+            ..
+        }
+    ));
+    // The failed turn is terminal, so its retained tool invocations must be
+    // released exactly like the other terminal observations. Otherwise every
+    // failed prompt permanently consumes the accumulator's bounded capacity.
+    assert!(port.tools.snapshot("session", &turn_id, "tool-1").is_none());
+}
+
+#[test]
+fn request_failures_do_not_exhaust_the_tool_capacity() {
+    // One tool call per turn, every turn ending in a failed prompt request:
+    // without a per-turn release the accumulator would fill after its bounded
+    // invocation count and kill the transport on the next tool observation.
+    let capacity = AcpToolAccumulatorLimits::default().max_invocations;
+    let events = vec![
+        observed(AcpV1Observation::Initialized {
+            agent_info: None,
+            capabilities: Default::default(),
+        }),
+        observed(AcpV1Observation::SessionOpened {
+            session_id: "session".into(),
+        }),
+    ];
+    let (mut port, state, identity) = test_port(
+        events,
+        Normalizer {
+            request_id: RequestId::new(),
+            mismatch: false,
+        },
+    );
+    open(&mut port, &identity);
+    port.next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    for index in 0..=capacity {
+        {
+            let mut backend = state.lock().unwrap();
+            backend
+                .events
+                .push_back(observed_tool_call("session", &format!("tool-{index}"), "Run tests"));
+            backend
+                .events
+                .push_back(observed(AcpV1Observation::RequestFailed {
+                    request: AcpV1RequestKind::Prompt,
+                    code: -32603,
+                    message: "provider request failed".into(),
+                }));
+        }
+        prompt(&mut port, &identity);
+        let updated = port
+            .next_event(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            matches!(updated.event, AgentRuntimeEvent::ToolInvocationUpdated { .. }),
+            "tool observation {index} was rejected"
+        );
+        let failed = port
+            .next_event(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            failed.event,
+            AgentRuntimeEvent::Completed {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            }
+        ));
+    }
+    assert!(!state.lock().unwrap().shutdown);
 }
 
 #[test]
