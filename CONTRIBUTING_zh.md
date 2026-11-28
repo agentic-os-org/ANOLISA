@@ -175,18 +175,17 @@ SkillFS 的测试放在 `src/skillfs/tests/`，包括其内置 `skillfs-mount` �
 原来的 `tests/os-skills/` 已收敛到这两个组件目录。仓库级 `tests/` 用于共享测试
 入口和跨组件测试。
 
-在仓库根目录使用 Python 3.11 和虚拟环境执行：
+在 Linux 上准备好 Git 和 Make，然后在仓库根目录使用 Python 3.11 执行以下命令。
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
 .venv/bin/python -m unittest discover -s src/os-skills/tests -v
 .venv/bin/python -m unittest discover -s src/skillfs/tests -p 'test_skill_usage*.py' -v
 ```
 
-OS Skills 套件覆盖 Skill 脚本及安装、打包布局，PDF 回归测试使用固定版本的
-PyMuPDF 依赖。上面的 SkillFS 命令只检查 Python 日志使用统计脚本，不能替代
-Linux 上的 Rust 或 FUSE 检查。两个套件均接入各自组件的 prebuilt CI 工作流。
+OS Skills 套件使用 Python 标准库，覆盖 Skill 脚本、安装和打包布局。
+上面的 SkillFS 命令检查 Python 日志使用统计脚本。请在 Linux 上另行运行
+Rust 和 FUSE 检查。两个套件均接入各自组件的 prebuilt CI 工作流。
 
 维护组件归属时，`.github/components.json` 的 `path_prefixes` 登记源码根目录，
 `supporting_paths` 登记这些目录之外的组件专属文件。以斜杠结尾表示目录，其他
