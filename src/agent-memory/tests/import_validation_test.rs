@@ -374,3 +374,92 @@ fn overwrite_persists_a_private_recoverable_backup() {
     );
     assert_eq!(std::fs::read_to_string(backup).unwrap(), saved);
 }
+
+#[test]
+fn overwrite_preserves_memories_on_archive_file_directory_conflicts() {
+    for (parent, child) in [
+        ("a.md", "a.md/b.md"),
+        ("notes/a.md", "notes/a.md/deep/b.md"),
+    ] {
+        for (first, second, reason) in [
+            (parent, child, "as a parent directory"),
+            (
+                child,
+                parent,
+                "parent directory required by another archive entry",
+            ),
+        ] {
+            for bucket in ["memories", "tasks"] {
+                let (_tmp, svc) = setup();
+                svc.write("keep.md", "ORIGINAL\n", false).unwrap();
+                let mut json: serde_json::Value =
+                    serde_json::from_str(&archive(&entry(first))).unwrap();
+                json[bucket]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::from_str(&entry(second)).unwrap());
+                let json = json.to_string();
+
+                let mut preview = String::new();
+                for dry_run in [true, false] {
+                    let out =
+                        memory_import(&svc, &json, ImportStrategy::Overwrite, dry_run).unwrap();
+                    assert!(
+                        out.contains("1 imported, 0 overwritten, 0 skipped, 1 errors"),
+                        "{out}"
+                    );
+                    assert!(
+                        out.contains(&format!("  - {second}:")) && out.contains(reason),
+                        "{out}"
+                    );
+                    assert_eq!(
+                        std::fs::read(svc.mount.root.join("keep.md")).unwrap(),
+                        b"ORIGINAL\n"
+                    );
+                    assert!(std::fs::read_dir(&svc.mount.meta_dir).unwrap().all(|e| {
+                        !e.unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("import-backup-")
+                    }));
+                    if dry_run {
+                        assert!(!svc.mount.root.join(first).exists());
+                        preview = out.strip_prefix("[DRY RUN] ").unwrap().to_owned();
+                    } else {
+                        assert_eq!(out, preview);
+                        assert!(svc.mount.root.join(first).is_file());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn import_accepts_siblings_with_a_common_text_prefix() {
+    let (_tmp, svc) = setup();
+    let json = archive(&format!("{},{}", entry("a.md"), entry("a.md.bak/b.md")));
+    let out = memory_import(&svc, &json, ImportStrategy::Overwrite, false).unwrap();
+    assert!(
+        out.contains("2 imported, 0 overwritten, 0 skipped, 0 errors"),
+        "{out}"
+    );
+    assert!(svc.mount.root.join("a.md").is_file());
+    assert!(svc.mount.root.join("a.md.bak/b.md").is_file());
+}
+
+#[test]
+fn rejected_entry_does_not_reserve_its_ancestors() {
+    let (_tmp, svc) = setup();
+    let json = archive(&format!(
+        "{},{}",
+        entry("a.md/../invalid.md"),
+        entry("a.md")
+    ));
+    let out = memory_import(&svc, &json, ImportStrategy::Merge, false).unwrap();
+    assert!(
+        out.contains("1 imported, 0 overwritten, 0 skipped, 1 errors"),
+        "{out}"
+    );
+    assert!(svc.mount.root.join("a.md").is_file());
+}
