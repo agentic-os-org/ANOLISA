@@ -486,6 +486,43 @@ class TestMainMonkeypatch:
         assert captured["args"][1] == "--trace-context"
         assert captured["args"][2] == expected_ctx
 
+    def test_cli_argv_contract(self, monkeypatch, capsys):
+        """Pin the scan-code argv contract after the trace-context pair.
+
+        The suite previously pinned only args[0:3]; renaming the scan-code
+        subcommand or dropping --code / --language kept every test green
+        while the real CLI invocation broke (non-zero exit -> hook
+        fail-open -> code scanning silently disabled).
+        """
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass", "findings": []}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(code_scanner_hook.subprocess, "run", fake_run)
+        self._run_main(
+            monkeypatch,
+            capsys,
+            {
+                "tool_input": {"command": "echo hi"},
+                "trace_id": "trace-1",
+                "session_id": "sess-1",
+            },
+        )
+        assert captured["args"][3:] == [
+            "scan-code",
+            "--code",
+            "echo hi",
+            "--language",
+            "bash",
+        ]
+
     def test_timeout_configured(self, monkeypatch, capsys):
         captured = {}
 
