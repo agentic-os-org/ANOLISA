@@ -394,10 +394,65 @@ rm -f "$PKG/bin/tokenless"
 ln -s "$TEST_DIR/removed-platform/bin/tokenless" "$PKG/bin/tokenless"
 run_postinstall dangling-launchers
 assert_eq "postinstall repairs dangling launchers" "$STATUS" "0"
-assert_eq "the tokenless launcher targets the installed platform package" \
-  "$(readlink "$PKG/bin/tokenless")" "$PKG/node_modules/$PLATFORM_PKG/bin/tokenless"
+assert_eq "the tokenless launcher targets the nested platform package relatively" \
+  "$(readlink "$PKG/bin/tokenless")" "../node_modules/$PLATFORM_PKG/bin/tokenless"
 assert_eq "the repaired tokenless launcher executes" "$("$PKG/bin/tokenless")" "tokenless"
 run_postinstall dangling-launchers
 assert_eq "rebuilding repaired launchers is idempotent" "$STATUS" "0"
+
+# =============================================================================
+# 10. Missing platform files fail without replacing the existing launcher
+# =============================================================================
+PLATFORM_DIR="$PKG/node_modules/$PLATFORM_PKG"
+LINK_BEFORE="$(readlink "$PKG/bin/tokenless")"
+mv "$PLATFORM_DIR" "$TEST_DIR/held-platform"
+run_postinstall missing-package
+assert_eq "a missing platform package fails postinstall" "$STATUS" "1"
+assert_eq "a missing package preserves the launcher entry" \
+  "$(readlink "$PKG/bin/tokenless")" "$LINK_BEFORE"
+mv "$TEST_DIR/held-platform" "$PLATFORM_DIR"
+
+mv "$PLATFORM_DIR/bin/tokenless" "$TEST_DIR/held-tokenless"
+run_postinstall missing-tokenless
+assert_eq "a missing tokenless payload fails postinstall" "$STATUS" "1"
+assert_eq "a missing tokenless payload preserves the launcher entry" \
+  "$(readlink "$PKG/bin/tokenless")" "$LINK_BEFORE"
+mv "$TEST_DIR/held-tokenless" "$PLATFORM_DIR/bin/tokenless"
+run_postinstall restored-payloads
+assert_eq "restored payload allows postinstall again" "$STATUS" "0"
+
+# =============================================================================
+# 11. Relocate the complete installation, including the platform dependency
+# =============================================================================
+ORIGINAL_PKG="$PKG"
+for layout in nested hoisted; do
+  PREFIX="$TEST_DIR/$layout/initial prefix"
+  RELOCATED="$TEST_DIR/$layout/relocated prefix"
+  PKG="$PREFIX/lib/node_modules/anolisa-tokenless"
+  mkdir -p "$(dirname "$PKG")" "$PREFIX/bin"
+  cp -R "$ORIGINAL_PKG" "$PKG"
+  if [ "$layout" = "hoisted" ]; then
+    mkdir -p "$PREFIX/lib/node_modules/@anolisa"
+    mv "$PKG/node_modules/$PLATFORM_PKG" "$PREFIX/lib/node_modules/$PLATFORM_PKG"
+    rmdir "$PKG/node_modules/@anolisa" "$PKG/node_modules"
+  fi
+  run_postinstall "relocate-$layout"
+  assert_eq "$layout postinstall succeeds" "$STATUS" "0"
+  ln -s "../lib/node_modules/anolisa-tokenless/bin/tokenless" "$PREFIX/bin/tokenless"
+  assert_eq "$layout tokenless executes before relocation" \
+    "$("$PREFIX/bin/tokenless")" "tokenless"
+
+  mv "$PREFIX" "$RELOCATED"
+  if [ "$layout" = "nested" ]; then
+    NATIVE="$RELOCATED/lib/node_modules/anolisa-tokenless/node_modules/$PLATFORM_PKG/bin/tokenless"
+  else
+    NATIVE="$RELOCATED/lib/node_modules/$PLATFORM_PKG/bin/tokenless"
+  fi
+  assert_file "$layout tokenless native payload moved with the prefix" "$NATIVE"
+  OUTPUT="$("$RELOCATED/bin/tokenless" 2>&1)" && EXEC_STATUS=0 || EXEC_STATUS=$?
+  assert_eq "$layout tokenless still executes after relocation" "$EXEC_STATUS" "0"
+  assert_eq "$layout tokenless still reaches its native payload" "$OUTPUT" "tokenless"
+done
+PKG="$ORIGINAL_PKG"
 
 echo "npm-postinstall test passed"
