@@ -9,12 +9,45 @@ set -euo pipefail
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 AGENT="${ANOLISA_TARGET:-openclaw}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+
+# A minimal runner may omit HOME. Under `set -u` an unguarded expansion aborts
+# this detector with exit 1 -- the same status it otherwise reports for "not
+# installed but installable", so the crash would reach the caller as a verdict
+# instead of as an error. Resolve HOME once and derive every user-scope path
+# from it; an empty value skips those probes rather than guessing a path
+# under /.
+HOME_DIR="${HOME:-}"
+USER_LOCAL_BIN="${HOME_DIR:+$HOME_DIR/.local/bin:}"
+
+# Trim the trailing slashes of a configured state dir, and only those: every
+# other byte the caller put in the name has to reach the probes unchanged.
+#   - A bare "/" must survive as "/". `${dir%/}` collapses it to "", which is the
+#     shape this detector reports for an unset HOME, so an explicitly configured
+#     root would lose its /bin PATH entry and its /extensions probe and the
+#     report would claim "HOME is unset" on a host that does have HOME.
+#   - The result is written into the caller's variable with `printf -v` rather
+#     than returned through a command substitution: bash deletes trailing
+#     newlines from $(...), so a name ending in one would silently redirect
+#     every probe to a directory that does not exist.
+# strip_trailing_slashes <value> <destination variable name>
+strip_trailing_slashes() {
+    local dir="$1"
+    while [ "${#dir}" -gt 1 ] && [ "${dir%/}" != "$dir" ]; do
+        dir="${dir%/}"
+    done
+    printf -v "$2" '%s' "$dir"
+}
+
+OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME_DIR:+$HOME_DIR/.openclaw}}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-$OPENCLAW_HOME}"
-OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
-OPENCLAW_HOME="${OPENCLAW_HOME%/}"
+strip_trailing_slashes "$OPENCLAW_HOME" OPENCLAW_HOME
+strip_trailing_slashes "$OPENCLAW_STATE_DIR" OPENCLAW_STATE_DIR
 OPENCLAW_BIN="${OPENCLAW_BIN:-}"
-export PATH="$HOME/.local/bin:${OPENCLAW_STATE_DIR%/}/bin:/usr/local/bin:$PATH"
+# `${OPENCLAW_STATE_DIR%/}/bin` joins a plain directory ("/opt/x" -> "/opt/x/bin")
+# and a bare root ("/" -> "/bin") alike, which is what this PATH looked like
+# before HOME became optional; the guard keeps an *unresolved* state dir out of
+# PATH rather than smuggling "/bin" in for a host that configured nothing.
+export PATH="${USER_LOCAL_BIN}${OPENCLAW_STATE_DIR:+${OPENCLAW_STATE_DIR%/}/bin:}/usr/local/bin:$PATH"
 
 PLUGIN_ID="tokenless"
 PLUGIN_SRC="$ADAPTER_DIR/openclaw"
@@ -42,7 +75,7 @@ fi
 if [ -d "$OPENCLAW_STATE_DIR" ]; then
     field "openclaw home" "present (${OPENCLAW_STATE_DIR})"
 else
-    field "openclaw home" "not installed (${OPENCLAW_STATE_DIR})"
+    field "openclaw home" "not installed (${OPENCLAW_STATE_DIR:-HOME is unset})"
     note_install_missing "openclaw home"
 fi
 
@@ -57,7 +90,8 @@ if [ -n "$OPENCLAW_BIN" ] && [ -x "$OPENCLAW_BIN" ]; then
         plugin_detail="$PLUGIN_ID (openclaw plugins list)"
     fi
 fi
-if [ "$plugin_state" = "missing" ] && [ -d "${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}" ]; then
+if [ "$plugin_state" = "missing" ] && [ -n "$OPENCLAW_STATE_DIR" ] \
+   && [ -d "${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}" ]; then
     plugin_state="installed"
     plugin_detail="${OPENCLAW_STATE_DIR%/}/extensions/${PLUGIN_ID}"
 fi
