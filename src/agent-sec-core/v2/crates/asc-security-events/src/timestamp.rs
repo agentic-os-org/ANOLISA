@@ -5,7 +5,9 @@
 //! so this module reproduces `datetime.isoformat()` formatting rules rather
 //! than using `chrono`'s RFC 3339 helpers.
 
-use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use chrono::{
+    DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc,
+};
 
 use crate::error::TimestampError;
 
@@ -44,6 +46,12 @@ pub fn now_iso() -> String {
 
 /// Parses an ISO-8601 timestamp and applies *naive* to offset-less input.
 ///
+/// The accepted grammar mirrors v1's `datetime.fromisoformat` (Python 3.11):
+/// beyond RFC 3339, a bare date resolves to midnight, a space is accepted as
+/// the date-time separator, seconds and the offset's colon may be omitted,
+/// the offset may be compact (`+0800`) or hours-only (`+08`), the fractional
+/// separator may be a comma, and the basic `20260102T030405` layout parses.
+///
 /// # Errors
 ///
 /// Returns [`TimestampError::InvalidFormat`] when the value is not ISO-8601,
@@ -54,22 +62,10 @@ pub fn parse_iso(
     field_name: &str,
     naive: NaivePolicy,
 ) -> Result<DateTime<Utc>, TimestampError> {
-    let normalized = normalize_z_suffix(value);
+    let normalized = normalize_wire_form(value);
 
-    if let Ok(parsed) = DateTime::<FixedOffset>::parse_from_rfc3339(&normalized) {
+    if let Some(parsed) = parse_offset_aware(&normalized) {
         return Ok(parsed.with_timezone(&Utc));
-    }
-
-    // Python's `fromisoformat` accepts a bare space separator and values
-    // without seconds; try the common offset-bearing variants before giving up.
-    for pattern in [
-        "%Y-%m-%d %H:%M:%S%.f%:z",
-        "%Y-%m-%dT%H:%M%:z",
-        "%Y-%m-%d %H:%M%:z",
-    ] {
-        if let Ok(parsed) = DateTime::parse_from_str(&normalized, pattern) {
-            return Ok(parsed.with_timezone(&Utc));
-        }
     }
 
     let naive_parsed = parse_naive(&normalized).ok_or_else(|| TimestampError::InvalidFormat {
@@ -102,7 +98,9 @@ pub fn normalize_iso_to_utc_iso(
 /// Converts a UTC-normalized ISO timestamp to epoch seconds.
 ///
 /// Stricter than user-facing parsing on purpose: callers must normalize before
-/// crossing the repository boundary, mirroring v1 `utc_iso_to_epoch`.
+/// crossing the repository boundary, mirroring v1 `utc_iso_to_epoch`. Like
+/// v1, the offset-bearing spellings `fromisoformat` accepts (compact, hours
+/// only, space separated) parse here before the UTC check rejects them.
 ///
 /// # Errors
 ///
@@ -110,8 +108,8 @@ pub fn normalize_iso_to_utc_iso(
 /// [`TimestampError::NotUtc`] when the offset is not zero, and
 /// [`TimestampError::InvalidFormat`] for unparsable input.
 pub fn utc_iso_to_epoch(value: &str, field_name: &str) -> Result<f64, TimestampError> {
-    let normalized = normalize_z_suffix(value);
-    let parsed = DateTime::<FixedOffset>::parse_from_rfc3339(&normalized).map_err(|_| {
+    let normalized = normalize_wire_form(value);
+    let parsed = parse_offset_aware(&normalized).ok_or_else(|| {
         // Distinguish "no offset at all" from "malformed" the way v1 does: it
         // parses first and only then checks the offset.
         if parse_naive(&normalized).is_some() {
@@ -180,8 +178,55 @@ fn parse_naive(value: &str) -> Option<NaiveDateTime> {
         "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%dT%H:%M",
         "%Y-%m-%d %H:%M",
+        "%Y%m%dT%H%M%S%.f",
+        "%Y%m%dT%H%M",
     ] {
         if let Ok(parsed) = NaiveDateTime::parse_from_str(value, pattern) {
+            return Some(parsed);
+        }
+    }
+    parse_date_midnight(value)
+}
+
+/// Python's `fromisoformat` reads a bare date as midnight, in both the
+/// extended `2026-01-02` and basic `20260102` spelling.
+fn parse_date_midnight(value: &str) -> Option<NaiveDateTime> {
+    let extended = if value.len() == 8 && value.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{}-{}-{}", &value[0..4], &value[4..6], &value[6..8])
+    } else if value.len() == 10
+        && value.as_bytes()[4] == b'-'
+        && value.as_bytes()[7] == b'-'
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+    {
+        value.to_owned()
+    } else {
+        return None;
+    };
+    NaiveDate::parse_from_str(&extended, "%Y-%m-%d")
+        .ok()?
+        .and_hms_opt(0, 0, 0)
+}
+
+/// Parses the offset-bearing spellings Python 3.11's `fromisoformat` accepts
+/// beyond RFC 3339: the space date-time separator, omitted seconds, compact
+/// (`+0800`) and hours-only (`+08`) offsets, and the basic `20260102T030405`
+/// layout.
+fn parse_offset_aware(value: &str) -> Option<DateTime<FixedOffset>> {
+    if let Ok(parsed) = DateTime::<FixedOffset>::parse_from_rfc3339(value) {
+        return Some(parsed);
+    }
+    for pattern in [
+        "%Y-%m-%dT%H:%M:%S%.f%#z",
+        "%Y-%m-%d %H:%M:%S%.f%#z",
+        "%Y-%m-%dT%H:%M%#z",
+        "%Y-%m-%d %H:%M%#z",
+        "%Y%m%dT%H%M%S%.f%#z",
+        "%Y%m%dT%H%M%#z",
+    ] {
+        if let Ok(parsed) = DateTime::parse_from_str(value, pattern) {
             return Some(parsed);
         }
     }
@@ -194,6 +239,12 @@ fn normalize_z_suffix(value: &str) -> String {
     } else {
         value.to_owned()
     }
+}
+
+/// Python accepts `Z` and a `,` fractional separator; both become spellings
+/// the shared pattern list understands.
+fn normalize_wire_form(value: &str) -> String {
+    normalize_z_suffix(value).replace(',', ".")
 }
 
 #[cfg(test)]
@@ -280,6 +331,81 @@ mod tests {
     fn utc_iso_to_epoch_rejects_naive_input() {
         let err = utc_iso_to_epoch("2026-01-02T03:04:05", "timestamp")
             .expect_err("naive input must be rejected");
+        assert!(matches!(err, TimestampError::MissingTimezone { .. }));
+    }
+
+    // Python-oracle cases: `datetime.fromisoformat` (Python 3.11) accepts each
+    // spelling below, so v1's `parse_iso_datetime` serves it while v2 rejected
+    // it with `InvalidFormat` before these patterns existed.
+
+    #[test]
+    fn date_only_input_resolves_to_midnight() {
+        // datetime.fromisoformat("2026-01-02") == datetime(2026, 1, 2)
+        let normalized =
+            normalize_iso_to_utc_iso("2026-01-02", "timestamp", NaivePolicy::Utc).unwrap();
+        assert_eq!(normalized, "2026-01-02T00:00:00+00:00");
+        let err = parse_iso("2026-01-02", "timestamp", NaivePolicy::Reject)
+            .expect_err("a bare date carries no offset");
+        assert!(matches!(err, TimestampError::MissingTimezone { .. }));
+    }
+
+    #[test]
+    fn compact_and_hours_only_offsets_are_converted() {
+        for value in [
+            "2026-01-02T03:04:05+08",
+            "2026-01-02T03:04:05+0800",
+            "2026-01-02 03:04:05+0800",
+        ] {
+            let normalized =
+                normalize_iso_to_utc_iso(value, "timestamp", NaivePolicy::Reject).unwrap();
+            assert_eq!(normalized, "2026-01-01T19:04:05+00:00", "{value}");
+        }
+    }
+
+    #[test]
+    fn comma_fraction_separator_parses_like_a_dot() {
+        let normalized = normalize_iso_to_utc_iso(
+            "2026-01-02T03:04:05,123+00:00",
+            "timestamp",
+            NaivePolicy::Reject,
+        )
+        .unwrap();
+        assert_eq!(normalized, "2026-01-02T03:04:05.123000+00:00");
+    }
+
+    #[test]
+    fn basic_format_input_parses_like_python() {
+        assert_eq!(
+            normalize_iso_to_utc_iso("20260102T030405+0800", "timestamp", NaivePolicy::Reject)
+                .unwrap(),
+            "2026-01-01T19:04:05+00:00"
+        );
+        assert_eq!(
+            normalize_iso_to_utc_iso("20260102T0304+0800", "timestamp", NaivePolicy::Reject)
+                .unwrap(),
+            "2026-01-01T19:04:00+00:00"
+        );
+        let parsed = parse_iso("20260102", "timestamp", NaivePolicy::Utc).unwrap();
+        assert_eq!(format_utc_iso(parsed), "2026-01-02T00:00:00+00:00");
+    }
+
+    #[test]
+    fn utc_iso_to_epoch_accepts_v1_offset_spellings() {
+        for value in [
+            "2026-01-02T03:04:05+00:00",
+            "2026-01-02T03:04:05+0000",
+            "2026-01-02T03:04:05+00",
+        ] {
+            let epoch = utc_iso_to_epoch(value, "timestamp").unwrap();
+            assert!((epoch - 1_767_323_045.0).abs() < 1e-6, "{value}");
+        }
+        // A non-zero offset in any spelling is still a NotUtc rejection.
+        let err = utc_iso_to_epoch("2026-01-02T03:04:05+0800", "timestamp")
+            .expect_err("non-UTC offsets must be rejected");
+        assert!(matches!(err, TimestampError::NotUtc { .. }));
+        // A bare date carries no offset: the boundary still refuses to guess.
+        let err = utc_iso_to_epoch("2026-01-02", "timestamp")
+            .expect_err("date-only input has no timezone");
         assert!(matches!(err, TimestampError::MissingTimezone { .. }));
     }
 }
