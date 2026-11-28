@@ -26,11 +26,11 @@ CANDIDATES=(
     "/usr/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
 )
 
-# Minimal runners may omit HOME. Keep the user-local fallback conditional so
-# an environment omission cannot bypass the fail-open behavior below.
-if [ -n "${HOME:-}" ]; then
-    CANDIDATES+=("${HOME}/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}")
-fi
+# Relative HOME paths resolve against the host tool's working directory,
+# not a user installation. Only absolute paths may add a user-local hook.
+case "${HOME:-}" in
+    /*) CANDIDATES+=("${HOME}/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}") ;;
+esac
 
 for candidate in "${CANDIDATES[@]}"; do
     [ -f "$candidate" ] || continue
