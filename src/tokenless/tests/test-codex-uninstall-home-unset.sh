@@ -8,7 +8,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UNINSTALL="$ROOT/adapters/tokenless/codex/scripts/uninstall.sh"
 
-sb="$(mktemp -d -p .)"; trap 'rm -rf "$sb"' EXIT
+sb="$(mktemp -d)"; trap 'rm -rf "$sb"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 run() { env -i PATH=/usr/local/bin:/usr/bin:/bin "$@"; }
 has() {
@@ -24,7 +24,7 @@ rc=0
 out="$(run bash "$UNINSTALL" --non-interactive 2>&1)" || rc=$?
 [ "$rc" = 1 ] || fail "expected exit 1 without HOME/overrides, got $rc:
 $out"
-has "$out" "TOKENLESS_INSTALL_PREFIX or HOME must be set" \
+has "$out" "TOKENLESS_INSTALL_PREFIX or HOME must be set to an absolute path" \
     "no-root invocation must name the missing setting"
 has "$out" "Nothing was removed" \
     "no-root invocation must state that no removal happened"
@@ -94,5 +94,26 @@ $out"
 has "$out" "no marketplace directory can be removed" \
     "dry run must preview the missing marketplace root"
 [ -d "$market" ] || fail "dry run removed an existing marketplace directory"
+
+# 6. No CLI + no HOME + no CODEX_HOME, with a resolvable prefix and a binary:
+#    the fail-closed branch must report honestly. The marketplace directory is
+#    kept; the component binary is still removed (documented existing behavior
+#    at uninstall.sh:126-128), so the old "Nothing was removed." message lied.
+prefix6="$sb/prefix6"
+mkdir -p "$prefix6/bin"
+printf '#!/bin/sh\nexit 0\n' > "$prefix6/bin/tokenless"; chmod 755 "$prefix6/bin/tokenless"
+rc=0
+out="$(run TOKENLESS_INSTALL_PREFIX="$prefix6" \
+    CODEX_BIN="$sb/missing-codex-2" \
+    bash "$UNINSTALL" --non-interactive 2>&1)" || rc=$?
+[ "$rc" = 1 ] || fail "no CLI + no root should exit 1, got $rc:
+$out"
+has "$out" "the marketplace directory is kept" \
+    "no-CLI no-root branch must report the marketplace directory is kept"
+case "$out" in
+    *"Nothing was removed."*) fail "no-CLI no-root branch misreported that nothing was removed:
+$out" ;;
+esac
+[ ! -e "$prefix6/bin/tokenless" ] || fail "documented binary removal did not happen on the fail-closed path"
 
 echo "PASS: codex uninstall fails closed without HOME"
