@@ -61,7 +61,6 @@ TOML_CONTRACTS = (
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/packaging/anolisa/rpm/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/packaging/anolisa/raw/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/src/plugins/openclaw/package.json"),
-    ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/src/plugins/openclaw/package-lock.json"),
     (
         "src/ws-ckpt/src/Cargo.toml",
         "distribution/anolisa/manifests/components/ws-ckpt/component.toml",
@@ -101,6 +100,13 @@ AGENT_MEMORY_JSON = (
     "src/agent-memory/adapters/agent-memory/openclaw/package.json",
     "src/agent-memory/adapters/agent-memory/openclaw/openclaw.plugin.json",
     "src/agent-memory/config/mcp-server.json",
+)
+NPM_LOCK_CONTRACTS = (
+    (
+        "src/agent-memory/Cargo.toml",
+        "src/agent-memory/adapters/agent-memory/openclaw/package-lock.json",
+    ),
+    ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/src/plugins/openclaw/package-lock.json"),
 )
 GENERATED_CONTRACTS = (
     "src/agent-memory/target/packaging/anolisa/rpm/component.toml",
@@ -161,8 +167,8 @@ def check_template(errors: list[str], source: str, template: str) -> None:
         errors.append(f"{template}: does not render component.version={expected}")
 
 
-def check_agent_memory_lock(errors: list[str], expected: str) -> None:
-    path = "src/agent-memory/adapters/agent-memory/openclaw/package-lock.json"
+def check_npm_lock(errors: list[str], source: str, path: str) -> None:
+    expected = read_version(source)
     lock = json.loads(read_text(path))
     root_version = lock.get("version")
     if root_version != expected:
@@ -209,7 +215,8 @@ def main() -> int:
             actual = read_json_version(path)
             if actual != agent_memory_version:
                 errors.append(f"{path}: expected {agent_memory_version}, found {actual}")
-        check_agent_memory_lock(errors, agent_memory_version)
+        for source, path in NPM_LOCK_CONTRACTS:
+            check_npm_lock(errors, source, path)
         check_generated_contracts_untracked(errors)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         errors.append(str(error))
