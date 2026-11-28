@@ -2,7 +2,7 @@
 # docker build --pull --no-cache --platform linux/amd64 -t alinux4-sec-core-ci:local \
 #   .github/runner-images/alinux4-sec-core-ci
 
-ARG BASE_IMAGE=alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+ARG BASE_IMAGE=alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4@sha256:e3fd398154003b60e9a1649ae6a2f209dc0466bae971ba21afcc4e5c5cb5dff8
 FROM ${BASE_IMAGE}
 
 USER root
