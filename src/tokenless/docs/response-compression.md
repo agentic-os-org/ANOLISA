@@ -58,10 +58,15 @@ compress_value(value, depth)
 
 ### Build Log 领域
 
-`BuildLogCompressor` 识别 Cargo/rustc、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C，
+`BuildLogCompressor` 识别 Cargo/rustc、Maven、Gradle、pytest、unittest/Django、npm/Jest、pnpm、Go、Make/C，
 以及具有明确 Shell 边界、带编号进度词和稳定重复模板的通用日志。检测只采样首尾各 100 行、
 每端最多 32 KiB，不依赖请求中的 command；证据不足时透传。pnpm 需要完整完成行加配套进度、
 完整通知或依赖区段，或者至少三条完整进度加 `Packages:` 行；孤立关键词、加号或框线不足以识别。
+Maven 与 Gradle 只认行首锚定的任务、阶段与摘要记录：Gradle 要求首行是构建头，并在未包进
+代码围栏的连续区段内看到强证据（完整记录已压紧、至少两条任务记录，或任务记录加
+`BUILD SUCCESSFUL|FAILED` 摘要）；Maven 要求 `[INFO]` 记录命中既有的阶段、模块或测试统计模板。
+样本缺口两侧的围栏状态未知时，尾部区段必须自身无围栏且含强证据才算命中。任何超过 4096 字节
+的单行都会关闭记录作用域乃至停用整个结果的 Maven/Gradle 编辑。
 
 处理沿用 SGR 颜色清理，然后在原始行坐标上规划互不重叠的布局替换与进度省略，一次渲染。
 布局压紧和进度缩减可同时生效，共用现有 `build_log_reduction` 标签，每次结果只报告一次。
@@ -70,7 +75,7 @@ compress_value(value, depth)
 | 操作 | 内容 | 恢复要求 |
 |---|---|---|
 | `terminal_cleanup` | 清理已有契约允许的 SGR 颜色序列 | `lossless`，无需 Stash |
-| `build_log_reduction` | pnpm 已识别通知、依赖清单和装饰条的布局压紧，以及连续常规进度中间部分的省略 | 仅布局为语义 `lossless`，无需 Stash/恢复提示，不保证全文字节可逆；包含进度省略时为 `retrievable`，要求 Stash 与恢复路径均可用 |
+| `build_log_reduction` | pnpm 已识别通知、依赖清单和装饰条的布局压紧，Maven 与 Gradle 任务、阶段记录的字面模板共享，以及连续常规进度中间部分的省略 | 仅布局为语义 `lossless`，无需 Stash/恢复提示，不保证全文字节可逆；包含进度省略时为 `retrievable`，要求 Stash 与恢复路径均可用 |
 
 pnpm 只处理完整 LF 记录。CRLF、裸 CR、TAB、OSC、光标控制或残缺 ESC 会停用 pnpm 新转换，
 只保留既有 SGR cleanup-only 行为。进度和依赖行必须位于原始顶层列；不把脚本、引用、代码围栏
