@@ -55,14 +55,13 @@ impl RemovedConnection {
                         }
                     }
                 }
-                ConnectionState::Idle => {}
+                _ => {}
             }
             if let ConnectionState::RequestBodyPending { body_buffer, .. } = &mut state {
                 *body_buffer = Vec::new();
             }
         }
         let partial = match state {
-            ConnectionState::Idle => return None,
             ConnectionState::RequestPending { request } => AggregatedResult::RequestOnly {
                 connection_id: id,
                 request,
@@ -129,6 +128,7 @@ impl RemovedConnection {
                     }
                 }
             },
+            _ => return None,
         };
         metrics::counter!("agentsight_http_abandoned_emitted_total", "reason" => reason.as_str())
             .increment(1);
@@ -254,12 +254,16 @@ impl HttpConnectionAggregator {
         ) {
             self.eviction_count = self.eviction_count.saturating_add(1);
         }
-        let kind = match &state {
-            ConnectionState::Idle => "idle",
-            ConnectionState::RequestPending { .. } => "request_pending",
-            ConnectionState::RequestBodyPending { .. } => "request_body_pending",
-            ConnectionState::ResponsePending { .. } => "response_pending",
-            ConnectionState::SseActive { .. } => "sse_active",
+        let kind = if state.pending_header_source().is_some() {
+            "request_headers_pending"
+        } else {
+            match &state {
+                ConnectionState::RequestPending { .. } => "request_pending",
+                ConnectionState::RequestBodyPending { .. } => "request_body_pending",
+                ConnectionState::ResponsePending { .. } => "response_pending",
+                ConnectionState::SseActive { .. } => "sse_active",
+                _ => "idle",
+            }
         };
         metrics::counter!("agentsight_http_conn_removed_total", "reason" => reason.as_str(), "state" => kind).increment(1);
         Some(RemovedConnection {

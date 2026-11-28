@@ -145,7 +145,7 @@ impl Aggregator {
 
         // One SSL read may yield several SSE messages (including a synthetic
         // chunk terminator). Feed its original, longest source buffer only once
-        // when HTTP response framing owns the connection.
+        // when HTTP framing owns the connection.
         let response_event = result
             .messages
             .iter()
@@ -168,6 +168,7 @@ impl Aggregator {
             if self.http.discard_retired_sse(event) {
                 Some(None)
             } else if self.http.accepts_response_bytes(event)
+                || self.http.accepts_request_header_bytes(event)
                 || self.http.accepts_compact_sse_bytes(event)
             {
                 Some(self.http.process_raw_body_data(event))

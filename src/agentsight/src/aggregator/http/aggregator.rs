@@ -5,6 +5,8 @@
 
 use super::super::result::AggregatedResult;
 use super::pair::HttpPair;
+#[path = "pending_request.rs"]
+mod pending_request;
 #[path = "pending_response.rs"]
 mod pending_response;
 use super::response::AggregatedResponse;
@@ -73,6 +75,8 @@ pub(crate) enum ConnectionState {
     /// constructed by tests; kept so the machine stays explicit about it.
     #[allow(dead_code)]
     Idle,
+    /// Request header bytes awaiting completion before parsing a typed request.
+    RequestHeadersPending { event: Rc<SslEvent> },
     /// Request pending - waiting for response
     RequestPending { request: ParsedRequest },
     /// Request body pending - body not yet complete, waiting for more data or response
@@ -105,6 +109,16 @@ pub(crate) enum ConnectionState {
         /// output before ownership passes to finalization.
         zstd_decoder: Option<Rc<RefCell<ZstdStreamDecoder>>>,
     },
+}
+
+impl ConnectionState {
+    /// Capture source retained while a request header block is incomplete.
+    pub(super) fn pending_header_source(&self) -> Option<&Rc<SslEvent>> {
+        match self {
+            Self::RequestHeadersPending { event } => Some(event),
+            _ => None,
+        }
+    }
 }
 
 /// Snapshot of memory and lifecycle state retained by HTTP correlation.
@@ -731,6 +745,9 @@ impl HttpConnectionAggregator {
         self.touch(&connection_id);
 
         match state {
+            ConnectionState::RequestHeadersPending { .. } => {
+                self.start_response(connection_id, None, response)
+            }
             ConnectionState::RequestBodyPending {
                 request,
                 expected_body_len,
@@ -999,6 +1016,9 @@ impl HttpConnectionAggregator {
         let connection_id = ConnectionId::from_ssl_event(ssl_event);
         if self.accepts_response_bytes(ssl_event) || self.starts_response(ssl_event) {
             return self.process_response_bytes(ssl_event);
+        }
+        if self.process_request_header_bytes(ssl_event) {
+            return None;
         }
         let state = self.connections.pop(&connection_id)?;
 

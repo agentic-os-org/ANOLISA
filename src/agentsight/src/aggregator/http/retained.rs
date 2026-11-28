@@ -353,8 +353,11 @@ impl ConnectionState {
 
     pub(super) fn buffered_bytes(&self) -> usize {
         let mut counter = Counter::new(size_of::<Self>());
+        if let Some(event) = self.pending_header_source() {
+            counter.source(event);
+            return counter.bytes;
+        }
         match self {
-            Self::Idle => return 0,
             Self::RequestPending { request } => counter.request(request),
             Self::RequestBodyPending {
                 request,
@@ -407,6 +410,7 @@ impl ConnectionState {
                         .as_ref()
                         .map_or(0, |decoder| decoder.borrow().retained_bytes());
             }
+            _ => return 0,
         }
         counter.bytes
     }
