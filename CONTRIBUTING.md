@@ -219,19 +219,20 @@ including tests of its bundled `skillfs-mount` scripts. The former
 directories. Reserve repository-level `tests/` for shared test runners and
 tests that exercise multiple components.
 
-From the repository root, use Python 3.11 and a virtual environment:
+Both suites run on Linux and expect Python 3.11, Git, and GNU Make on `PATH`.
+From the repository root, create a virtual environment and run them:
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
 .venv/bin/python -m unittest discover -s src/os-skills/tests -v
 .venv/bin/python -m unittest discover -s src/skillfs/tests -p 'test_skill_usage*.py' -v
 ```
 
-The OS Skills suite covers skill scripts and installation/package layout.
-Its PDF regression uses the pinned PyMuPDF dependency. The SkillFS command
-above only checks the Python log-usage scripts; it does not replace the Linux
-Rust or FUSE checks. Both suites run in their component's prebuilt CI workflow.
+The OS Skills suite covers skill scripts and installation/package layout; its
+tests invoke Git and Make and rely on Linux filesystem behavior. The SkillFS
+command above only checks the Python log-usage scripts; it does not replace the
+Linux Rust or FUSE checks. Both suites run in their component's prebuilt CI
+workflow.
 
 For maintainers changing component ownership, `.github/components.json`
 keeps source roots in `path_prefixes` and component-specific files outside

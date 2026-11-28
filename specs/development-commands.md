@@ -72,9 +72,8 @@ make test
 # macOS
 make build-mac
 
-# os-skills (All platforms; from the repository root with Python 3.11)
+# os-skills (Linux; from the repository root with Python 3.11, Git, and Make)
 python3.11 -m venv .venv
-.venv/bin/python -m pip install -r src/os-skills/tests/requirements.txt
 .venv/bin/python -m unittest discover -s src/os-skills/tests -v
 # No compilation needed. Keep component tests under src/os-skills/tests/.
 
