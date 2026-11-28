@@ -375,6 +375,13 @@ def _resolve_time_range(
     return since, until
 
 
+def _format_summary_hours(hours: float) -> str:
+    """Render hours at full float precision without a trailing .0 on integers."""
+    if hours.is_integer():
+        return str(int(hours))
+    return str(hours)
+
+
 def _format_timestamp(ts: str) -> str:
     """Render an ISO-8601 timestamp in local time for table display.
 
@@ -592,7 +599,7 @@ def events(
             offset=0,
         )
         time_label = (
-            f"last {summary_hours:.0f} hours"
+            f"last {_format_summary_hours(summary_hours)} hours"
             if summary_hours is not None
             else f"{since or '...'} to {until or 'now'}"
         )

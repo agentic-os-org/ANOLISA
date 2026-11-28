@@ -506,7 +506,9 @@ impl EventsCommand {
             );
         }
         let label = match self.last_hours {
-            Some(hours) => format!("last {hours:.0} hours"),
+            // v1 prints the exact hours; formatting with ":0" rounded
+            // fractions such as 0.1 to 0 and 1.5 to 2 (#6056).
+            Some(hours) => format!("last {hours} hours"),
             None => format!(
                 "{} to {}",
                 self.since.as_deref().unwrap_or("..."),
@@ -1126,6 +1128,28 @@ mod tests {
         let events = command(&["--summary", "--since", "2026-01-01T00:00:00+00:00"]);
         let (_, label) = events.summary_window();
         assert_eq!(label, "2026-01-01T00:00:00+00:00 to now");
+    }
+
+    #[test]
+    fn summary_label_keeps_exact_hours_without_rounding() {
+        // v1 rendered the exact hours the user asked for: fractions stay
+        // fractional and integers lose the trailing ".0" (#6056).
+        for (arg, expected) in [
+            ("0.1", "last 0.1 hours"),
+            ("0.5", "last 0.5 hours"),
+            ("1.5", "last 1.5 hours"),
+            ("0.12345678", "last 0.12345678 hours"),
+            ("24", "last 24 hours"),
+        ] {
+            let events = command(&["--summary", "--last-hours", arg]);
+            assert_eq!(events.summary_window().1, expected, "--last-hours {arg}");
+        }
+    }
+
+    #[test]
+    fn summary_default_window_label_stays_last_24_hours() {
+        let events = command(&["--summary"]);
+        assert_eq!(events.summary_window().1, "last 24 hours");
     }
 
     #[test]
