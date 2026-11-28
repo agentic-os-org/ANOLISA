@@ -155,31 +155,33 @@ INSTANCE_TYPE=$(curl -s http://100.100.100.200/latest/meta-data/instance-type)
 
 ## 高级用法
 
+> **地域参数**：以下示例统一使用 `REGION_ID`，它与上文元数据服务读取的值一致。若 `aliyun` CLI 尚未配置默认地域，请先执行 `aliyun configure set --region "$REGION_ID"`，或在单条命令末尾追加全局参数 `--region "$REGION_ID"`。
+
 ### 使用过滤器
 
 ```bash
 # 按状态过滤实例
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --Status Running
+aliyun ecs DescribeInstances --RegionId "$REGION_ID" --Status Running
 
 # 按标签过滤
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --Tag.1.Key Environment --Tag.1.Value Production
+aliyun ecs DescribeInstances --RegionId "$REGION_ID" --Tag.1.Key Environment --Tag.1.Value Production
 ```
 
 ### 分页查询
 
 ```bash
 # 分页查询，每页10条，查询第1页
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --PageSize 10 --PageNumber 1
+aliyun ecs DescribeInstances --RegionId "$REGION_ID" --PageSize 10 --PageNumber 1
 ```
 
 ### 输出格式
 
 ```bash
 # JSON格式输出
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --output json
+aliyun ecs DescribeInstances --RegionId "$REGION_ID" --output json
 
 # 表格格式输出
-aliyun ecs DescribeInstances --RegionId cn-hangzhou --output table
+aliyun ecs DescribeInstances --RegionId "$REGION_ID" --output table
 ```
 
 ## 执行前检查
