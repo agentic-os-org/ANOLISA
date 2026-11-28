@@ -1,7 +1,7 @@
 use regex::Regex;
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock};
 use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, truncation_suffix_for};
 
@@ -46,6 +46,9 @@ pub struct SchemaCompressor {
     /// CLI `--batch` can roll back every discarded item. In-session refreshes
     /// update the generation only when the store reports an unbroken chain.
     stash_keys_created: RefCell<HashMap<String, u64>>,
+    // Candidate recovery references include refreshes even when another writer
+    // owns the stored row. Ownership alone cannot describe emitted artifacts.
+    stash_keys_referenced: RefCell<BTreeSet<String>>,
 }
 
 impl Default for SchemaCompressor {
@@ -70,6 +73,7 @@ impl Default for SchemaCompressor {
             stash_writes: Cell::new(0),
             stash_errors: Cell::new(0),
             stash_keys_created: RefCell::new(HashMap::new()),
+            stash_keys_referenced: RefCell::new(BTreeSet::new()),
         }
     }
 }
@@ -145,10 +149,25 @@ impl SchemaCompressor {
     }
 
     /// Keys of stash rows created this session, pending commit or rollback.
-    /// Each corresponds to a marker embedded in the compressed output, so on
-    /// an applied result these are exactly the emitted keys.
+    /// This ownership list excludes refreshed rows created by other sessions.
+    /// Use [`Self::referenced_stash_keys`] for output attribution instead.
     pub fn stash_keys(&self) -> Vec<String> {
         self.stash_keys_created.borrow().keys().cloned().collect()
+    }
+
+    /// Distinct recovery keys in sorted order for this session's compressed
+    /// candidates, including existing rows refreshed without rollback ownership.
+    ///
+    /// Take this snapshot before finalizing the acceptance or rollback decision:
+    /// [`Self::rollback_stash_writes`] and [`Self::clear_stash_session`] both clear
+    /// the references. The returned vector is independent of subsequent clearing.
+    /// Attribute the saved snapshot only if the candidate output is accepted.
+    pub fn referenced_stash_keys(&self) -> Vec<String> {
+        self.stash_keys_referenced
+            .borrow()
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Delete stash entries created during this compressor session.
@@ -170,6 +189,7 @@ impl SchemaCompressor {
         let Some(store) = self.stash_store.as_ref() else {
             return 0;
         };
+        self.stash_keys_referenced.borrow_mut().clear();
         let writes = std::mem::take(&mut *self.stash_keys_created.borrow_mut());
         let mut removed = 0usize;
         for (key, generation) in &writes {
@@ -200,11 +220,15 @@ impl SchemaCompressor {
     /// touch the store.
     pub fn clear_stash_session(&self) {
         self.stash_keys_created.borrow_mut().clear();
+        self.stash_keys_referenced.borrow_mut().clear();
         self.stash_writes.set(0);
         self.stash_errors.set(0);
     }
 
     fn record_stash_success(&self, write: &StashWrite) {
+        self.stash_keys_referenced
+            .borrow_mut()
+            .insert(write.key.clone());
         let mut pending = self.stash_keys_created.borrow_mut();
         if write.created {
             self.stash_writes.set(self.stash_writes.get() + 1);
