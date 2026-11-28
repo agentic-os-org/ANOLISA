@@ -137,7 +137,12 @@ pub async fn get_preferences(
         "source": resolved.as_str(),
         "preferences": prefs,
     });
-    cache_put(cache_key, body.clone());
+    // Only cache `llm=true` responses when the LLM layer actually succeeded;
+    // otherwise a transient LLM error or pre-setup probe pins `llm_enabled: false`
+    // for the full 10-minute TTL.
+    if !llm_requested || llm_enabled {
+        cache_put(cache_key, body.clone());
+    }
     HttpResponse::Ok().json(body)
 }
 
