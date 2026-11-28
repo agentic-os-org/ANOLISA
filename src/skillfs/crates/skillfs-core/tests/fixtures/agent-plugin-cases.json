@@ -1,0 +1,663 @@
+{
+  "common_files": {"manifest": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\"\n}\n", "sample": "---\nname: sample\ndescription: An example.\n---\nBody\n", "stdio": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n"},
+  "cases": {
+    "all-metadata": {
+      "files": {"plugin/com.example.ignored/hooks.json": "unparsed", "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"a.-9\",\n  \"author\": {\n    \"name\": \"\",\n    \"email\": \"free text\",\n    \"url\": \"local\"\n  },\n  \"version\": \"revision 6\",\n  \"description\": \"\",\n  \"license\": \"custom\",\n  \"homepage\": \"docs\",\n  \"repository\": \"folder\",\n  \"keywords\": [\n    \"\",\n    \"example\"\n  ],\n  \"extensions\": {\n    \"com.example.ignored\": 42,\n    \"local\": null\n  }\n}\n"},
+      "expected": {"diagnostics": [], "skills": [], "servers": [], "accepted": true}
+    },
+    "args-items": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"args\": [\n        1\n      ]\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/args", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "args-shape": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"args\": {}\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/args", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "author-email": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"author\": {\n    \"email\": []\n  }\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/author/email", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "author-extra": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"author\": {\n    \"id\": \"\"\n  }\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/author/id", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "author-name": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"author\": {\n    \"name\": []\n  }\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/author/name", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "author-url": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"author\": {\n    \"url\": []\n  }\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/author/url", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "command-absolute": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"/bin/echo\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-drive-relative": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"X:tool\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-empty": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-multi-token": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node server.js\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-nonstring": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": 1\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-parent": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"../node\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-relative": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"bin/node\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-symlink-root": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"./link/file\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/link": "../outside"},
+      "dirs": ["outside"],
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§4.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-unc": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"\\\\\\\\host\\\\tool\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "command-windows": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"C:\\\\bin\\\\tool\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "contained-command-and-cwd-links": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"root\": {\n      \"type\": \"stdio\",\n      \"command\": \"./alias/tool\",\n      \"cwd\": \"${PLUGIN_ROOT}/alias\"\n    },\n    \"data\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"${PLUGIN_DATA}/cache-link\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/real-dir/tool": "fixture\n"},
+      "links": {"data/cache-link": "cache", "plugin/alias": "real-dir"},
+      "dirs": ["data/cache"],
+      "expected": {"diagnostics": [], "skills": [], "servers": [{"name": "data", "type": "stdio"}, {"name": "root", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-absolute": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"/tmp\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-bare": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"cache\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-data-parent": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"${PLUGIN_DATA}/..\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-malformed": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"${PLUGIN_ROOT}suffix\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-other": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"${HOME}\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-relative-parent": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"./sub/../../sibling\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-root-parent": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"${PLUGIN_ROOT}/..\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-symlink-data": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"${PLUGIN_DATA}/link\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"data/link": "../outside"},
+      "dirs": ["outside"],
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-symlink-root": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"./link\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/link": "../outside"},
+      "dirs": ["outside"],
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "cwd-wrong-type": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": 42\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/cwd", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "direct-children-only": {
+      "files": {"plugin/.mcp.json": "bad", "plugin/mcp.json": {"common": "stdio"}, "plugin/other/sample/SKILL.md": {"common": "sample"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/deeper/child/SKILL.md": {"common": "sample"}, "plugin/skills/file": "ignored", "plugin/skills/sample/SKILL.md": {"common": "sample"}, "plugin/skills/wrong-case/skill.md": {"common": "sample"}},
+      "links": {"plugin/skills/absent/SKILL.md": "absent"},
+      "dirs": ["plugin/skills/nonregular/SKILL.md"],
+      "expected": {"diagnostics": [], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "env-items": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"env\": {\n        \"x\": false\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/env", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "env-shape": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"env\": []\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/env", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "header-outer-space": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": {\n        \"X\": \" text \"\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/headers/X", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-duplicate-header": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": {\n        \"X-Tag\": \"a\",\n        \"x-tag\": \"b\"\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/headers/x-tag", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-header-control": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": {\n        \"X\": \"a\\nb\"\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/headers/X", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-header-item": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": {\n        \"X\": 2\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/headers", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-header-name": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": {\n        \"Bad Name\": \"v\"\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/headers/Bad Name", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-header-wide": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": {\n        \"X\": \"雪\"\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/headers/X", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-headers-shape": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": []\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/headers", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-mixed": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"command\": \"node\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "http-unknown": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"oauth\": {}\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/oauth", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "internal-symlinks": {
+      "files": {"plugin/conf": {"common": "stdio"}, "plugin/manifest": {"common": "manifest"}, "plugin/resources/doc": {"common": "sample"}},
+      "links": {"plugin/directory/sample": "../resources/entry", "plugin/mcp.json": "conf", "plugin/plugin.json": "manifest", "plugin/resources/entry/SKILL.md": "../doc", "plugin/skills": "directory"},
+      "expected": {"diagnostics": [], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "keywords-elements": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"keywords\": [\n    4\n  ]\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/keywords", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "loop-doc": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/skills/bad/SKILL.md": "SKILL.md"},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "manifest-array": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "[]\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "manifest-directory": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "dirs": ["plugin/plugin.json"],
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "", "spec_ref": "§5.1"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "manifest-missing": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "", "spec_ref": "§5.1"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "manifest-non-json": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\"unquoted\":NaN}", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "manifest-other-location": {
+      "files": {"plugin/.claude-plugin/plugin.json": {"common": "manifest"}, "plugin/mcp.json": {"common": "stdio"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "", "spec_ref": "§5.1"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "manifest-outside": {
+      "files": {"outside.json": {"common": "manifest"}, "plugin/mcp.json": {"common": "stdio"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/plugin.json": "../outside.json"},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "manifest-symlink-loop": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/plugin.json": "plugin.json"},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "mcp-dangling": {
+      "files": {"plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/mcp.json": "absent"},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "", "spec_ref": "§6.2"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-empty": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {}\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-extra": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {},\n  \"unknown\": 1\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "/unknown", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-invalid-json": {
+      "files": {"plugin/mcp.json": "}", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "", "spec_ref": "§7.2.2"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-loop": {
+      "files": {"plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/mcp.json": "mcp.json"},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-object-missing": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\"\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-object-type": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": []\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-outside": {
+      "files": {"outside": "{}", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/mcp.json": "../outside"},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-schema-alias": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"mcpServers\": {}\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "/$schema", "spec_ref": "§10.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-schema-missing": {
+      "files": {"plugin/mcp.json": "{\n  \"mcpServers\": {}\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "/$schema", "spec_ref": "§10.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-top-array": {
+      "files": {"plugin/mcp.json": "[]\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-version-mismatch": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.1.0/mcp.schema.json\",\n  \"mcpServers\": {}\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "/$schema", "spec_ref": "§10.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "mcp-wrong-kind": {
+      "files": {"plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "dirs": ["plugin/mcp.json"],
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "mcp", "path": "mcp.json", "json_pointer": "", "spec_ref": "§6.2"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "metadata-author": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"author\": false\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/author", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "metadata-description": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"description\": false\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/description", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "metadata-homepage": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"homepage\": false\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/homepage", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "metadata-keywords": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"keywords\": false\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/keywords", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "metadata-license": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"license\": false\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/license", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "metadata-repository": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"repository\": false\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/repository", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "metadata-version": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"version\": false\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/version", "spec_ref": "§5.4"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "missing-optional-components": {
+      "files": {"plugin/plugin.json": {"common": "manifest"}},
+      "expected": {"diagnostics": [], "skills": [], "servers": [], "accepted": true}
+    },
+    "name-char": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"a_b\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-empty": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-leading": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"-start\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-missing": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.3"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-non-string": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": 7\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-repeat-dot": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"a..b\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-repeat-hyphen": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"a--b\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-space": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"a b\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-too-long": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-trailing": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"end.\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-unicode": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"café\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-uppercase": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"Foo\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/name", "spec_ref": "§5.5"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "name-valid-1-9": {
+      "files": {"plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"9\"\n}\n"},
+      "expected": {"diagnostics": [], "skills": [], "servers": [], "accepted": true}
+    },
+    "name-valid-1-a": {
+      "files": {"plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"a\"\n}\n"},
+      "expected": {"diagnostics": [], "skills": [], "servers": [], "accepted": true}
+    },
+    "name-valid-10-acm": {
+      "files": {"plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"acme.tools\"\n}\n"},
+      "expected": {"diagnostics": [], "skills": [], "servers": [], "accepted": true}
+    },
+    "name-valid-64-aaa": {
+      "files": {"plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n}\n"},
+      "expected": {"diagnostics": [], "skills": [], "servers": [], "accepted": true}
+    },
+    "other-resource-outside": {
+      "files": {"outside": "not exposed\n", "plugin/plugin.json": {"common": "manifest"}},
+      "links": {"plugin/assets/linked": "../../outside"},
+      "expected": {"diagnostics": [], "skills": [], "servers": [], "accepted": true}
+    },
+    "outside-dir": {
+      "files": {"outside/SKILL.md": {"common": "sample"}, "plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/skills/bad": "../../outside"},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "outside-doc": {
+      "files": {"outside": {"common": "sample"}, "plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "links": {"plugin/skills/bad/SKILL.md": "../../../outside"},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "reserved-plugin_data": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"env\": {\n        \"PLUGIN_DATA\": \"value\"\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/env/PLUGIN_DATA", "spec_ref": "§9.2"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "reserved-plugin_root": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"env\": {\n        \"PLUGIN_ROOT\": \"value\"\n      }\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/env/PLUGIN_ROOT", "spec_ref": "§9.2"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "runtime-argv-env-data": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"model\": {\n      \"type\": \"stdio\",\n      \"command\": \"./tool with space\",\n      \"args\": [\n        \"a b\",\n        \"\",\n        \"${PLUGIN_ROOT}/z\",\n        \"${PLUGIN_DATA}/x\",\n        \"${UNKNOWN}\"\n      ],\n      \"env\": {\n        \"X\": \"${PLUGIN_ROOT}\",\n        \"${PLUGIN_ROOT}\": \"literal\"\n      }\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}, "plugin/tool with space": "fixture token\n"},
+      "expected": {"diagnostics": [], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "model", "type": "stdio"}], "accepted": true}
+    },
+    "runtime-header-origins": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"http\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://EXAMPLE.org/path\",\n      \"headers\": {\n        \"X-Test\": \"${PLUGIN_ROOT}\",\n        \"X-Fixed\": \"a b\"\n      }\n    },\n    \"events\": {\n      \"type\": \"sse\",\n      \"url\": \"https://EXAMPLE.org/path\",\n      \"headers\": {\n        \"X-Test\": \"${PLUGIN_ROOT}\",\n        \"X-Fixed\": \"a b\"\n      }\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}},
+      "expected": {"diagnostics": [], "skills": [], "servers": [{"name": "events", "type": "sse"}, {"name": "http", "type": "streamable-http"}], "accepted": true}
+    },
+    "schema-alias": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json/\",\n  \"name\": \"example\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/$schema", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "schema-empty": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"\",\n  \"name\": \"example\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/$schema", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "schema-missing": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"name\": \"sample\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/$schema", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "schema-non-string": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": {},\n  \"name\": \"example\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/$schema", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "schema-relative": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"plugin.schema.json\",\n  \"name\": \"example\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/$schema", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "schema-unsupported": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/2.0.0/plugin.schema.json\",\n  \"name\": \"example\"\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "reject-plugin", "component": "manifest", "path": "plugin.json", "json_pointer": "/$schema", "spec_ref": "§5.2"}], "skills": [], "servers": [], "accepted": false}
+    },
+    "server-missing-type": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"command\": \"node\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/type", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "server-not-object": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": [],\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "server-pointer-escaping": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"a/b~c\": {},\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/a~1b~0c/type", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "server-type-array": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": []\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/type", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "server-unknown-type": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"other\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/type", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-compatibility-limit": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\ndescription: x\ncompatibility: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/compatibility", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-description-type": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\ndescription: [abc]\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/description", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-duplicate": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\nname: bad\ndescription: text\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-empty-description": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\ndescription: '  '\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/description", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-full-yaml": {
+      "files": {"plugin/plugin.json": {"common": "manifest"}, "plugin/skills/école-01/SKILL.md": "---\nname: école-01\ndescription: >-\n  multiple\n  lines\nlicense: MIT\ncompatibility: offline\nallowed-tools: Read\nmetadata: {author: 'A B'}\n---\n<!-- @if has_command(\"uv\") -->\nuv branch\n<!-- @else -->\npip branch\n<!-- @endif -->\n"},
+      "expected": {"diagnostics": [], "skills": [{"name": "école-01", "path": "skills/école-01/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "skill-invalid-utf8": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": [255], "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-invalid-yaml": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: [\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-length-boundary": {
+      "files": {"plugin/plugin.json": {"common": "manifest"}, "plugin/skills/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/SKILL.md": "---\nname: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndescription: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\ncompatibility: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n---\n"},
+      "expected": {"diagnostics": [], "skills": [{"name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "path": "skills/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/SKILL.md"}], "servers": [], "accepted": true}
+    },
+    "skill-long-description": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\ndescription: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/description", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-metadata-type": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\ndescription: x\nmetadata: {a: [b]}\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/metadata", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-mismatch": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: other\ndescription: text\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-missing-description": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/description", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-missing-frontmatter": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "name: bad", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-missing-name": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\ndescription: text\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-empty": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: ''\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-leading": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: -bad\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-long": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-period": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: b.ad\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-repeated": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: b--ad\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-trailing": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad-\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-underscore": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: b_ad\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-name-upper": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: BAD\ndescription: x\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/name", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-non-mapping": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\n- item\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-unknown": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad\ndescription: text\nauthor: custom\n---", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "/author", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skill-unterminated": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/bad/SKILL.md": "---\nname: bad", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-skill", "component": "skills", "path": "skills/bad/SKILL.md", "json_pointer": "", "spec_ref": "§7.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skills-dangling": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}},
+      "links": {"plugin/skills": "absent"},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "skills", "path": "skills", "json_pointer": "", "spec_ref": "§6.2"}], "skills": [], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skills-loop": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}},
+      "links": {"plugin/skills": "skills"},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "skills", "path": "skills", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skills-outside": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}},
+      "links": {"plugin/skills": "../outside"},
+      "dirs": ["outside"],
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "skills", "path": "skills", "json_pointer": "", "spec_ref": "§4.1"}], "skills": [], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "skills-wrong-kind": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": {"common": "manifest"}, "plugin/skills": "regular"},
+      "expected": {"diagnostics": [{"severity": "disable-component", "component": "skills", "path": "skills", "json_pointer": "", "spec_ref": "§6.2"}], "skills": [], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "sse-extra": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"sse\",\n      \"url\": \"http://[::1]:1234/sse\",\n      \"args\": []\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/args", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "sse-url-missing": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"sse\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "stdio-command-missing": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/command", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "stdio-mixed": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"url\": \"https://example.org\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "stdio-unknown": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"unknown\": 0\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/unknown", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "unknown-and-extensions": {
+      "files": {"plugin/mcp.json": {"common": "stdio"}, "plugin/plugin.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \"name\": \"example\",\n  \"a/b~c\": 1,\n  \"skills\": \"other\",\n  \"mcpServers\": {},\n  \"extensions\": []\n}\n", "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "warn", "component": "manifest", "path": "plugin.json", "json_pointer": "/a~1b~0c", "spec_ref": "§5.2"}, {"severity": "warn", "component": "manifest", "path": "plugin.json", "json_pointer": "/mcpServers", "spec_ref": "§5.2"}, {"severity": "warn", "component": "manifest", "path": "plugin.json", "json_pointer": "/skills", "spec_ref": "§5.2"}, {"severity": "warn", "component": "manifest", "path": "plugin.json", "json_pointer": "/extensions", "spec_ref": "§8.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-bad-ipv6": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://[::1]evil/\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-bad-pct": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://a/%zz\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-bad-port": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://a:90000/\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-dot-local": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://localhost.\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-empty-fragment": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/#\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-empty-user": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://@example.org\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-external-ipv6": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://[2001:db8::1]\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-fragment": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/#anchor\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-hostless": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https:///path\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-insecure": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://example.org\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-near-ip": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://128.0.0.1\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-near-local": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://localhost.example\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-non-string": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": 123\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-relative": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"api/mcp\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-scheme": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"ftp://localhost/\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-space": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://a/x y\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "url-userinfo": {
+      "files": {"plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bad\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://u:p@example.org\"\n    },\n    \"ok\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\"\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [{"severity": "skip-server", "component": "mcp", "path": "mcp.json", "json_pointer": "/mcpServers/bad/url", "spec_ref": "§7.2.1"}], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "ok", "type": "stdio"}], "accepted": true}
+    },
+    "valid-transports": {
+      "files": {"plugin/bin/tool": "fixture executable placeholder\n", "plugin/mcp.json": "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json\",\n  \"mcpServers\": {\n    \"bare\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"args\": [\n        \"../../opaque\",\n        \"${HOME}\",\n        \"${PLUGIN_DATA}\"\n      ],\n      \"env\": {\n        \"ROOT\": \"../opaque\",\n        \"${X}\": \"${PLUGIN_ROOT}\"\n      }\n    },\n    \"relative\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"./dir/..\"\n    },\n    \"local\": {\n      \"type\": \"stdio\",\n      \"command\": \"./bin/tool\",\n      \"cwd\": \"${PLUGIN_ROOT}\"\n    },\n    \"data\": {\n      \"type\": \"stdio\",\n      \"command\": \"node\",\n      \"cwd\": \"${PLUGIN_DATA}/cache\"\n    },\n    \"sse\": {\n      \"type\": \"sse\",\n      \"url\": \"http://[::1]:1234/sse\"\n    },\n    \"http\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://LOCALHOST:8111\"\n    },\n    \"ipv4\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://127.255.1.2/a\"\n    },\n    \"ipv6\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"http://[::1]/a\"\n    },\n    \"tls\": {\n      \"type\": \"streamable-http\",\n      \"url\": \"https://example.org/mcp\",\n      \"headers\": {\n        \"x-fixed\": \"${PLUGIN_ROOT}\"\n      }\n    }\n  }\n}\n", "plugin/plugin.json": {"common": "manifest"}, "plugin/skills/sample/SKILL.md": {"common": "sample"}},
+      "expected": {"diagnostics": [], "skills": [{"name": "sample", "path": "skills/sample/SKILL.md"}], "servers": [{"name": "bare", "type": "stdio"}, {"name": "data", "type": "stdio"}, {"name": "http", "type": "streamable-http"}, {"name": "ipv4", "type": "streamable-http"}, {"name": "ipv6", "type": "streamable-http"}, {"name": "local", "type": "stdio"}, {"name": "relative", "type": "stdio"}, {"name": "sse", "type": "sse"}, {"name": "tls", "type": "streamable-http"}], "accepted": true}
+    }
+  }
+}

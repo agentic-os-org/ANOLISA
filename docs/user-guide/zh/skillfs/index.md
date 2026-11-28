@@ -395,6 +395,30 @@ degraded skill 出现在 `warnings` 下，`status` 为 `"degraded"`，不计入 
 JSON 输出中，error 和 warning entry 都包含 `path` 字段，方便调用方定位具体出错的
 skill 文件。
 
+#### 验证 Agent Plugins 包（Experimental）
+
+`--package` 需要高于 `v0.5.9` 的 `skillfs` 构建（`skillfs/v0.5.9` 及更早版本仅支持
+`skillfs validate <SOURCE>` 模式），可运行 `skillfs validate --help` 确认当前构建是否支持。
+
+指定包含 `plugin.json` 的包根目录。
+
+```bash
+skillfs validate --package /path/to/package
+skillfs validate --package /path/to/package --format json
+```
+
+该命令校验 Agent Plugins 1.0 manifest，发现有效的 skill 和 MCP server 配置，并输出诊断。
+校验过程离线运行，包文件保持原样。MCP 校验仅检查配置，不启动 server 或连接端点。
+
+每个 `plugin.json`、`mcp.json` 和 `SKILL.md` 文件的大小上限均为 1 MiB。
+离线校验以虚拟数据目录为根检查 `${PLUGIN_DATA}` 路径，实际数据目录的路径边界由
+MCP 消费端在运行时校验。此实验功能使用 `serde_yaml` 读取 skill frontmatter，
+将带显式 YAML 标量标签的值（如 `!!int 42`）按字面字符串处理。
+
+退出码 0 表示包根目录和 manifest 通过校验。报告仍可能包含警告、禁用的组件或跳过的
+skill 和 server。退出码 1 表示包被拒绝。指定 `--format json` 后，两种结果都会输出
+包含 `accepted` 和 `diagnostics` 的报告。
+
 ### list 和 classify
 
 ```bash

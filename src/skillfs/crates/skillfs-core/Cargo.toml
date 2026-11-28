@@ -6,12 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Core library for SkillFS — parser, store, watcher"
+description = "Core library for SkillFS — parser, store, watcher, plugin validation"
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+unicode-normalization = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }

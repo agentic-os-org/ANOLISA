@@ -51,6 +51,7 @@ mod explain;
 mod help_text;
 mod managed;
 mod mount_file;
+mod package_validate;
 mod sls_ops;
 
 #[derive(Clone, Debug)]
@@ -464,8 +465,16 @@ enum Commands {
     /// Validate skill files
     Validate {
         /// Source directory containing skills
-        #[arg(value_name = "SOURCE")]
-        source: PathBuf,
+        #[arg(value_name = "SOURCE", required_unless_present = "package")]
+        source: Option<PathBuf>,
+
+        #[arg(
+            long,
+            value_name = "PACKAGE_ROOT",
+            conflicts_with = "source",
+            help = "Validate an Agent Plugins package [experimental]"
+        )]
+        package: Option<PathBuf>,
 
         /// Output format
         #[arg(short, long, value_enum, default_value = "text")]
@@ -774,8 +783,16 @@ async fn run(
             finish_sls(guard, err_reason(&result));
             result
         }
-        Commands::Validate { source, format } => {
-            let (result, validation_failed) = cmd_validate(source, format).await;
+        Commands::Validate {
+            source,
+            package,
+            format,
+        } => {
+            let (result, validation_failed) = match (source, package) {
+                (Some(source), None) => cmd_validate(source, format).await,
+                (None, Some(package)) => package_validate::run(&package, format),
+                _ => return Err("validate requires SOURCE or --package".into()),
+            };
             // A validation failure exits non-zero but is not a command error;
             // record it with a concise err_reason before exiting.
             let reason = match err_reason(&result) {
