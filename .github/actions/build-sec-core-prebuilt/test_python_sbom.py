@@ -29,7 +29,11 @@ class PythonSbomTest(unittest.TestCase):
             site = runtime / "lib/python3.11/site-packages"
             site.mkdir(parents=True)
             (runtime / "PROVENANCE.toml").write_text('python_version = "3.11.6"\n')
-            for name, version in (("pip", "23.2.1"), ("setuptools", "68.2.2")):
+            for name, version in (
+                ("pip", "23.2.1"),
+                ("setuptools", "68.2.2"),
+                ("zope.interface", "6.1"),
+            ):
                 metadata = site / f"{name}-{version}.dist-info/METADATA"
                 metadata.parent.mkdir()
                 metadata.write_text(f"Name: {name}\nVersion: {version}\nLicense: MIT\n")
@@ -104,6 +108,11 @@ class PythonSbomTest(unittest.TestCase):
                 or component.get("purl", "").startswith("pkg:pypi/")
             }
             self.assertEqual(actual, expected)
+            purls = {
+                component["purl"] for component in components
+                if component.get("purl", "").startswith("pkg:pypi/")
+            }
+            self.assertIn("pkg:pypi/zope-interface@6.1", purls)
             artifact_ref = sidecar["metadata"]["component"]["bom-ref"]
             root_edges = next(edge["dependsOn"] for edge in sidecar["dependencies"]
                               if edge["ref"] == artifact_ref)
