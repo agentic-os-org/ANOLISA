@@ -101,7 +101,12 @@ export async function writeDocumentRedirects(outputRoot, locale, redirects, base
   for (const [from, to] of Object.entries(redirects)) {
     const destination = redirectDestination(to, locale, baseUrl);
     const escaped = destination.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
-    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="robots" content="noindex"><link rel="canonical" href="${escaped}"><meta http-equiv="refresh" content="0;url=${escaped}"><title>Documentation moved</title></head><body><a href="${escaped}">Continue to documentation</a><script>const target=new URL(${JSON.stringify(destination)},location.href);if(location.hash)target.hash=location.hash;location.replace(target.href);</script></body></html>\n`;
+    // Internal destinations inherit the query string the reader arrived with
+    // (display preferences, tagged queries) while keeping repeated parameters
+    // intact. Redirects leaving the docs site keep their configured target.
+    const inheritQuery = /^https?:/.test(to) ? '' :
+      'if(location.search)target.search=location.search;';
+    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="robots" content="noindex"><link rel="canonical" href="${escaped}"><meta http-equiv="refresh" content="0;url=${escaped}"><title>Documentation moved</title></head><body><a href="${escaped}">Continue to documentation</a><script>const target=new URL(${JSON.stringify(destination)},location.href);if(location.hash)target.hash=location.hash;${inheritQuery}location.replace(target.href);</script></body></html>\n`;
     const output = path.join(outputRoot, 'docs', from, 'index.html');
     await mkdir(path.dirname(output), {recursive: true});
     await writeFile(output, html);
