@@ -3,6 +3,7 @@
 use super::{read_file, Arguments, Exit, Result};
 use serde_json::{json, Value};
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fs::{self, DirBuilder, File, OpenOptions},
     io::Write,
@@ -26,21 +27,33 @@ impl Installation {
         if !path.is_absolute() {
             return Err("startup directory must be absolute".into());
         }
-        if python {
-            let environment = path
-                .ancestors()
-                .nth(3)
-                .ok_or("missing virtual environment")?;
-            if path.file_name().and_then(|name| name.to_str()) != Some("site-packages")
-                || !environment.join("pyvenv.cfg").is_file()
-            {
+        let path = if python {
+            if path.file_name().and_then(|name| name.to_str()) != Some("site-packages") {
                 return Err(
                     "Python setup requires an explicit dedicated venv site-packages directory"
                         .into(),
                 );
             }
-        }
-        let created_directory = match DirBuilder::new().mode(0o700).create(path) {
+            let parent = path
+                .parent()
+                .ok_or("missing virtual environment")?
+                .canonicalize()?;
+            let canonical = parent.join("site-packages");
+            let environment = canonical
+                .ancestors()
+                .nth(3)
+                .ok_or("missing virtual environment")?;
+            if !environment.join("pyvenv.cfg").is_file() {
+                return Err(
+                    "Python setup requires an explicit dedicated venv site-packages directory"
+                        .into(),
+                );
+            }
+            Cow::Owned(canonical)
+        } else {
+            Cow::Borrowed(path)
+        };
+        let created_directory = match DirBuilder::new().mode(0o700).create(&*path) {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
             Err(error) => return Err(error.into()),
@@ -48,7 +61,7 @@ impl Installation {
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(path)?;
+            .open(&*path)?;
         let metadata = directory.metadata()?;
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
             return Err(
@@ -339,5 +352,39 @@ mod tests {
         installation.verify().unwrap();
         drop(installation);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn python_setup_rejects_parent_traversal_and_intermediate_symlink_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("venv");
+        let venv_site = venv.join("lib/python3.12/site-packages");
+        fs::create_dir_all(&venv_site).unwrap();
+        fs::set_permissions(&venv_site, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(venv.join("pyvenv.cfg"), "home = /fixture/python\n").unwrap();
+
+        let outside = root.path().join("outside");
+        let outside_site = outside.join("site-packages");
+        fs::create_dir_all(&outside_site).unwrap();
+        fs::set_permissions(&outside_site, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Parent traversal out of a valid venv into an unrelated directory.
+        let traversed = venv_site.join("../../../../outside/site-packages");
+        assert!(Installation::open(&traversed, true).is_err());
+
+        // Intermediate symlink escaping the venv before the final site-packages component.
+        let outside_python = outside.join("python3.12");
+        fs::create_dir_all(&outside_python).unwrap();
+        let symlink_lib = venv.join("symlink_lib");
+        symlink(&outside, &symlink_lib).unwrap();
+        let escaped = symlink_lib.join("python3.12/site-packages");
+        assert!(Installation::open(&escaped, true).is_err());
+        assert!(!outside_python.join("site-packages").exists());
+
+        // Internal venv symlink (e.g. lib64 -> lib) remains confined to the venv.
+        let lib64 = venv.join("lib64");
+        symlink(venv.join("lib"), &lib64).unwrap();
+        let internal = lib64.join("python3.12/site-packages");
+        assert!(Installation::open(&internal, true).is_ok());
     }
 }
