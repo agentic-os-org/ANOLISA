@@ -1,0 +1,32 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1.0"
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+object = { version = "0.36", default-features = false, features = ["read", "elf", "std"] }
+
+[package]
+name = "aw-observation-ptrace-poc"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Isolated, explicitly authorized TLS transport observation experiment"
+
+# The default binary refuses observation until crash isolation passes P0.
+[features]
+default = []
+unsafe-lab = []
+
+[dependencies]
+anyhow = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+object = { workspace = true }
