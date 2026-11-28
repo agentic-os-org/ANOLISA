@@ -81,6 +81,7 @@ mod tests {
             prefix_created: true,
             prefix_identity: None,
             workspace_identity: None,
+            workspace_nonce: None,
             lock_created: true,
             lock_identity: None,
             directories: BTreeMap::new(),

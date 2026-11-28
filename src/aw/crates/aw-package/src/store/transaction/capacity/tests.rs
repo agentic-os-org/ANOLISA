@@ -178,3 +178,24 @@ fn deep_parent_paths_and_locator_actions_enter_the_encoded_budget() {
     assert!(with_parents > serde_json::to_vec(&without_parents).unwrap().len() as u64);
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn workspace_nonce_enters_the_encoded_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let (paths, changes) = changes(root.path());
+    let entry = bounded_journal(&paths, &changes, false).unwrap();
+    assert_eq!(
+        entry.workspace_nonce.as_deref(),
+        Some("f".repeat(64).as_str()),
+        "the model must reserve the widest nonce a journal can record"
+    );
+    let bound = encoded_bytes(&paths, &changes, false).unwrap();
+    assert_eq!(bound, serde_json::to_vec(&entry).unwrap().len() as u64);
+    let mut without_nonce = entry;
+    without_nonce.workspace_nonce = None;
+    assert!(
+        bound > serde_json::to_vec(&without_nonce).unwrap().len() as u64,
+        "a journal carrying the nonce must not exceed the modelled bound"
+    );
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}

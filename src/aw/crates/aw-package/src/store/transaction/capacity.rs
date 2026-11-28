@@ -184,7 +184,7 @@ fn bounded_journal(
         })?,
     };
     Ok(Journal {
-        schema_version: 1,
+        schema_version: super::journal::SCHEMA_VERSION,
         transaction_id: format!("txn-{:x}-{:x}-{:x}", u128::MAX, u32::MAX, u64::MAX),
         database_root: paths.root.clone(),
         package_manager: paths.manager(),
@@ -195,6 +195,7 @@ fn bounded_journal(
         prefix_created: false,
         prefix_identity: Some(identity(true)),
         workspace_identity: Some(identity(true)),
+        workspace_nonce: Some("f".repeat(64)),
         lock_created: false,
         lock_identity: Some(identity(false)),
         directories,
