@@ -17,7 +17,7 @@ use tokenless_protocol::{
 };
 
 use super::arbitration::{ArbitrationInput, Verdict, decide};
-use super::content::detect;
+use super::content::{detect, detect_excluding_json};
 use super::mixed;
 use super::stash_ledger::StashLedger;
 
@@ -355,30 +355,32 @@ impl PostToolPipeline {
                 embedded_html: config.html_extraction_enabled
                     && request.content_origin != ContentOrigin::FileRead,
             };
-            let outcome = match JsonCompressor::new(config.json.clone())
-                .compress(&request.content, &context)
-            {
-                Ok(outcome) => outcome,
-                // The bracket sniff that routed this content here inspects
-                // only the first and last non-whitespace bytes, so
-                // concatenated documents (for example stream JSON printed
-                // one object per line) reach the JSON compressor without
-                // parsing. The compressor is the parsing authority; treat
-                // the misroute as passthrough instead of failing the call.
+            match JsonCompressor::new(config.json.clone()).compress(&request.content, &context) {
+                Ok(outcome) => DomainCandidate {
+                    output: outcome.output,
+                    operations: json_operations(&outcome.operations),
+                    recoverability: outcome.recoverability,
+                    stash_writes: outcome.stash_writes,
+                    stash_errors: outcome.metrics.stash_errors,
+                    unrecoverable_truncations: outcome
+                        .operations
+                        .contains(&JsonOperation::Truncation)
+                        .then_some(outcome.metrics.unrecoverable_truncations),
+                },
+                // The bracket sniff only routes content here; the JSON domain
+                // owns the parse. NDJSON, two concatenated documents and an
+                // `[INFO] … [ok]` log all sniff as JSON but are ordinary text,
+                // so a rejected parse degrades to passthrough under the
+                // classification that describes them instead of failing the
+                // whole operation. Parsing precedes every candidate, so no
+                // tentative Stash write survives and nothing needs a rollback.
                 Err(JsonError::InvalidJson(_)) => {
-                    return passthrough(request, before_tokens, content_type);
+                    return passthrough(
+                        request,
+                        before_tokens,
+                        detect_excluding_json(&request.content),
+                    );
                 }
-            };
-            DomainCandidate {
-                output: outcome.output,
-                operations: json_operations(&outcome.operations),
-                recoverability: outcome.recoverability,
-                stash_writes: outcome.stash_writes,
-                stash_errors: outcome.metrics.stash_errors,
-                unrecoverable_truncations: outcome
-                    .operations
-                    .contains(&JsonOperation::Truncation)
-                    .then_some(outcome.metrics.unrecoverable_truncations),
             }
         } else if build_log_candidate {
             let mode = if is_error {
