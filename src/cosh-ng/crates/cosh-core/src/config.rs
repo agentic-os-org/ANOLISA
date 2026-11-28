@@ -1407,6 +1407,24 @@ fn persist_config_inner(
         if let Some(true) = provider.explicit_cache {
             preserved.push_str("explicit_cache = true\n");
         }
+        if let Some(ref extra_params) = provider.extra_params {
+            // `toml::Value`'s Display renders a string containing newlines as a
+            // multi-line basic string, and `line`-based section scanning above
+            // ends `[ai]` at any line starting with `[`; a `[END]`-style line in
+            // such a value would be lifted out of the section and corrupt the
+            // file on the next save. Render the inline table single-line
+            // instead. JSON shapes TOML cannot express (null, integers above
+            // i64::MAX) fail conversion, so skip only this field instead of
+            // dropping the whole provider section.
+            match toml::Value::try_from(extra_params) {
+                Ok(value) => {
+                    preserved.push_str(&format!("extra_params = {}\n", render_toml_inline(&value)))
+                }
+                Err(error) => eprintln!(
+                    "[cosh-core] Warning: skipping extra_params for provider {name}: {error}"
+                ),
+            }
+        }
         preserved.push('\n');
     }
 
@@ -1481,10 +1499,60 @@ fn scan_toml_multiline_string(line: &str, multiline_quote: &mut Option<u8>) {
     }
 }
 
+/// Render a `toml::Value` as a single-line TOML value.
+///
+/// Only inline tables and arrays recurse; scalars reuse `Value`'s Display,
+/// which already emits valid single-line literals for every non-string scalar.
+/// Strings must be escaped by hand because Display picks a multi-line basic
+/// string whenever the content contains a newline.
+fn render_toml_inline(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => format!("\"{}\"", escape_toml_value(s)),
+        toml::Value::Array(items) => {
+            let rendered: Vec<String> = items.iter().map(render_toml_inline).collect();
+            format!("[{}]", rendered.join(", "))
+        }
+        toml::Value::Table(table) => {
+            let rendered: Vec<String> = table
+                .iter()
+                .map(|(key, value)| {
+                    format!("{} = {}", render_toml_key(key), render_toml_inline(value))
+                })
+                .collect();
+            format!("{{ {} }}", rendered.join(", "))
+        }
+        scalar => scalar.to_string(),
+    }
+}
+
+fn render_toml_key(key: &str) -> String {
+    let bare = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        key.to_string()
+    } else {
+        format!("\"{}\"", escape_toml_value(key))
+    }
+}
+
 fn escape_toml_value(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            // Remaining control characters are not allowed literally in a TOML
+            // basic string.
+            ch if ch.is_control() => escaped.push_str(&format!("\\u{:04X}", ch as u32)),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -2449,6 +2517,164 @@ sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
             "https://sysom.cn-shanghai.aliyuncs.com"
         );
         assert_eq!(reloaded.access_key_id, "new-ak");
+    }
+
+    #[test]
+    fn persist_round_trips_provider_extra_params() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[ai]
+active_provider = "dashscope"
+[ai.providers.dashscope]
+type = "dashscope"
+api_key = "sk-user"
+extra_params = { enable_thinking = false, top_p = 0.5 }
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&path), None, false);
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(persisted.contains("extra_params"), "{persisted}");
+        let reloaded =
+            CoreConfig::load_from_paths(None, Some(&path), None, false).resolve_provider();
+        assert_eq!(
+            reloaded.extra_params,
+            Some(serde_json::json!({"enable_thinking": false, "top_p": 0.5}))
+        );
+    }
+
+    #[test]
+    fn persist_repeated_saves_keep_extra_params_with_newlines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let extra_params = serde_json::json!({"stop": ["\n[END]\n"], "top_p": 0.5});
+        let mut config = CoreConfig::default();
+        config.user_ai.providers.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-user".to_string()),
+                extra_params: Some(extra_params.clone()),
+                ..Default::default()
+            },
+        );
+
+        // The first save writes the value; the second one rewrites the file it
+        // just produced. A newline in the value used to leak out of `[ai]` on
+        // that second pass and leave the file unparseable.
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            persisted.contains(r#"extra_params = { stop = ["\n[END]\n"], top_p = 0.5 }"#),
+            "{persisted}"
+        );
+
+        let reloaded = CoreConfig::load_from_paths(None, Some(&path), None, false);
+        let provider = &reloaded.ai.providers["dashscope"];
+        assert_eq!(provider.extra_params, Some(extra_params));
+        assert_eq!(provider.api_key.as_deref(), Some("sk-user"));
+        assert_eq!(provider.provider_type.as_deref(), Some("dashscope"));
+    }
+
+    #[test]
+    fn persist_escapes_carriage_return_and_control_characters_in_extra_params() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let extra_params = serde_json::json!({"stop": ["x\ry", "x\u{0007}y"]});
+        let mut config = CoreConfig::default();
+        config.user_ai.providers.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-user".to_string()),
+                extra_params: Some(extra_params.clone()),
+                ..Default::default()
+            },
+        );
+
+        // A carriage return and a control character are only legal in a TOML
+        // basic string when escaped; written raw they leave a config.toml the
+        // next load cannot parse and silently drops.
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            persisted.contains(r#"extra_params = { stop = ["x\ry", "x\u0007y"] }"#),
+            "{persisted}"
+        );
+        assert!(!persisted.contains('\r'), "{persisted}");
+
+        let reloaded = CoreConfig::load_from_paths(None, Some(&path), None, false);
+        let provider = &reloaded.ai.providers["dashscope"];
+        assert_eq!(provider.extra_params, Some(extra_params));
+        assert_eq!(provider.api_key.as_deref(), Some("sk-user"));
+    }
+
+    #[test]
+    fn persist_quotes_extra_params_keys_that_need_quoting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let extra_params = serde_json::json!({"a b": true, "plain": 1});
+        let mut config = CoreConfig::default();
+        config.user_ai.providers.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-user".to_string()),
+                extra_params: Some(extra_params.clone()),
+                ..Default::default()
+            },
+        );
+
+        // A key outside the bare-key character set is only legal in TOML when
+        // quoted; written bare it leaves a config.toml the next load drops.
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            persisted.contains(r#"extra_params = { "a b" = true, plain = 1 }"#),
+            "{persisted}"
+        );
+
+        let reloaded = CoreConfig::load_from_paths(None, Some(&path), None, false);
+        let provider = &reloaded.ai.providers["dashscope"];
+        assert_eq!(provider.extra_params, Some(extra_params));
+        assert_eq!(provider.api_key.as_deref(), Some("sk-user"));
+    }
+
+    #[test]
+    fn persist_skips_extra_params_toml_cannot_represent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = CoreConfig::default();
+        config.user_ai.providers.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-user".to_string()),
+                extra_params: Some(serde_json::json!({"stop": null})),
+                ..Default::default()
+            },
+        );
+
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+
+        let path = tmp.path().join("config.toml");
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        // Only the unrepresentable extra_params is skipped; the rest of the
+        // provider section must still be written and remain loadable.
+        assert!(persisted.contains("api_key = \"sk-user\""), "{persisted}");
+        assert!(!persisted.contains("extra_params"), "{persisted}");
+        let reloaded = CoreConfig::load_from_paths(None, Some(&path), None, false);
+        assert!(reloaded.ai.providers["dashscope"].extra_params.is_none());
     }
 
     #[test]
