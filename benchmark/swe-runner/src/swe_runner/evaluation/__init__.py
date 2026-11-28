@@ -15,13 +15,18 @@
 """Patch evaluation module using SWE-bench standard evaluation."""
 
 from swe_runner.evaluation.models import EvalInstanceResult, EvalReport
-from swe_runner.evaluation.service import _get_instance_ids, generate_report_text, run_evaluation, save_report_json
+from swe_runner.evaluation.service import (
+    _load_normalized_predictions,
+    generate_report_text,
+    run_evaluation,
+    save_report_json,
+)
 
 __all__ = [
     "run_evaluation",
     "generate_report_text",
     "save_report_json",
-    "_get_instance_ids",
+    "_load_normalized_predictions",
     "EvalReport",
     "EvalInstanceResult",
 ]
