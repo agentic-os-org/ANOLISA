@@ -15,7 +15,7 @@ jobs:
     name: Build, install, and test V2 raw package
     runs-on: anolisa-k8s-general-ci-x64
     container:
-      image: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
+      image: ci-images.invalid/sec-core:sha256-9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
     steps:
       - name: Configure mirrors and install dependencies
         run: |

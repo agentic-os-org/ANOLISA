@@ -25,7 +25,11 @@ jobs:
     # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     container:
-      image: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
+      # Manual jobs use the public image; pull requests use the runner alias.
+      image: >-
+        ${{ github.event_name == 'workflow_dispatch'
+            && 'anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625'
+            || 'ci-images.invalid/sec-core:sha256-9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625' }}
     steps:
       - name: Configure mirrors and install dependencies
         run: |
@@ -254,7 +258,11 @@ jobs:
     # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     container:
-      image: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
+      # Manual jobs use the public image; pull requests use the runner alias.
+      image: >-
+        ${{ github.event_name == 'workflow_dispatch'
+            && 'anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625'
+            || 'ci-images.invalid/sec-core:sha256-9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625' }}
     steps:
       - name: Configure mirrors and install build and test prerequisites
         run: |

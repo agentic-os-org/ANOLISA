@@ -33,7 +33,7 @@ jobs:
           - name: Ubuntu 22.04
             container: ''
           - name: Alinux4
-            container: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/anolis-docker-images/docker-temp:alinux4@sha256:9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
+            container: ci-images.invalid/sec-core:sha256-9659406e2b8d87cbfc105db373919cb73eeaa4b8051527a73ab6190955257625
     name: Source Build (${{ matrix.name }})
     runs-on: anolisa-k8s-general-ci-x64
     container: ${{ matrix.container || '' }}
