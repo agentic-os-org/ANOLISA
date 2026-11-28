@@ -24,6 +24,21 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def decode_git_path(raw: bytes) -> str:
+    """Decode one NUL-delimited path from ``git ls-files -z``.
+
+    Git emits raw path bytes regardless of locale. Decode them as UTF-8 (the
+    repository's path encoding) rather than via ``os.fsdecode``, whose result
+    depends on the process locale: under C it applies ``surrogateescape`` and
+    yields lone surrogates that make the SBOM name diverge from the tar member
+    name (#10783).
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"git path is not valid UTF-8: {raw!r}") from error
+
+
 def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> Path:
     released = read_catalog(source)
     check_payload(source, released)
@@ -61,21 +76,39 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
     result = subprocess.run(
         ["git", "ls-files", "-z", "--", "."], cwd=source, check=True, capture_output=True
     )
-    tracked = sorted(Path(os.fsdecode(name)) for name in result.stdout.split(b"\0") if name)
-    if any(directory / "SKILL.md" not in tracked for directory in released):
+    # git ls-files -z writes raw path bytes (UTF-8 for UTF-8 filenames) and is
+    # locale-independent. Decode them explicitly as UTF-8 instead of using
+    # os.fsdecode(), which follows the locale: under the C locale it applies
+    # surrogateescape and yields lone surrogates (e.g. "\\udcc3\\udca9" for
+    # "é"). tarfile then encodes those surrogates back to the real UTF-8 bytes
+    # while json.dumps() keeps the escapes, so the SBOM name no longer matches
+    # the tar member. A UTF-8 path must decode to the same Unicode string in
+    # every locale so both inventories agree.
+    # Keep raw bytes for filesystem access: under the C locale the process
+    # filesystem encoding is ASCII, so a decoded Unicode path cannot be passed
+    # to os.stat/open. Byte paths address the file exactly regardless of locale.
+    # Decode to Unicode only for the tar/SBOM names, where UTF-8 is required.
+    tracked_bytes = sorted(name for name in result.stdout.split(b"\0") if name)
+    tracked = {decode_git_path(name) for name in tracked_bytes}
+    if any((directory / "SKILL.md").as_posix() not in tracked for directory in released):
         raise ValueError("every released SKILL.md must be tracked")
+    source_bytes = os.fsencode(source)
     files = {".anolisa/component.toml": contract.encode()}
     for directory in released:
-        for path in tracked:
-            if not path.is_relative_to(directory):
+        for raw_name in tracked_bytes:
+            path = decode_git_path(raw_name)
+            directory_prefix = os.fsencode(f"{directory.as_posix()}/")
+            if not raw_name.startswith(directory_prefix):
                 continue
-            source_file = source / path
-            if not source_file.is_file() or source_file.is_symlink():
+            source_file = os.path.join(source_bytes, raw_name)
+            if not os.path.isfile(source_file) or os.path.islink(source_file):
                 raise ValueError(f"skill payload must be a regular file: {path}")
-            destination = f"share/anolisa/skills/{directory.name}/{path.relative_to(directory)}"
+            relative = Path(raw_name[len(directory_prefix):].decode("utf-8"))
+            destination = f"share/anolisa/skills/{directory.name}/{relative}"
             if destination in files:
                 raise ValueError(f"duplicate package path: {destination}")
-            files[destination] = source_file.read_bytes()
+            with open(source_file, "rb") as handle:
+                files[destination] = handle.read()
     archive_name = f"os-skills-{version}-linux-{arch}.tar.gz"
     output.mkdir(parents=True, exist_ok=True)
     archive = output / archive_name
@@ -87,7 +120,15 @@ def package(source: Path, output: Path, version: str, arch: str, epoch: int) -> 
         with staged.open("wb") as raw, gzip.GzipFile(
             filename="", mode="wb", fileobj=raw, mtime=0
         ) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT) as tar:
+            # tarfile encodes member names with the passed encoding (default:
+            # the filesystem encoding). Force UTF-8 so tar names match the
+            # UTF-8 SBOM names even under LC_ALL=C, where the default is ASCII.
+            with tarfile.open(
+                fileobj=compressed,
+                mode="w",
+                format=tarfile.GNU_FORMAT,
+                encoding="utf-8",
+            ) as tar:
                 for name in sorted(directories | files.keys()):
                     entry = tarfile.TarInfo("." if name == "." else f"./{name}")
                     entry.mtime = epoch
