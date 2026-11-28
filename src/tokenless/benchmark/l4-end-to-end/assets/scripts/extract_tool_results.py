@@ -84,6 +84,12 @@ class Attribution:
         return self.by_call.get(call_id or "", "unknown")
 
 
+def _readonly_uri(path: Path) -> str:
+    # Encode URI-significant characters such as '#' and '%' so SQLite treats them
+    # as literal filename bytes instead of fragments or percent-escapes.
+    return f"{path.resolve().as_uri()}?mode=ro"
+
+
 def strings_in(path: Path):
     """Text held by one transcript file: every string cell of a SQLite store, or the file itself."""
     if not path.is_file():
@@ -91,7 +97,7 @@ def strings_in(path: Path):
     if path.suffix == ".sqlite":
         # Through SQLite rather than the raw file, so rows still in the WAL count.
         try:
-            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            connection = sqlite3.connect(_readonly_uri(path), uri=True)
             tables = [
                 name
                 for (name,) in connection.execute(
@@ -131,7 +137,7 @@ def recovery_events(
 def from_stats(
     db: Path, since_ns: int, arm: str, attribution: Attribution
 ) -> list[dict]:
-    connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    connection = sqlite3.connect(_readonly_uri(db), uri=True)
     rows = connection.execute(
         "SELECT id, session_id, tool_use_id, before_text, after_text, content_type, recoverability, "
         "applied_operations, before_tokens, after_tokens FROM stats "
