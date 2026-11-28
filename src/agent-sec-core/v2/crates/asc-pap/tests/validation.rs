@@ -160,7 +160,7 @@ fn cedar_admission_rejects_invalid_creates_and_updates_without_allocating_revisi
     let pap = PapService::new(repository.clone());
     let source: PolicySource = serde_json::from_value(serde_json::json!({
         "language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system","revision":1},
+            "schema":{"schemaId":"seccore.system","revision":3},
             "text":"forbid(principal, action == SecCore::Action::\"file.write\", resource);"
         }
     }))
@@ -172,22 +172,32 @@ fn cedar_admission_rejects_invalid_creates_and_updates_without_allocating_revisi
         saved
     );
     for (text, revision, expected) in [
-        ("not a Cedar policy", 1, "syntax"),
+        ("not a Cedar policy", 3, "syntax"),
         ("forbid(principal, action, resource);", 999, "revision 999"),
         (
             "forbid(principal, action == SecCore::Action::\"file.unknown\", resource);",
-            1,
+            3,
             "action",
         ),
         (
             "@unknown(\"unsupported\") forbid(principal, action == SecCore::Action::\"file.write\", resource);",
-            1,
+            3,
             "unsupported annotation",
         ),
         (
             "forbid(principal, action == SecCore::Action::\"file.write\", resource) when { context.input.operation == \"delete\" };",
-            1,
+            3,
             "policy0",
+        ),
+        (
+            "forbid(principal, action, resource);",
+            1,
+            "use seccore.system revision 3",
+        ),
+        (
+            "forbid(principal, action, resource);",
+            2,
+            "use seccore.system revision 3",
         ),
     ] {
         let mut invalid = source.clone();
@@ -273,7 +283,7 @@ fn retired_native_credentials_and_malformed_cedar_cannot_bypass_admission() {
 fn runtime_cedar(text: &str) -> asc_policy_types::authoring::PolicySource {
     serde_json::from_value(serde_json::json!({
         "language": "cedar", "content": {
-            "schema": {"schemaId": "seccore.system", "revision": 1},
+            "schema": {"schemaId": "seccore.system", "revision": 3},
             "text": text
         }
     }))
@@ -288,8 +298,7 @@ fn effective_set_tracks_membership_without_scope_assignments() {
     pap.create_policy("native", &binding().policy.template)
         .unwrap();
     let bare = runtime_cedar(
-        r#"permit(principal, action == SecCore::Action::"process.spawn", resource)
-        when { principal has agentType && principal.agentType == "codex" };"#,
+        r#"forbid(principal, action == SecCore::Action::"file.read", resource) when { resource.path == "/secret" };"#,
     );
     let deployment = pap.create_policy("deployment", &bare).unwrap();
     assert_eq!(pap.authorization_policies().unwrap(), empty);
@@ -328,24 +337,41 @@ fn effective_set_tracks_membership_without_scope_assignments() {
 }
 
 #[test]
-fn mixed_headers_reject_whole_policy_at_admission_and_resolution() {
+fn ambiguous_bare_cross_domain_restrictions_require_an_explicit_principal() {
     let repository = Arc::new(SqlitePolicyRepository::temporary().unwrap());
     let pap = PapService::new(repository.clone());
-    let mixed = runtime_cedar(
-        r#"
-        permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource);
-        forbid(principal, action == SecCore::Action::"process.spawn", resource);
-    "#,
+    let process = r#"permit(principal is SecCore::Subject, action == SecCore::Action::"process.spawn", resource);"#;
+    let saved = pap
+        .create_policy("process", &runtime_cedar(process))
+        .unwrap();
+    let bare = "forbid(principal, action, resource);";
+    let mixed = runtime_cedar(&format!("{process}\n{bare}"));
+    let file_and_network = runtime_cedar(
+        r#"forbid(principal, action in [SecCore::Action::"file.read", SecCore::Action::"network.use"], resource);"#,
     );
-    let error = pap.create_policy("mixed", &mixed).unwrap_err();
-    assert!(error.to_string().contains("mixed bare and constrained"));
+    for source in [&runtime_cedar(bare), &mixed, &file_and_network] {
+        for result in [
+            pap.create_policy("ambiguous", source),
+            pap.update_policy(&saved.policy_id, "process", source),
+        ] {
+            assert!(matches!(result, Err(PapError::InvalidCedar(reason))
+                if reason.contains("split the bare cross-domain statement")));
+        }
+    }
+    assert_eq!(pap.list_policies(10, 0).unwrap().items, vec![saved]);
+    for resource in ["SecCore::File", "SecCore::HttpEndpoint"] {
+        let scoped = runtime_cedar(&format!(
+            "forbid(principal, action, resource is {resource});"
+        ));
+        pap.create_policy("single domain", &scoped).unwrap();
+    }
     // Defensive read: repositories may already contain sources predating admission checks.
     let mut stored = binding().policy;
     stored.template = mixed;
     repository.put_policy(&stored).unwrap();
     let error = pap.authorization_policies().unwrap_err().to_string();
     assert!(error.contains(stored.policy_id.as_str()));
-    assert!(error.contains("mixed bare and constrained"));
+    assert!(error.contains("split the bare cross-domain statement"));
 }
 
 #[test]
@@ -436,7 +462,7 @@ when { principal has agentType && principal.agentType == "codex" };"#,
         .update_policy(
             &first.policy_id,
             "baseline",
-            &runtime_cedar("forbid(principal, action, resource);"),
+            &runtime_cedar("forbid(principal is SecCore::Subject, action, resource);"),
         )
         .unwrap();
     assert_eq!(updated.revision.get(), 2);

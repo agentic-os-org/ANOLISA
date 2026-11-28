@@ -15,9 +15,9 @@ use crate::{AutomaticDiagnostic, PapError};
 mod diagnostics;
 pub(super) use diagnostics::{PlanningDiagnostics, ScopeOutcome};
 
-/// The schema version is part of the source contract, independent of the current Policy revision.
+/// Every Cedar source can contribute a process target or a restriction on another source.
 pub fn is_automatic_source(policy: &PreparedPolicy) -> bool {
-    matches!(&policy.template, PolicySource::Cedar(source) if asc_policy_cedar::schema::uses_principal_targeting(&source.schema))
+    matches!(&policy.template, PolicySource::Cedar(_))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -153,11 +153,29 @@ impl Derived {
                 ));
             }
             let mut policy = self.policies[index].clone();
-            policy.deployment = Some(DeploymentSelection {
+            let selection = DeploymentSelection {
                 backend: scope.group.backend,
                 fragments: self.fragments(scope.group.backend, index, &statement_ids),
                 statement_ids,
-            });
+            };
+            if let Some(validate) = self
+                .views
+                .iter()
+                .find(|(selector, _)| selector.backend == scope.group.backend)
+                .and_then(|(selector, _)| selector.validate)
+                && let PolicySource::Cedar(source) = &policy.template
+            {
+                let view = deployment::selected_pst(source, &selection)?;
+                validate(&view).map_err(|error| {
+                    PapError::InvalidCedar(format!(
+                        "{} revision {}: {}",
+                        policy.policy_id,
+                        policy.revision.get(),
+                        error.code
+                    ))
+                })?;
+            }
+            policy.deployment = Some(selection);
             snapshots.push(policy);
         }
         Ok(PreparedScope {
@@ -185,8 +203,16 @@ impl Derived {
             return Err(PapError::Unavailable);
         }
         for (id, update) in updates {
-            if self.scopes.contains_key(id) {
-                update.candidate = Some(self.prepare(id)?);
+            if let Some(planned) = self.scopes.get(id) {
+                update.candidate = Some(match &update.expected {
+                    Some(saved)
+                        if saved.status == ScopeStatus::Active
+                            && self.unchanged(saved, planned) =>
+                    {
+                        saved.clone()
+                    }
+                    _ => self.prepare(id)?,
+                });
             }
         }
         Ok(())
@@ -231,7 +257,9 @@ pub(super) fn derive(
                         reason: Some(reason),
                     });
                 };
-                if let SelectedStatement::Unsupported(reason) = &row.selected {
+                if let SelectedStatement::Unsupported(reason) = &row.selected
+                    && !matches!((selector.place)(rule), Placement::Ignore)
+                {
                     diagnose(reason.clone());
                 }
                 if !row.selected.is_selected() {

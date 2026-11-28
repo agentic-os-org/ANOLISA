@@ -2,6 +2,8 @@
 
 [中文版](CEDAR_PEP_SELECTION_zh.md) · [Unified Cedar policy management and deployment](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT.md)
 
+The v1/v2 eligibility and migration rules below refer to the original selection rollout. The [single-revision contract](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT.md#single-revision-contract) describes placement for newly authored and migrated policies.
+
 This design is for developers implementing policy consumers. Baseline `d41cede90` provides Cedar v3 automatic deployment. This branch adds a shared `select` interface for three PEPs. PAP retains the complete authored source. Each PEP selects the statements and branches it consumes and reuses the result for that policy-set generation. [Selection types](../../v2/crates/asc-policy-cedar/src/selection.rs) · [Shared cache](../../v2/crates/asc-pap/src/selection.rs)
 
 ## 1. How each PEP consumes one rule

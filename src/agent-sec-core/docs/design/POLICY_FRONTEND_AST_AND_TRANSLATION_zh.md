@@ -2,6 +2,8 @@
 
 [English](POLICY_FRONTEND_AST_AND_TRANSLATION.md)
 
+下文的 revision 1 和 2 约定记录了早期前端集成。统一后的前端接受 `seccore.system` revision 3，请求授权和进程部署共用同一份 schema。见[统一 revision 后的部署约定](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT_zh.md#统一-revision-后的部署约定)。
+
 本文整理 AgentSecCore V2 的现有策略链路与 Cedar 集成设计。第 1–4 节说明现有实现，
 第 5–7 节保留早期 Cedar/Dogwood 导入评估，第 8 节记录当前选定的架构、数据结构、
 版本与持久化约定。选定方案采用双前端，不实施 Cedar 与原有 JSON 策略之间的转换器。

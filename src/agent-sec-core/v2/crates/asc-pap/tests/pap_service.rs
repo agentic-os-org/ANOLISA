@@ -304,7 +304,7 @@ fn policy_details_expose_only_this_revisions_automatic_planning_outcomes() {
     );
     let policy_for = |agent: &str| {
         PolicySource::Cedar(CedarPolicySource {
-            schema: asc_policy_cedar::schema::principal_reference(),
+            schema: asc_policy_cedar::schema::embedded_reference(),
             text: format!(
                 r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
                when {{ principal has agentType && principal.agentType == "{agent}" }}
@@ -499,7 +499,7 @@ fn credential_template() -> PolicySource {
     PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
         schema: asc_policy_types::cedar::CedarSchemaReference {
             schema_id: ResourceId::new(asc_policy_cedar::schema::SCHEMA_ID).unwrap(),
-            revision: Revision::new(asc_policy_cedar::schema::HTTP_SCHEMA_REVISION).unwrap(),
+            revision: Revision::new(asc_policy_cedar::schema::SCHEMA_REVISION).unwrap(),
         },
         text: include_str!("../../asc-gateway-plan/policies/github.cedar")
             .replace("/secure/github-real", root.join("real").to_str().unwrap())
@@ -710,13 +710,7 @@ fn http_contract_rejection_still_precedes_registration_and_persistence() {
     for text in [
         source.text.replace("Authorization", "Host"),
         source.text.replace("inject_credential", "unsupported"),
-        source
-            .text
-            .replace("principal,", "principal is SecCore::Subject,"),
-        format!(
-            "{}\nforbid(principal, action == SecCore::Action::\"network.send\", resource);",
-            source.text
-        ),
+        source.text.replace("api.github.com", "*.github.com"),
     ] {
         let mut invalid = source.clone();
         invalid.text = text;
@@ -801,6 +795,44 @@ fn credential_registration_is_validated_before_policy_commit_and_reused_for_unch
             renamed.revision
         );
     }
+}
+
+#[test]
+fn a_manual_assignment_of_a_mixed_policy_pins_only_its_bare_file_rule() {
+    let (pap, _, _, _) = credential_scope_service();
+    let mut source = asc_policy_types::cedar::CedarPolicySource {
+        schema: asc_policy_cedar::schema::embedded_reference(),
+        text: include_str!("../../../fixtures/policy/qoder-v3.cedar").into(),
+    };
+    source.text.push_str(
+        r#"forbid(principal, action == SecCore::Action::"file.read", resource)
+        when { resource.path == "/ops/secret.txt" };"#,
+    );
+    let mixed = pap
+        .create_policy("mixed", &PolicySource::Cedar(source.clone()))
+        .unwrap();
+    let scope = assignment(&pap, &mixed);
+    let [manual] = &scope.policy_snapshots[..] else {
+        panic!("expected one pinned policy")
+    };
+    assert_eq!(manual.revision, mixed.revision);
+    assert!(!scope.uses_credentials());
+    let PolicySource::Cedar(pinned) = &manual.template else {
+        panic!("expected Cedar")
+    };
+    let statements = asc_policy_cedar::deployment::statements(pinned).unwrap();
+    assert_eq!(statements.len(), 1);
+    assert!(statements[0].cedar().contains("/ops/secret.txt"));
+    assert_eq!(
+        pap.get_policy(&mixed.policy_id, mixed.revision)
+            .unwrap()
+            .template,
+        PolicySource::Cedar(source.clone())
+    );
+    source.text = source.text.replace("/ops/secret.txt", "/ops/public.txt");
+    pap.update_policy(&mixed.policy_id, "edited", &PolicySource::Cedar(source))
+        .unwrap();
+    assert_eq!(pap.get_scope(&scope.scope_id).unwrap(), scope);
 }
 
 #[test]
@@ -1475,7 +1507,7 @@ fn request_policy_resolution_does_not_rewrite_existing_scope_or_binding() {
     let before = pap.list_bindings(10, 0).unwrap();
     let explicit = serde_json::from_value(serde_json::json!({
         "language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system","revision":1},
+            "schema":{"schemaId":"seccore.system","revision":3},
             "text":"permit(principal is SecCore::Subject, action == SecCore::Action::\"process.spawn\", resource);"
         }
     })).unwrap();
@@ -1741,7 +1773,7 @@ fn v3_write_registers_credentials_before_persisting_and_reads_full_source() {
     let pap = pap.with_credential_registration(lifecycle.clone());
     let fixture = include_str!("../../../fixtures/policy/qoder-v3.cedar");
     let mut source = asc_policy_types::cedar::CedarPolicySource {
-        schema: asc_policy_cedar::schema::principal_reference(),
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: fixture.into(),
     };
     let first = pap
@@ -1782,12 +1814,12 @@ fn manual_scope_and_v3_upgrade_respect_commit_order() {
     let old = PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
         schema: asc_policy_types::cedar::CedarSchemaReference {
             schema_id: ResourceId::new("seccore.system").unwrap(),
-            revision: Revision::new(2).unwrap(),
+            revision: Revision::new(3).unwrap(),
         },
         text: r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File) when { resource.path == "/secret.txt" };"#.into(),
     });
     let new = PolicySource::Cedar(asc_policy_types::cedar::CedarPolicySource {
-        schema: asc_policy_cedar::schema::principal_reference(),
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: r#"forbid(principal is SecCore::Subject, action == SecCore::Action::"file.read", resource is SecCore::File) when { principal has agentType && principal.agentType == "qoder" && resource.path == "/secret.txt" };"#.into(),
     });
     for scope_first in [true, false] {
@@ -1803,7 +1835,7 @@ fn manual_scope_and_v3_upgrade_respect_commit_order() {
         mixed.extend(references(&upgraded));
         let result = pap.create_scope_assignment(&process_selector(), &mixed, None);
         assert!(matches!(result, Err(PapError::InvalidScope(error))
-            if error.message.contains("assigned automatically") && error.message.contains(original.policy_id.as_str())));
+            if error.message.contains("no bare file or HTTP statement") && error.message.contains(original.policy_id.as_str())));
         match pinned {
             Some(scope) => assert_eq!(
                 pap.get_scope(&scope.scope_id).unwrap().policy_snapshots,

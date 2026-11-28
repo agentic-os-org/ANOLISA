@@ -410,7 +410,9 @@ where
                     .map_err(|error| {
                         project_pap_error(error, Some(NotFoundResource::ReferencedPolicyRevision))
                     })?;
-            require_credential_authority(principal, policy.uses_credentials())?;
+            let manual =
+                asc_pap::manual_snapshot(policy).map_err(|error| project_pap_error(error, None))?;
+            require_credential_authority(principal, manual.uses_credentials())?;
         }
         PapService::create_scope_assignment(self, selector, policies, owner_uid)
             .map_err(|error| project_pap_error(error, None))

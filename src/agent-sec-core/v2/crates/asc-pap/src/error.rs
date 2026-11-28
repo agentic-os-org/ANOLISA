@@ -80,8 +80,10 @@ pub enum PapError {
     /// No further positive `u32` revision can be allocated.
     #[error("revision space exhausted")]
     RevisionExhausted,
-    /// Current v3 sources exceed the bounded automatic deployment snapshot.
-    #[error("current v3 policies exceed 4096 records or 16 MiB; delete or shrink a v3 policy")]
+    /// Current Cedar sources exceed the bounded automatic deployment snapshot.
+    #[error(
+        "current Cedar policies exceed 4096 records or 16 MiB; delete or shrink a Cedar policy"
+    )]
     AutomaticPolicyCapacity,
     /// Reconciliation cannot accept requests before intent is saved.
     #[error("reconciliation runtime is unavailable")]

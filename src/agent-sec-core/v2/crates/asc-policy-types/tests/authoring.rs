@@ -198,7 +198,7 @@ fn only_native_policy_sources_classify_managed_credentials() {
     let cedar: PolicySource = serde_json::from_value(json!({
         "language": "cedar",
         "content": {
-            "schema": {"schemaId": "seccore.system", "revision": 1},
+            "schema": {"schemaId": "seccore.system", "revision": 3},
             "text": "permit(principal, action, resource);"
         }
     }))

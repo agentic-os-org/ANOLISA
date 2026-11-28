@@ -1,8 +1,8 @@
 //! The adapter reports coverage for the same partial Cedar it actually translates.
 
 use asc_policy_cedar::{
-    deployment::selected_pst,
-    schema::principal_reference,
+    deployment::{Placement, selected_pst},
+    schema::embedded_reference,
     selection::{Direction, SelectedStatement, ValidatedPolicy, ValidatedStatement},
 };
 use asc_policy_translator_agentsight::{
@@ -20,7 +20,7 @@ use asc_policy_types::{
 #[test]
 fn qoder_fragment_compiles_with_operation_specific_deviations() {
     let source = CedarPolicySource {
-        schema: principal_reference(),
+        schema: embedded_reference(),
         text:
             r#"forbid(principal,action == SecCore::Action::"file.write",resource is SecCore::File)
             when { principal has agentType && principal.agentType == "qoder" }
@@ -110,7 +110,7 @@ fn deviations_follow_each_operation_to_its_surviving_target() {
             );
         }
         let source = CedarPolicySource {
-            schema: principal_reference(),
+            schema: embedded_reference(),
             text: format!(
                 r#"forbid(principal,action == SecCore::Action::"file.write",resource is SecCore::File)
                 when {{ principal has agentType && principal.agentType == "qoder" && ({alternatives}) }}
@@ -187,7 +187,7 @@ fn deviations_follow_each_operation_to_its_surviving_target() {
 #[test]
 fn unlowerable_file_restriction_keeps_the_candidate_in_admission() {
     let source = CedarPolicySource {
-        schema: principal_reference(),
+        schema: embedded_reference(),
         text: r#"forbid(principal,action == SecCore::Action::"file.read",resource is SecCore::File)
             when { principal has agentType && principal.agentType == "qoder" }
             when { resource.path == "/a" };
@@ -222,9 +222,9 @@ fn unlowerable_file_restriction_keeps_the_candidate_in_admission() {
 }
 
 #[test]
-fn untargeted_v3_file_rule_has_no_automatic_actplane_coverage() {
+fn bare_file_rule_has_actplane_coverage_without_automatic_placement() {
     let source = CedarPolicySource {
-        schema: principal_reference(),
+        schema: embedded_reference(),
         text:
             r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
             when { resource.path == "/reports" };"#
@@ -237,7 +237,9 @@ fn untargeted_v3_file_rule_has_no_automatic_actplane_coverage() {
         schema: &source.schema,
         rule: &validated.statements[0],
     });
-    assert!(
-        matches!(selected.selected, SelectedStatement::Unsupported(reason) if reason.contains("requires an exact principal.agentType"))
-    );
+    assert!(matches!(selected.selected, SelectedStatement::Whole));
+    assert!(matches!(
+        (SELECTOR.place)(&validated.statements[0]),
+        Placement::Ignore
+    ));
 }

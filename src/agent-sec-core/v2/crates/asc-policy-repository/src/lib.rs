@@ -153,6 +153,17 @@ pub trait BindingStateRepository: Send + Sync {
         Ok(())
     }
 
+    /// Original Cedar text when a manual snapshot pins a projection of this revision.
+    /// # Errors
+    /// Returns storage failures separately from revisions stored without an archive.
+    fn archived_cedar_source(
+        &self,
+        _policy_id: &ResourceId,
+        _revision: Revision,
+    ) -> Result<Option<asc_policy_types::cedar::CedarPolicySource>, StoreError> {
+        Ok(None)
+    }
+
     /// # Errors
     /// Returns storage failure distinctly from absence.
     fn get_binding_state(

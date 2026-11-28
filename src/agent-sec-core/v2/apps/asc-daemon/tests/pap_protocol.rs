@@ -1233,7 +1233,7 @@ async fn real_uds_explains_manual_operations_on_automatic_assignments() {
                 "selector":ScopeSelector::Pid { pid:42 },
                 "policyTemplates":[{"policyId":policy.policy_id,"policyRevision":policy.revision}]
             }}),
-            "uses schema v3 and is assigned automatically",
+            "has no bare file or HTTP statement for manual assignment",
         ),
         (
             json!({"method":"policy.scopes.delete","params":{"id":scope.scope_id}}),
@@ -1501,7 +1501,7 @@ when {{ resource.host == "api.github.com" && context.input.scheme == "https" }};
         fake = serde_json::to_string(&root.join("fake")).unwrap()
     );
     let template = json!({"language":"cedar", "content": {
-        "schema":{"schemaId":"seccore.system", "revision":2}, "text": text
+        "schema":{"schemaId":"seccore.system", "revision":3}, "text": text
     }});
     let file = serde_json::to_value(file_policy(vec!["/protected".into()])).unwrap();
     let principal_source = json!({"language":"cedar", "content": {

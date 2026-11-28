@@ -15,6 +15,7 @@ fault-injection = ["dep:fail", "fail/failpoints"]
 [dependencies]
 asc-foundation-types.workspace = true
 asc-pap.workspace = true
+asc-policy-cedar.workspace = true
 asc-policy-repository.workspace = true
 asc-policy-types.workspace = true
 asc-sqlite-kernel.workspace = true
@@ -32,7 +33,6 @@ tempfile = { workspace = true, optional = true }
 # Integration tests link the library without cfg(test). A dev-only self-dependency
 # enables its test helpers for cargo test without changing production defaults.
 asc-policy-repository-sqlite = { workspace = true, features = ["test-support"] }
-asc-policy-cedar.workspace = true
 asc-agentsight-client.workspace = true
 asc-pcp.workspace = true
 nix.workspace = true

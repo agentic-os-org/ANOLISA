@@ -95,7 +95,7 @@ python3 gateway.py --user demo
 
 1. 按“前提条件”取得真实 Token，调用 `key generate-fake` 生成替身；直连 `GET /user` 必须返回 200 及其 login，替身必须得到 401。
 2. 等 Gateway ready，把 CA 与替身请求头放进普通账号的工作区。
-3. 发布由 [gateway.cedar.in](fixtures/gateway.cedar.in) 渲染的凭据策略（schema revision 2），核对 PAP 回读字节与 SHA-256。
+3. 发布由 [gateway.cedar.in](fixtures/gateway.cedar.in) 渲染的凭据策略（schema revision 3），核对 PAP 回读字节与 SHA-256。
 4. 按探针完整命令行参数和普通账号 UID 建 Scope，Binding READY 后才发送请求。
 5. 普通账号只持有替身，经 Gateway 请求 GitHub，验收注入结果。
 

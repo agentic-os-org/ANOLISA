@@ -117,7 +117,7 @@ where
             Some(automatic)
                 if crate::is_automatic_source(&policy) && automatic.matchers.is_err() =>
             {
-                // The management read still works when the full v3 set exceeds the planning limit.
+                // The management read still works when the full Cedar set exceeds the planning limit.
                 let (policies, views) = crate::selection::SelectionCache::isolated_deployment(
                     vec![policy.clone()],
                     automatic.selectors,
@@ -185,7 +185,7 @@ where
                 .map_err(|error| PapError::InvalidCedar(error.diagnostic())),
             PolicySource::SecCore(source) if source.uses_credentials() => {
                 Err(PapError::InvalidCedar(
-                    "native credential policies are unsupported; use Cedar schema revision 2"
+                    "native credential policies are unsupported; use Cedar schema revision 3"
                         .into(),
                 ))
             }
@@ -506,7 +506,7 @@ where
         &self,
         policies: &[PolicyReference],
     ) -> Result<Vec<PreparedPolicy>, PapError> {
-        let snapshots = policies
+        policies
             .iter()
             .map(|p| {
                 self.repository
@@ -518,21 +518,9 @@ where
                             e
                         }
                     })
+                    .and_then(crate::manual_snapshot)
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        for policy in &snapshots {
-            if crate::is_automatic_source(policy) {
-                return Err(PapError::InvalidScope(ValidationError::new(
-                    "policyTemplates",
-                    format!(
-                        "policy {} revision {} uses schema v3 and is assigned automatically",
-                        policy.policy_id,
-                        policy.revision.get()
-                    ),
-                )));
-            }
-        }
-        Ok(snapshots)
+            .collect()
     }
 
     /// Creates an immutable assignment with optional credential process owner attribution.

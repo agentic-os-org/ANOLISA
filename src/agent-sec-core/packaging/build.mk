@@ -119,7 +119,7 @@ stage-cosh-extension: ## Stage cosh-extension hooks to BUILD_DIR
 .PHONY: stage-skills
 stage-skills: ## Stage skill files to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/skills
-	cp -rp skills/. $(BUILD_DIR)/skills/
+	cp -rLp skills/. $(BUILD_DIR)/skills/
 
 .PHONY: stage-tools
 stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR

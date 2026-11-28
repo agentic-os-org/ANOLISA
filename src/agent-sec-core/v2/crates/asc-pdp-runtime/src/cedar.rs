@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use asc_policy_cedar::advice::Advice;
 use asc_policy_cedar::selection::{SelectedStatement, Selection, ValidatedStatement};
-use asc_policy_types::cedar::{AuthorizationPolicy, CedarSchemaReference};
+use asc_policy_types::cedar::AuthorizationPolicy;
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use cedar_policy::{Authorizer, Effect, Policy, PolicyId, PolicySet};
 
@@ -26,22 +26,22 @@ impl CompiledPolicySet {
     pub fn from_members(members: &[AuthorizationPolicy]) -> Result<Self, PdpError> {
         let mut compiled = Self::default();
         for member in members {
-            let source = PolicySet::from_pst(asc_policy_cedar::pst(&member.source)?)
-                .map_err(|error| PdpError::Evaluation(error.to_string()))?;
-            if !asc_policy_cedar::request_policy_headers_for_schema(&source, &member.source.schema)?
-            {
+            let parsed = asc_policy_cedar::selection::ValidatedPolicy::parse(&member.source)?;
+            if !parsed.request_eligible.map_err(PdpError::Configuration)? {
                 return Err(PdpError::Configuration(format!(
-                    "{} has bare principal headers",
+                    "{} has no Sandbox request statements",
                     member.policy_id
                 )));
             }
-            for policy in source.policies() {
-                compiled.add(
-                    &member.policy_id,
-                    member.revision,
-                    &member.source.schema,
-                    policy,
-                )?;
+            for rule in &parsed.statements {
+                let statement = ValidatedStatement {
+                    policy_id: &member.policy_id,
+                    revision: member.revision,
+                    schema: &member.source.schema,
+                    rule,
+                };
+                let choice = crate::selection::select(&statement);
+                compiled.add_selected(&statement, &choice)?;
             }
         }
         Ok(compiled)
@@ -52,44 +52,44 @@ impl CompiledPolicySet {
     ) -> Result<Self, PdpError> {
         let mut compiled = Self::default();
         for (statement, choice) in statements {
-            if &choice.source.policy_id != statement.policy_id
-                || choice.source.revision != statement.revision
-                || choice.source.statement_id != statement.rule.id
-            {
-                return Err(PdpError::Configuration(format!(
-                    "selection does not belong to {} revision {} statement {}",
-                    statement.policy_id,
-                    statement.revision.get(),
-                    statement.rule.id
-                )));
-            }
-            let fragment;
-            let policy = match &choice.selected {
-                SelectedStatement::Whole | SelectedStatement::Undetermined => {
-                    statement.rule.policy()
-                }
-                SelectedStatement::Fragment { cedar, .. } => {
-                    fragment = Policy::parse(Some(PolicyId::new(&statement.rule.id)), cedar)
-                        .map_err(|error| PdpError::Evaluation(error.to_string()))?;
-                    &fragment
-                }
-                SelectedStatement::Unrelated | SelectedStatement::Unsupported(_) => continue,
-            };
-            compiled.add(
-                statement.policy_id,
-                statement.revision,
-                statement.schema,
-                policy,
-            )?;
+            compiled.add_selected(&statement, choice)?;
         }
         Ok(compiled)
+    }
+
+    fn add_selected(
+        &mut self,
+        statement: &ValidatedStatement<'_>,
+        choice: &Selection,
+    ) -> Result<(), PdpError> {
+        if &choice.source.policy_id != statement.policy_id
+            || choice.source.revision != statement.revision
+            || choice.source.statement_id != statement.rule.id
+        {
+            return Err(PdpError::Configuration(format!(
+                "selection does not belong to {} revision {} statement {}",
+                statement.policy_id,
+                statement.revision.get(),
+                statement.rule.id
+            )));
+        }
+        let fragment;
+        let policy = match &choice.selected {
+            SelectedStatement::Whole | SelectedStatement::Undetermined => statement.rule.policy(),
+            SelectedStatement::Fragment { cedar, .. } => {
+                fragment = Policy::parse(Some(PolicyId::new(&statement.rule.id)), cedar)
+                    .map_err(|error| PdpError::Evaluation(error.to_string()))?;
+                &fragment
+            }
+            SelectedStatement::Unrelated | SelectedStatement::Unsupported(_) => return Ok(()),
+        };
+        self.add(statement.policy_id, statement.revision, policy)
     }
 
     fn add(
         &mut self,
         policy_id: &ResourceId,
         revision: Revision,
-        schema: &CedarSchemaReference,
         policy: &Policy,
     ) -> Result<(), PdpError> {
         // Preserve the original statement ID even when sibling branches or statements were omitted.
@@ -101,7 +101,7 @@ impl CompiledPolicySet {
             policy.id()
         );
         let policy = policy.new_id(PolicyId::new(id));
-        path_conditions::collect_boundaries(&policy, schema, &mut self.boundaries)?;
+        path_conditions::collect_boundaries(&policy, true, &mut self.boundaries)?;
         self.policies
             .add(policy)
             .map_err(|error| PdpError::Evaluation(error.to_string()))

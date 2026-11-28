@@ -9,7 +9,7 @@
       "template": {
         "language": "cedar",
         "content": {
-          "schema": {"schemaId": "seccore.system", "revision": 2},
+          "schema": {"schemaId": "seccore.system", "revision": 3},
           "text": "@id(\"github\")\n@modify(\"inject_credential\")\n@real_token_file(\"/secure/real\")\n@fake_token_file(\"/secure/fake\")\n@inject_header(\"Authorization\")\n@inject_format(\"auto\")\n@response_rewrite(\"true\")\npermit(principal, action == SecCore::Action::\"network.send\", resource is SecCore::HttpEndpoint)\nwhen { resource.host == \"api.github.com\" && context.input.scheme == \"https\" };\nforbid(principal, action == SecCore::Action::\"file.write\", resource is SecCore::File)\nwhen { resource.path == \"/work/data\" && context.input.operation == SecCore::WriteOperation::\"delete\" };"
         }
       },

@@ -41,7 +41,7 @@ fn file(path: &str) -> PolicySource {
 }
 
 #[test]
-fn automatic_file_rule_without_agent_type_reports_its_statement_without_binding() {
+fn mixed_file_rules_pin_only_the_bare_statement_for_manual_assignment() {
     for add_targeted_rule in [false, true] {
         let repo = Arc::new(SqlitePolicyRepository::temporary().unwrap());
         let pap = PapService::new(repo)
@@ -75,24 +75,18 @@ fn automatic_file_rule_without_agent_type_reports_its_statement_without_binding(
         let details = pap
             .policy_details(&saved.policy_id, saved.revision)
             .unwrap();
-        let diagnostic = details
-            .automatic_diagnostics
-            .iter()
-            .find(|entry| entry.state == "unassigned")
-            .unwrap();
-        assert_eq!(
-            diagnostic.backend,
-            asc_policy_types::policy::DeploymentBackend::ActPlane
-        );
-        assert_eq!(diagnostic.statement_ids, ["policy0".to_owned()].into());
-        assert_eq!(diagnostic.scope_id, None);
         assert!(
-            diagnostic
-                .reason
-                .as_deref()
-                .unwrap()
-                .contains("requires an exact principal.agentType")
+            details
+                .automatic_diagnostics
+                .iter()
+                .all(|entry| entry.state != "unassigned")
         );
+        let manual = asc_pap::manual_snapshot(saved.clone()).unwrap();
+        let PolicySource::Cedar(source) = manual.template else {
+            unreachable!()
+        };
+        assert!(source.text.contains("/work/A"));
+        assert!(!source.text.contains("/work/B"));
         let scopes = pap.list_scopes(10, 0).unwrap().items;
         assert_eq!(scopes.len(), usize::from(add_targeted_rule));
         if let Some(scope) = scopes.first() {
@@ -100,6 +94,35 @@ fn automatic_file_rule_without_agent_type_reports_its_statement_without_binding(
             assert_eq!(selected.statement_ids, ["policy1".to_owned()].into());
         }
     }
+}
+
+#[test]
+fn unlowerable_file_candidate_keeps_the_previous_serving_scope() {
+    let (pap, _) = automatic_file_service();
+    let saved = pap.create_policy("targeted", &file("/old")).unwrap();
+    pap.recover_scopes().unwrap();
+    let scope = pap.list_scopes(10, 0).unwrap().items.pop().unwrap();
+    let PolicySource::Cedar(mut source) = file("/new") else {
+        unreachable!()
+    };
+    source.text = source.text.replace(
+        "resource.path ==",
+        r#"context.input.program == "/bin/cat" && resource.path =="#,
+    );
+    let updated = pap
+        .update_policy(&saved.policy_id, "targeted", &PolicySource::Cedar(source))
+        .unwrap();
+    pap.recover_scopes().unwrap();
+    assert_eq!(pap.get_scope(&scope.scope_id).unwrap(), scope);
+    let diagnostics = pap
+        .policy_details(&updated.policy_id, updated.revision)
+        .unwrap()
+        .automatic_diagnostics;
+    assert!(diagnostics.iter().any(|d| {
+        d.reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("CEDAR_RULE_0"))
+    }));
 }
 
 #[test]
@@ -528,7 +551,7 @@ fn gateway_selects_each_grants_own_uid_and_keeps_cross_policy_http_restrictions(
     );
 
     let restriction = PolicySource::Cedar(CedarPolicySource {
-        schema: asc_policy_cedar::schema::principal_reference(),
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: r#"forbid(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint)
             when {principal has agentType && principal.agentType == "qoder"};"#.into(),
     });

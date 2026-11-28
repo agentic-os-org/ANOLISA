@@ -2,7 +2,11 @@
 
 [中文版](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT_zh.md)
 
-**Design proposal**
+## Single-revision contract
+
+`seccore.system` revision 3 is the public Cedar schema for both manual and automatic deployment. PAP selects statements separately. A bare file restriction can be pinned to a manual Scope. A supported file restriction that names an exact agent type can also reach matching processes through ActPlane. An automatic Gateway credential grant must name an exact agent type and a non-root owner UID on the grant itself. Sandbox evaluates the original subject predicates for each request. A single Policy can use all three consumers. See the [policy CLI guide](../../../../docs/user-guide/en/agent-sec-core/policy-cli.md#cedar-policy-source) for examples and the SQLite upgrade and rollback procedure.
+
+The proposal below records the original rollout with three schema revisions. Its CLI defaults, revision-based placement and compatibility rules describe that rollout.
 
 ## Design overview
 

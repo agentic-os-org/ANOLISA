@@ -65,7 +65,7 @@ pub(crate) fn is_annotation(name: &str) -> bool {
 
 /// Compiles credential instructions for registration and HTTP-specific source utilities.
 ///
-/// Legacy sources compile the whole network view. In v3 only annotated statements
+/// Only annotated statements
 /// contribute registrations. Gateway independently checks the selected network plan at
 /// publication. Registration by itself grants no route or process attachment.
 ///
@@ -80,39 +80,15 @@ pub fn compile(source: &CedarPolicySource) -> Result<Vec<CredentialRule>, CedarE
             .keys()
             .any(|name| is_annotation(name))
     };
-    if crate::schema::uses_principal_targeting(&source.schema) {
-        // Registration needs credential references before any process exists. Gateway
-        // still verifies the subject and compiles the entire network view at deployment.
-        syntax.policies = syntax
-            .policies
-            .into_iter()
-            .filter(|(_, policy)| has_annotations(policy))
-            .map(|(id, policy)| Ok((id, registration_statement(&policy)?)))
-            .collect::<Result<_, CedarError>>()?;
-        return lower(&syntax, &source.schema);
-    }
-    let annotated: Vec<_> = syntax
+    // Registration pins credential identities before a process is discovered.
+    // Gateway independently validates every restriction in the selected Scope.
+    syntax.policies = syntax
         .policies
-        .iter()
+        .into_iter()
         .filter(|(_, policy)| has_annotations(policy))
-        .map(|(id, _)| id.clone())
-        .collect();
-    if annotated.is_empty() {
-        return Ok(Vec::new());
-    }
-    let misplaced = || CedarError::Unsupported {
-        policy_id: "policy-set".into(),
-        reason: "credential annotations must belong to the network policy view",
-    };
-    let network =
-        crate::project_pst(&syntax, crate::PolicyDomain::Network).ok_or_else(misplaced)?;
-    if annotated
-        .iter()
-        .any(|id| !network.policies.contains_key(id))
-    {
-        return Err(misplaced());
-    }
-    lower(&network, &source.schema)
+        .map(|(id, policy)| Ok((id, registration_statement(&policy)?)))
+        .collect::<Result<_, CedarError>>()?;
+    lower(&syntax, &source.schema)
 }
 
 // This copy is used only to register the credential pair. A selector need not be
@@ -189,14 +165,11 @@ pub fn lower(
         reason,
     };
     if schema.schema_id.as_str() != crate::schema::SCHEMA_ID
-        || !matches!(
-            schema.revision.get(),
-            crate::schema::HTTP_SCHEMA_REVISION | crate::schema::PRINCIPAL_SCHEMA_REVISION
-        )
+        || schema.revision.get() != crate::schema::SCHEMA_REVISION
     {
         return Err(reject(
             "policy-set",
-            "credential HTTP policies require schema revision 2 or 3",
+            "credential HTTP policies require schema revision 3",
         ));
     }
     if syntax.policies.len() > MAX_RULES {

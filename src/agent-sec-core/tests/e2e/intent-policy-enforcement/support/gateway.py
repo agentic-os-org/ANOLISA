@@ -18,7 +18,7 @@ from pathlib import Path
 from support.common import FIXTURES, checking, delete_policy, require, section
 
 GITHUB_HOST = "api.github.com"
-HTTP_SCHEMA = {"schemaId": "seccore.system", "revision": 2}
+HTTP_SCHEMA = {"schemaId": "seccore.system", "revision": 3}
 TOKEN_SOURCES = ("auto", "prompt")
 
 

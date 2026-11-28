@@ -67,8 +67,6 @@ def test_gateway_opt_out_keeps_file_policy_and_refuses_credential_work(
         "create",
         "--name",
         "credential-without-gateway",
-        "--schema-revision",
-        "2",
         "--file",
         str(credential_template),
     )

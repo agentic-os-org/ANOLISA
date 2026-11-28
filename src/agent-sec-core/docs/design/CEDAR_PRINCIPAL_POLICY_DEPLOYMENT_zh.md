@@ -2,7 +2,11 @@
 
 [English](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT.md)
 
-**设计提案**
+## 统一 revision 后的部署约定
+
+手工和自动部署共用对外的 Cedar schema `seccore.system` revision 3。PAP 逐条选择语句。未限定主体的文件限制可绑定到手工 Scope。明确指定 Agent 类型且 ActPlane 支持的文件限制可自动下发到匹配进程。Gateway 自动部署要求同一条凭据授权同时指定 Agent 类型和非 root 的 owner UID。Sandbox 在每次请求时求值原有主体条件。同一份 Policy 可以供三者使用。示例及 SQLite 升级、回滚步骤见[策略 CLI 指南](../../../../docs/user-guide/zh/agent-sec-core/policy-cli.md#cedar-policy-源码)。
+
+下文保留最初分三个 schema revision 推出的设计。文中的 CLI 默认值、按 revision 分配策略及兼容规则均描述该阶段。
 
 ## 方案概览
 

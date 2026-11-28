@@ -213,7 +213,7 @@ fn credential_scope_release_responsibility_survives_restart_with_zero_or_last_bi
         let source = asc_policy_types::cedar::CedarPolicySource {
             schema: asc_policy_types::cedar::CedarSchemaReference {
                 schema_id: ResourceId::new("seccore.system").unwrap(),
-                revision: Revision::new(2).unwrap(),
+                revision: Revision::new(3).unwrap(),
             },
             text: r#"@modify("inject_credential")
 @real_token_file("/secure/github-real")
@@ -412,8 +412,10 @@ fn strict_open_rejects_unknown_schema_and_preserves_files() {
 }
 
 fn restore_v1_schema(db: &rusqlite::Connection) {
-    db.execute_batch("DROP TABLE policy_generation; PRAGMA user_version=1")
-        .unwrap();
+    db.execute_batch(
+        "DROP TABLE cedar_source_history; DROP TABLE policy_generation; PRAGMA user_version=1",
+    )
+    .unwrap();
 }
 
 fn assert_v1_schema(db: &rusqlite::Connection) {
@@ -1059,7 +1061,7 @@ fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_sche
     let pap = PapService::new(repo.clone());
     let source: PolicySource = serde_json::from_value(serde_json::json!({
         "language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system","revision":1},
+            "schema":{"schemaId":"seccore.system","revision":3},
             "text":"// Retain whitespace and original source.\nforbid(principal, action == SecCore::Action::\"file.write\", resource) when { resource.path == \"/protected\" };\n"
         }
     })).unwrap();
@@ -1109,7 +1111,7 @@ fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_sche
     let PolicySource::Cedar(saved) = &restored.binding.spec.policy.template else {
         panic!("saved Cedar policy must produce a PST");
     };
-    assert_eq!(saved.schema.revision.get(), 1);
+    assert_eq!(saved.schema.revision.get(), 3);
     assert_eq!(pst(saved).unwrap().policies.len(), 1);
     repo.delete_policy_revision(&current.policy_id, current.revision)
         .unwrap();
@@ -1119,7 +1121,7 @@ fn cedar_snapshots_reload_after_update_delete_and_restart_using_their_saved_sche
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        2
+        3
     );
     let saved: String = db
         .query_row("SELECT spec_json FROM bindings", [], |r| r.get(0))
@@ -1204,8 +1206,8 @@ fn legacy_policy_payloads_are_rejected_without_discarding_saved_responsibility()
 }
 
 #[test]
-fn startup_reports_legacy_agent_type_in_current_and_pinned_revisions() {
-    use asc_policy_repository_sqlite::RepositoryError;
+fn upgrade_converts_legacy_subjects_and_preserves_pins_and_original_sources() {
+    use asc_policy_types::authoring::PolicySource;
 
     let directory = private_dir();
     let path = directory.path().join("policy-state.db");
@@ -1242,32 +1244,31 @@ fn startup_reports_legacy_agent_type_in_current_and_pinned_revisions() {
         [&legacy],
     )
     .unwrap();
-    let saved_sources = || -> (String, String, String) {
-        db.query_row(
-            "SELECT current_json, assignment_json, spec_json FROM policies CROSS JOIN scopes CROSS JOIN bindings",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).unwrap()
-    };
-    let before = saved_sources();
-    let Err(error @ RepositoryError::LegacyAgentType(_)) = SqlitePolicyRepository::open(&path)
-    else {
-        panic!("startup must report all stored revisions that require migration");
-    };
-    let RepositoryError::LegacyAgentType(revisions) = &error else {
-        unreachable!()
-    };
-    assert_eq!(
-        *revisions,
-        [
-            (old.policy_id.clone(), old.revision),
-            (old.policy_id.clone(), current_revision),
-        ]
-        .into()
-    );
-    assert!(error.to_string().contains("Migrate to principal.agentType"));
-    assert_v1_schema(&db);
-    assert_eq!(saved_sources(), before);
+    for _ in 0..2 {
+        let repo = SqlitePolicyRepository::open(&path).unwrap();
+        let current = repo
+            .get_policy(&old.policy_id, current_revision.checked_next().unwrap())
+            .unwrap();
+        let scope = repo
+            .get_scope(&initial.binding.spec.scope.scope_id)
+            .unwrap();
+        let binding = repo
+            .get_binding_state(&initial.binding.spec.binding_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.binding.spec.policy, scope.policy_snapshots[0]);
+        assert_eq!(binding.binding.spec.policy.revision, old.revision);
+        for policy in [&current, &binding.binding.spec.policy] {
+            let PolicySource::Cedar(source) = &policy.template else {
+                panic!("expected Cedar")
+            };
+            assert_eq!(source.schema.revision.get(), 3);
+            assert!(source.text.contains("agentType"));
+            assert!(!source.text.contains("agent_type"));
+            assert_eq!(source.text.contains("ownerUid"), policy == &current);
+        }
+        assert_eq!(db.query_row("SELECT count(*) FROM cedar_source_history WHERE json_extract(source_json,'$.content.text') LIKE '%agent_type%'", [], |row| row.get::<_, u32>(0)).unwrap(), 2);
+    }
 }
 
 #[test]
@@ -1281,8 +1282,8 @@ fn selected_current_policies_preserve_cedar_and_legacy_sources_across_reopen() {
         let source: asc_policy_types::authoring::PolicySource =
             serde_json::from_value(serde_json::json!({
                 "language": "cedar", "content": {
-                    "schema": {"schemaId": "seccore.system", "revision": 1},
-                    "text": "permit(principal, action, resource);"
+                    "schema": {"schemaId": "seccore.system", "revision": 3},
+                    "text": "permit(principal is SecCore::Subject, action, resource);"
                 }
             }))
             .unwrap();

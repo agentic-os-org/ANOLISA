@@ -7,7 +7,7 @@ fn source(text: &str) -> CedarPolicySource {
     CedarPolicySource {
         schema: CedarSchemaReference {
             schema_id: ResourceId::new("seccore.system").unwrap(),
-            revision: Revision::new(1).unwrap(),
+            revision: Revision::new(3).unwrap(),
         },
         text: text.into(),
     }

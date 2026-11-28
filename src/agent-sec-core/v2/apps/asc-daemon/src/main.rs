@@ -350,17 +350,10 @@ async fn run(
     )));
     let pap = pap
         .with_scope_discovery(discovery_registry.clone())
-        .with_automatic_scopes(
-            agent_types,
-            &[
-                asc_policy_translator_agentsight::selection::SELECTOR,
-                asc_gateway_plan::selection::SELECTOR,
-            ],
-            {
-                let queue = policy_runtime.enqueuer();
-                move || queue.request_scope_cleanup()
-            },
-        );
+        .with_automatic_scopes(agent_types, file_backend.deployment_selectors(), {
+            let queue = policy_runtime.enqueuer();
+            move || queue.request_scope_cleanup()
+        });
     if let Err(error) = pap.recover_scopes() {
         report_error(telemetry, &error);
         let stop = tokio::time::Instant::now() + RUNTIME_DRAIN_BUDGET;

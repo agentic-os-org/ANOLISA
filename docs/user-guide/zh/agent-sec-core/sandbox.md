@@ -68,7 +68,7 @@ cat report.txt
 
 ## Cedar 输入
 
-同一个 `--permissions` 参数也接受使用 `seccore.system` schema revision 1 的原始 Cedar
+同一个 `--permissions` 参数也接受使用 `seccore.system` schema revision 3 的原始 Cedar
 文本，或现有 `{"language":"cedar","content":{"schema":{"schemaId":"seccore.system",
 "revision":1},"text":"..."}}` 源码封装。格式按内容识别，不依赖文件名。原有 OS permission
 JSON 行为不变；使用 Cedar 不会启用 PDP 调用或启动 daemon。
@@ -311,8 +311,7 @@ when { principal has agentType && principal.agentType == "cosh" };
 ```
 
 此规则只授权进程启动，还须补充应用所需的文件/网络策略。缺少类型时不会匹配此条件。
-revision 1 和 2 沿用已有分流规则。每条语句都有显式 principal header 的源码才进入请求授权。
-混用裸 header 和显式约束会被拒绝，原生 JSON 和全部使用裸 header 的旧版策略走下发路径。
+没有主体谓词的裸文件规则可以手工绑定进程。需要让通用文件规则参与 Sandbox 授权时，使用 `principal is SecCore::Subject`。
 使用旧字段名 `agent_type` 的客户端和 Cedar 策略须改用 `agentType`。
 
 每次请求先检查 PAP 策略集版本。同一版本复用已编译的规则，缓存未命中时，daemon

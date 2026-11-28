@@ -9,6 +9,7 @@ pub const SELECTOR: DeploymentSelector = DeploymentSelector {
     backend: DeploymentBackend::Gateway,
     select,
     place,
+    validate: None,
 };
 
 fn select(input: &ValidatedStatement<'_>) -> Selection {
@@ -34,6 +35,7 @@ fn place(rule: &StatementTarget) -> Placement<'_> {
     }
     match &rule.subject {
         Ok(Some(subject)) if subject.owner_uid.is_some_and(|uid| uid != 0) => Placement::Bind(subject),
+        Ok(None) if rule.bare_principal() => Placement::Ignore,
         Ok(_) => Placement::Unassigned("automatic credential grants require an exact agentType and a non-root ownerUid on this statement".into()),
         Err(error) => Placement::Unassigned(error.to_string()),
     }

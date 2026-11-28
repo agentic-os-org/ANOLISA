@@ -2,7 +2,7 @@
 
 use asc_policy_cedar::{
     deployment::selected_pst,
-    schema::principal_reference,
+    schema::embedded_reference,
     selection::{SelectedStatement, ValidatedPolicy, ValidatedStatement},
 };
 use asc_policy_types::{
@@ -16,7 +16,7 @@ const HEAD: &str = r#"@id("reports") forbid(principal, action == SecCore::Action
 
 fn source(clauses: &str) -> CedarPolicySource {
     CedarPolicySource {
-        schema: principal_reference(),
+        schema: embedded_reference(),
         text: format!("{HEAD} {clauses};"),
     }
 }

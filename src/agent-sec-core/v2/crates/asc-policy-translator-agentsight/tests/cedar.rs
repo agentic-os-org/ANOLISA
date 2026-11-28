@@ -10,7 +10,7 @@ fn binding(text: &str) -> PreparedBinding {
     ))
     .unwrap();
     binding.policy.template = serde_json::from_value(json!({"language":"cedar","content":{
-        "schema":{"schemaId":"seccore.system","revision":1},"text":text
+        "schema":{"schemaId":"seccore.system","revision":3},"text":text
     }}))
     .unwrap();
     binding

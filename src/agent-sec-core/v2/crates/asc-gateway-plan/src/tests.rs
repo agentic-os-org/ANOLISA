@@ -17,7 +17,7 @@ fn github_policy() -> PreparedPolicy {
     let source = CedarPolicySource {
         schema: asc_policy_types::cedar::CedarSchemaReference {
             schema_id: ResourceId::new(asc_policy_cedar::schema::SCHEMA_ID).unwrap(),
-            revision: Revision::new(asc_policy_cedar::schema::HTTP_SCHEMA_REVISION).unwrap(),
+            revision: Revision::new(asc_policy_cedar::schema::SCHEMA_REVISION).unwrap(),
         },
         text: GITHUB_CEDAR.into(),
     };
@@ -171,7 +171,7 @@ fn compilation_aggregates_snapshots_canonically_and_preserves_each_rule_source()
     let file = PreparedPolicy {
         deployment: None,
         policy_id: ResourceId::new("policy:file").unwrap(), policy_name: "Files".into(), revision: Revision::new(1).unwrap(),
-        template: serde_json::from_value(json!({"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"forbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/secret\" };"}})).unwrap(),
+        template: serde_json::from_value(json!({"language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":3},"text":"forbid(principal, action == SecCore::Action::\"file.read\", resource) when { resource.path == \"/secret\" };"}})).unwrap(),
         credential_bindings: vec![],
     };
     let plan = compile_scope(&scope(&[second.clone(), file.clone(), first.clone()])).unwrap();
@@ -298,6 +298,10 @@ fn unsupported_network_without_credentials_is_not_skipped() {
     for text in [
         r#"permit(principal, action == SecCore::Action::"network.use", resource == SecCore::Network::"all");"#,
         r#"forbid(principal, action == SecCore::Action::"network.send", resource is SecCore::HttpEndpoint);"#,
+        r#"forbid(principal, action == SecCore::Action::"file.read", resource is SecCore::File)
+               when { resource.path == "/work/private" };
+           forbid(principal, action, resource in SecCore::HttpEndpoint::"remote")
+               when { principal has agentType && principal.agentType == "cosh" };"#,
         "forbid(principal, action, resource);",
     ] {
         let mut network = github_policy();
@@ -621,7 +625,7 @@ fn automatic_scope_compiles_only_selected_rules_and_requires_their_registered_pa
     let AuthoredPolicySource::Cedar(cedar) = &mut policy.template else {
         panic!("fixture must contain Cedar");
     };
-    cedar.schema = asc_policy_cedar::schema::principal_reference();
+    cedar.schema = asc_policy_cedar::schema::embedded_reference();
     cedar.text = cedar.text.replace(
         "when {",
         r#"when { principal has agentType && principal.agentType == "qoder" &&"#,
@@ -644,7 +648,7 @@ fn automatic_scope_compiles_only_selected_rules_and_requires_their_registered_pa
 fn selector_excludes_file_rules_and_retains_uncertain_http_restrictions() {
     use asc_policy_cedar::selection::{SelectedStatement, ValidatedPolicy, ValidatedStatement};
     let source = asc_policy_types::cedar::CedarPolicySource {
-        schema: asc_policy_cedar::schema::principal_reference(),
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: r#"forbid(principal, action == SecCore::Action::"file.write", resource is SecCore::File)
             when { principal has agentType && principal.agentType == "qoder" }
             when { context.input.operation == SecCore::WriteOperation::"write" ||

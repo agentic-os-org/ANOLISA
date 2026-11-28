@@ -204,7 +204,7 @@ fn binding_for_pid(path: &Path, pid: u32) -> PreparedBinding {
     let text = format!(
         "forbid(principal, action == SecCore::Action::\"file.read\", resource is SecCore::File) when {{ {condition} }};"
     );
-    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":1},"text":text}})).unwrap();
+    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":3},"text":text}})).unwrap();
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     binding.scope.process.pid = pid;
     binding.scope.process.start_time = stat[stat.rfind(')').unwrap() + 1..]
@@ -255,7 +255,7 @@ fn permission_binding(path: &Path, pid: u32, operations: &[&str], tree: bool) ->
             ).unwrap();
         }
     }
-    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":1},"text":text}})).unwrap();
+    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":3},"text":text}})).unwrap();
     binding
 }
 
@@ -956,7 +956,7 @@ fn live_kernel_exact_file_alias_existing_fd_update_and_orphan() {
             && resource.path == {} }};"#,
         serde_json::to_string(protected.to_str().unwrap()).unwrap()
     );
-    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":1},"text":text}})).unwrap();
+    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":3},"text":text}})).unwrap();
     let TranslationOutcome::Translated(plan) = translator.translate(&binding).unwrap() else {
         panic!("translate");
     };
@@ -1036,7 +1036,7 @@ fn live_kernel_tree_creation_exclusions_and_aliases() {
         when {{ [SecCore::WriteOperation::"write", SecCore::WriteOperation::"delete"].contains(context.input.operation)
             && ({selector}) }} unless {{ {exclusion} }};"#
     );
-    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":1},"text":text}})).unwrap();
+    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":3},"text":text}})).unwrap();
     let state = directory.path().join("state");
     let client = LuaLsmClient::new(Arc::new(asc_lua_lsm::NativeSecurityFs::default()), &state);
     let mut installed = Installed {
@@ -1564,7 +1564,7 @@ fn preexisting_descendant_mapping_and_exclusions_follow_policy_scope() {
         serde_json::to_string(root.join("*").to_str().unwrap()).unwrap(),
         serde_json::to_string(path.to_str().unwrap()).unwrap(),
     );
-    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":1},"text":text}})).unwrap();
+    binding.policy.template = serde_json::from_value(json!({"language":"cedar", "content":{"schema":{"schemaId":"seccore.system","revision":3},"text":text}})).unwrap();
     let excluded = prepared(&client, &state, &binding);
     assert_eq!(
         client.create(&excluded).error,

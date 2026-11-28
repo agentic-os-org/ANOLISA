@@ -38,7 +38,7 @@ pub(super) fn parse_and_validate(
 }
 
 // Bound recursive CST forms before SDK conversion, without counting flat binary operators.
-fn check_source_budget(text: &str) -> Result<(), CedarError> {
+pub(crate) fn check_source_budget(text: &str) -> Result<(), CedarError> {
     let reject = || {
         unsupported(
             "policy-set",

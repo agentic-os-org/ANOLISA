@@ -206,7 +206,7 @@ stage_sec_core_payload() {
     mkdir -p "$pkg_dir"/{skills,linux-sandbox,cosh-extension,openclaw-plugin,hermes-plugin,qwen-code-extension,qoder-plugin,tools}
 
     # skills: use cp -rp dir/. to include hidden files/directories
-    cp -rp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
+    cp -rLp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
     cp -rp "${SEC_DIR}/linux-sandbox/"* "$pkg_dir/linux-sandbox/"
     rm -f "$pkg_dir/linux-sandbox/rust-toolchain.toml"
     cp -rp "${SEC_DIR}/cosh-extension/"* "$pkg_dir/cosh-extension/"

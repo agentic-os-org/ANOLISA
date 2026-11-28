@@ -156,7 +156,7 @@ mod tests {
     use asc_pap::PapRepository;
     use asc_policy_repository_sqlite::SqlitePolicyRepository;
     use asc_policy_types::authoring::PolicySource;
-    use asc_policy_types::cedar::{CedarPolicySource, CedarSchemaReference};
+    use asc_policy_types::cedar::CedarPolicySource;
     use asc_policy_types::identifiers::{ResourceId, Revision};
     use asc_policy_types::policy::{CredentialBinding, PreparedPolicy};
     use asc_policy_types::scope::{PreparedScope, ProcessMatcher, ScopeSelector, ScopeStatus};
@@ -208,10 +208,7 @@ mod tests {
                 policy_name: "gateway policy".into(),
                 revision: Revision::new(1).unwrap(),
                 template: PolicySource::Cedar(CedarPolicySource {
-                    schema: CedarSchemaReference {
-                        schema_id: ResourceId::new("seccore.system").unwrap(),
-                        revision: Revision::new(if uses_credentials { 2 } else { 1 }).unwrap(),
-                    },
+                    schema: asc_policy_cedar::schema::embedded_reference(),
                     text: source.into(),
                 }),
                 credential_bindings: source

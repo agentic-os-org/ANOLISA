@@ -574,7 +574,7 @@ fn gateway_method_inventory_matches_dispatch_and_access() {
 fn cedar_policy_sources_round_trip_and_reject_mixed_or_duplicate_fields() {
     let input = json!({"policyName":"sandbox", "template":{
         "language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system", "revision":1},
+            "schema":{"schemaId":"seccore.system", "revision":3},
             "text":"permit(principal, action, resource);"
         }
     }});
@@ -587,7 +587,7 @@ fn cedar_policy_sources_round_trip_and_reject_mixed_or_duplicate_fields() {
     assert!(serde_json::from_value::<CreatePolicyParams>(injected).is_err());
     for raw in [
         r#"{"policyName":"p","template":{"specVersion":"0.1","specVersion":"0.1","rules":[]}}"#,
-        r#"{"policyName":"p","template":{"language":"cedar","language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":1},"text":"permit(principal,action,resource);"}}}"#,
+        r#"{"policyName":"p","template":{"language":"cedar","language":"cedar","content":{"schema":{"schemaId":"seccore.system","revision":3},"text":"permit(principal,action,resource);"}}}"#,
     ] {
         assert!(serde_json::from_str::<CreatePolicyParams>(raw).is_err());
     }
@@ -641,7 +641,7 @@ fn native_and_cedar_policies_round_trip_inside_typed_daemon_responses() {
     let mut policy = binding.policy;
     let cedar = serde_json::from_value(json!({
         "language":"cedar", "content":{
-            "schema":{"schemaId":"seccore.system", "revision":1},
+            "schema":{"schemaId":"seccore.system", "revision":3},
             "text":"permit(principal, action, resource);"
         }
     }))

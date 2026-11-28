@@ -1,13 +1,14 @@
 ---
 name: policy-authoring
-description: 把自然语言授权意图（允许、禁止、只允许某个范围）写成 agent-sec-core Scope/Binding 部署路径使用的 SecCore Cedar policy，不生成 sandbox 请求授权策略。Agent 按随本 Skill 分发的 schema、语法参考、示例和自检清单逐步完成：先问清歧义，再写规则，再自检，最后回译确认，全程不需要命令行工具。当用户要求"让 Agent 可以读写某个目录""禁止删除某个文件""只允许某个程序执行""把这段授权需求写成策略"时使用。只负责生成和自检策略，不代为批准、绑定或下发；查询已发生的安全事件用 security-observability，检查代码或 prompt 用 code-scanner、prompt-scanner。
+description: 把自然语言授权意图（允许、禁止、只允许某个范围）写成 agent-sec-core 的 SecCore Cedar policy，聚焦手工 Scope/Binding 文件规则。Agent 按随本 Skill 分发的 schema、语法参考、示例和自检清单逐步完成：先问清歧义，再写规则，再自检，最后回译确认，全程不需要命令行工具。当用户要求"让 Agent 可以读写某个目录""禁止删除某个文件""只允许某个程序执行""把这段授权需求写成策略"时使用。只负责生成和自检策略，不代为批准、绑定或下发；查询已发生的安全事件用 security-observability，检查代码或 prompt 用 code-scanner、prompt-scanner。
 ---
 
 # Policy Authoring（SecCore Cedar）
 
-本 Skill 的规则、示例和自检仅适用于 **Scope/Binding 部署路径**。生成的裸 principal
-策略即使成功保存到 PAP，也不参与 sandbox 的请求授权。若用户需要请求授权策略，说明此边界，
-引导至[请求授权指南](https://github.com/agentic-os-org/ANOLISA/blob/main/docs/user-guide/zh/agent-sec-core/sandbox.md#接入策略授权)，不要将本 Skill 的输出当作已生效的请求限制。
+本 Skill 的文件规则使用裸 `principal`，由用户创建 Scope，指定受保护进程。
+带有明确 `principal.agentType` 条件的文件规则可触发自动部署。需要这类规则时，参见[策略 CLI 指南](https://github.com/agentic-os-org/ANOLISA/blob/main/docs/user-guide/zh/agent-sec-core/policy-cli.md)。
+示例中的 `network.use` 由 Sandbox 对请求求值，其作用范围独立于手工 Scope。若用户仅要求约束所绑定进程，
+将网络要求列入 unresolved。需要 Sandbox 请求授权时，参见[请求授权指南](https://github.com/agentic-os-org/ANOLISA/blob/main/docs/user-guide/zh/agent-sec-core/sandbox.md#接入策略授权)。
 
 你的任务：把自然语言授权意图写成一份 agent-sec-core 能加载的 Cedar policy，并且**表达出用户真正
 想要的边界**。这是形式化任务：语法不是难点（`references/` 里有），难点是把含糊意图钉到固定
@@ -48,7 +49,7 @@ description: 把自然语言授权意图（允许、禁止、只允许某个范�
 
 以这些为准；不在这些里的动作、字段、写法一律当作不存在，不要凭记忆或别的 Cedar 教程补。
 
-- `references/seccore.cedarschema`：schema 唯一来源（schemaId `seccore.system`，revision `1`），
+- `references/seccore.cedarschema`：schema 唯一来源（schemaId `seccore.system`，revision `3`），
   动作、资源、字段的类型契约。
 - `references/cedar-policy-language.md`：可用语法、路径形态、能解析但会被拒的清单与下游提交格式。
 - `references/self-check.md`：生成后必过的自检清单和交付标注要求。

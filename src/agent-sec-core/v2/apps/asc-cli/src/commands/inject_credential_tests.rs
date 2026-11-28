@@ -155,10 +155,7 @@ fn root_directory() -> tempfile::TempDir {
 
 fn source() -> CedarPolicySource {
     CedarPolicySource {
-        schema: CedarSchemaReference {
-            schema_id: ResourceId::new(asc_policy_cedar::schema::SCHEMA_ID).unwrap(),
-            revision: Revision::new(asc_policy_cedar::schema::HTTP_SCHEMA_REVISION).unwrap(),
-        },
+        schema: asc_policy_cedar::schema::embedded_reference(),
         text: GITHUB.into(),
     }
 }

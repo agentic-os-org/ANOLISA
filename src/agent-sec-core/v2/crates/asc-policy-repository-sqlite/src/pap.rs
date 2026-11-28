@@ -24,9 +24,7 @@ use std::collections::BTreeSet;
 
 const AUTOMATIC_RECORD_LIMIT: usize = 4096;
 const AUTOMATIC_BYTE_LIMIT: usize = 16 * 1024 * 1024;
-const AUTOMATIC_SOURCE_FILTER: &str = "json_extract(current_json,'$.template.language')='cedar'
-    AND json_extract(current_json,'$.template.content.schema.schemaId')=?1
-    AND json_extract(current_json,'$.template.content.schema.revision')=?2";
+const AUTOMATIC_SOURCE_FILTER: &str = "json_extract(current_json,'$.template.language')='cedar'";
 
 impl PapRepository for SqlitePolicyRepository {
     fn put_policy(&self, policy: &PreparedPolicy) -> Result<PreparedPolicy, PapError> {
@@ -189,12 +187,25 @@ impl PapRepository for SqlitePolicyRepository {
                 return Err(PapError::Conflict.into());
             }
             for policy in &scope.policy_snapshots {
-                if read_policy(tx, &policy.policy_id)?
+                let original = read_policy(tx, &policy.policy_id)?
                     .and_then(|s| s.current)
-                    .as_ref()
-                    != Some(policy)
-                {
+                    .filter(|p| p.revision == policy.revision)
+                    .ok_or(PapError::ReferencedPolicyRevisionNotFound)?;
+                if asc_pap::manual_snapshot(original.clone())? != *policy {
                     return Err(PapError::ReferencedPolicyRevisionNotFound.into());
+                }
+                if original.template != policy.template {
+                    // A mixed manual assignment pins a projection. Keep its full
+                    // authored source even if the head is subsequently replaced.
+                    tx.execute(
+                        "INSERT INTO cedar_source_history(policy_id,revision,source_json)
+                        VALUES(?1,?2,json_extract(?3,'$.template')) ON CONFLICT DO NOTHING",
+                        params![
+                            original.policy_id.as_str(),
+                            original.revision.get(),
+                            encode(&original)?
+                        ],
+                    )?;
                 }
             }
             let count: usize = tx.query_row(
@@ -750,7 +761,7 @@ fn check_sources(
     Ok(())
 }
 
-// Measure the exact stored UTF-8 bytes. Replacing an existing v3 source with a
+// Measure the exact stored UTF-8 bytes. Replacing an existing Cedar source with a
 // smaller one must remain possible even if an older database is already over quota.
 fn check_automatic_capacity(
     tx: &rusqlite::Transaction<'_>,
@@ -759,11 +770,11 @@ fn check_automatic_capacity(
     let replacing = replacement.map(|(key, _)| key.as_str());
     let (count, bytes, old): (usize, usize, usize) = tx.query_row(
         &format!(
-            "SELECT count(*), coalesce(sum(size),0), coalesce(max(CASE WHEN policy_id=?3 THEN size END),0)
+            "SELECT count(*), coalesce(sum(size),0), coalesce(max(CASE WHEN policy_id=?1 THEN size END),0)
              FROM (SELECT policy_id, length(CAST(current_json AS BLOB)) AS size FROM policies
                    WHERE {AUTOMATIC_SOURCE_FILTER})"
         ),
-        params![asc_pap::SCHEMA_ID, asc_pap::PRINCIPAL_SCHEMA_REVISION, replacing],
+        params![replacing],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let (count, bytes) = match replacement {
@@ -782,17 +793,12 @@ fn automatic_sources(
 ) -> Result<Vec<(ResourceId, Revision)>, RepositoryError> {
     let mut stmt = tx.prepare(&format!(
         "SELECT policy_id,last_allocated_revision FROM policies WHERE {AUTOMATIC_SOURCE_FILTER}
-         ORDER BY policy_id LIMIT ?3"
+         ORDER BY policy_id LIMIT ?1"
     ))?;
     let mut sources = Vec::new();
-    for row in stmt.query_map(
-        params![
-            asc_pap::SCHEMA_ID,
-            asc_pap::PRINCIPAL_SCHEMA_REVISION,
-            AUTOMATIC_RECORD_LIMIT + 1
-        ],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
-    )? {
+    for row in stmt.query_map(params![AUTOMATIC_RECORD_LIMIT + 1], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+    })? {
         let (key, revision) = row?;
         sources.push((
             id(key)?,

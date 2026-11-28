@@ -311,7 +311,7 @@ class Harness:
         source = {
             "language": "cedar",
             "content": {
-                "schema": {"schemaId": "seccore.system", "revision": 1},
+                "schema": {"schemaId": "seccore.system", "revision": 3},
                 "text": text,
             },
         }

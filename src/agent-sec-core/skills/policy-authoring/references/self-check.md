@@ -2,8 +2,7 @@
 
 本 Skill 的校验路径：Agent 自己生成 Cedar，自己过这份清单，不调用任何命令。
 
-本清单仅检查 Scope/Binding 部署策略。以下裸 principal 规则不适用于 sandbox 请求授权；
-通过本清单或成功保存到 PAP 均不表示策略已参与请求授权，参见 [Skill 适用范围](../SKILL.md)。
+本清单覆盖手工 Scope 的文件规则。示例中的 `network.use` 由 Sandbox 处理，须单独确认用户期望的请求授权范围，参见 [Skill 适用范围](../SKILL.md)。
 
 清单覆盖语法、schema、写作约束与语义，属于必要条件检查，不是充分条件：全部通过也
 不证明实际校验通过或语义正确，语义靠回译确认。
@@ -25,8 +24,8 @@
 
 | 检查项 | 检查性质 |
 |---|---|
-| `principal` 裸写，不写 `principal == ...`、`principal is ...`、`principal in ...` | 支持范围检查 |
-| 条件里不引用变量 `principal` | 支持范围检查 |
+| `principal` 裸写，不写 `principal == ...`、`principal is ...`、`principal in ...` | 手工文件规则写作约束 |
+| 条件里不引用变量 `principal` | 手工文件规则写作约束 |
 | 不出现 `SecCore::File::"..."`、`SecCore::Subject::"..."` 这类实体 UID | Skill 写作约束 |
 | `file.read` / `file.write` / `file.exec` 的规则用 `resource is SecCore::File` | Skill 写作约束 |
 | `network.use` 的规则用 `resource == SecCore::Network::"all"` | Skill 写作约束 |

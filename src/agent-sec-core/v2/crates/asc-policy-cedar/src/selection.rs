@@ -14,7 +14,7 @@ use crate::{CedarError, deployment::StatementTarget};
 pub struct ValidatedPolicy {
     /// Original statement identities are stable inside this source revision.
     pub statements: Vec<StatementTarget>,
-    /// Legacy request-header eligibility is separate from deployment eligibility.
+    /// Request selection is independent of process deployment eligibility.
     pub request_eligible: Result<bool, String>,
 }
 
@@ -25,10 +25,11 @@ impl ValidatedPolicy {
     /// Returns Cedar source validation and syntax representation errors.
     pub fn parse(source: &CedarPolicySource) -> Result<Self, CedarError> {
         let (policies, _) = crate::validation::parse_and_validate(source)?;
+        let statements = crate::deployment::statements_from_policies(&policies)?;
         Ok(Self {
-            request_eligible: crate::request_policy_headers_for_schema(&policies, &source.schema)
+            request_eligible: crate::sandbox_policy_headers(&statements)
                 .map_err(|error| error.diagnostic()),
-            statements: crate::deployment::statements_from_policies(&policies)?,
+            statements,
         })
     }
 }

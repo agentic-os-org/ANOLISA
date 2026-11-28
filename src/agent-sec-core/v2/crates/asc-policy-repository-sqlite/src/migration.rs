@@ -9,7 +9,11 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 /// commit, set `user_version` or perform external I/O.
 type Migration = fn(&Transaction<'_>) -> Result<(), RepositoryError>;
 
-const MIGRATIONS: &[Migration] = &[initialize_v1, add_policy_generation];
+const MIGRATIONS: &[Migration] = &[
+    initialize_v1,
+    add_policy_generation,
+    crate::cedar_migration::upgrade,
+];
 
 /// Stages all missing steps. The caller commits after validating the resulting database.
 /// # Errors
@@ -89,7 +93,7 @@ mod tests {
             .execute("INSERT INTO policies VALUES ('kept',1,NULL)", [])
             .unwrap();
         apply_migrations(&mut connection, MIGRATIONS).unwrap();
-        assert_eq!(version(&connection), 2);
+        assert_eq!(version(&connection), 3);
         connection
             .execute("UPDATE policy_generation SET generation=7", [])
             .unwrap();
@@ -138,7 +142,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_and_nonempty_unversioned_databases_remain_untouched() {
-        for original_version in [-1, 0, 3] {
+        for original_version in [-1, 0, 4] {
             let mut connection = Connection::open_in_memory().unwrap();
             connection
                 .execute_batch(

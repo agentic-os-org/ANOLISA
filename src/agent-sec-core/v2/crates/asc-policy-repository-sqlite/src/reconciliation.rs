@@ -3,7 +3,7 @@ use crate::{
     RepositoryError, SqlitePolicyRepository,
     records::{decode, encode, finalize_scope, id, read_binding, read_scope, save_binding},
 };
-use asc_foundation_types::ResourceId;
+use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_repository::{
     BindingReconcileCatalog, BindingStateRepository, BindingStateSnapshot, BindingStateWrite,
     ReconcileCandidate, StoreError, WriteReceipt, WriteResult, apply_binding_write, write_digest,
@@ -13,6 +13,24 @@ use rusqlite::{OptionalExtension, params};
 impl BindingStateRepository for SqlitePolicyRepository {
     fn check_writable(&self) -> Result<(), StoreError> {
         self.check_storage().map_err(RepositoryError::store)
+    }
+    fn archived_cedar_source(
+        &self,
+        id: &ResourceId,
+        revision: Revision,
+    ) -> Result<Option<asc_policy_types::cedar::CedarPolicySource>, StoreError> {
+        self.access(false, |tx| {
+            let source: Option<String> = tx
+                .query_row(
+                    "SELECT json_extract(source_json,'$.content') FROM cedar_source_history
+                 WHERE policy_id=?1 AND revision=?2",
+                    params![id.as_str(), revision.get()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            source.as_deref().map(decode).transpose()
+        })
+        .map_err(RepositoryError::store)
     }
     fn get_binding_state(
         &self,

@@ -1,5 +1,6 @@
 //! Authoritative local Policy state with strict path selection and no automatic database repair.
 #![forbid(unsafe_code)]
+mod cedar_migration;
 mod migration;
 mod pap;
 mod path;

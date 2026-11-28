@@ -2,6 +2,8 @@
 
 [English](CEDAR_PEP_SELECTION.md) · [统一策略管理与自动下发总方案](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT_zh.md)
 
+下文的 v1/v2 准入和迁移规则描述选择接口最初接入时的设计。新建和迁移后的策略遵循[统一 revision 后的部署约定](CEDAR_PRINCIPAL_POLICY_DEPLOYMENT_zh.md#统一-revision-后的部署约定)。
+
 本文面向实现策略消费方的开发者。基线 `d41cede90` 支持 Cedar v3 自动下发；本分支增加三个 PEP 共用的 `select` 接口。PAP 保留策略原文，每个 PEP 决定消费哪些语句和分支，按策略集版本复用结果。[接口类型](../../v2/crates/asc-policy-cedar/src/selection.rs) · [公共缓存](../../v2/crates/asc-pap/src/selection.rs)
 
 ## 1. 一条规则怎样被消费
