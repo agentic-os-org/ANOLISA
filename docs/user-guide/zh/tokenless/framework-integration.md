@@ -605,7 +605,7 @@ Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调�
 时才运行 pip，所以离线主机可先用 `pip install` 把 wheel 装进 QwenPaw 的 Python 环境；同样的规则意味着已装过的旧版
 wheel 不会被 `plugin install` 升级。因此安装脚本会通过 `qwenpaw` 命令背后的解释器确认 `anolisa_tokenless`
 可导入且具备插件需要的 SDK 接口，没有 wheel 匹配当前平台（`requirements.txt` 列出 Linux x86_64、Linux aarch64
-和 macOS arm64）时安装失败。插件本身也会拒绝在旧版 wheel 上注册并在日志中给出所需的 release，而不是在第一次模型
+以及 macOS arm64 和 x86_64）时安装失败。插件本身也会拒绝在旧版 wheel 上注册并在日志中给出所需的 release，而不是在第一次模型
 调用时报错。插件需要 Tokenless 0.8.0 引入的恢复入口。请在 QwenPaw 的 Python 环境中安装与插件 Release 匹配的
 SDK Wheel；0.7.14 Wheel 不提供这些 API。工作目录与 QwenPaw 本身的解析一致：`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
 `~/.copaw`，否则 `~/.qwenpaw`。没有 `qwenpaw` 命令时安装脚本打印提示并以 0 退出，`make setup` 在未安装 QwenPaw
