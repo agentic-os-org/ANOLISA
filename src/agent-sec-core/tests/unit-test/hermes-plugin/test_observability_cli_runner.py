@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from hermes_plugin_src.cli_runner import (
     CliResult,
@@ -12,6 +12,7 @@ from hermes_plugin_src.cli_runner import (
     record_hermes_observability,
     trace_context,
 )
+from hermes_plugin_src.observability.record import build_record
 
 
 def _record() -> dict:
@@ -140,3 +141,131 @@ def test_trace_context_uses_first_non_empty_alias():
 
 def test_trace_context_returns_fixed_agent_name_when_all_fields_missing():
     assert trace_context({"foo": "bar"}) == {"agent_name": "hermes"}
+
+
+@patch("hermes_plugin_src.cli_runner.call_agent_sec_cli")
+def test_record_hermes_observability_deduplicates_identical_sensitive_fields(
+    mock_cli: MagicMock,
+) -> None:
+    record = build_record(
+        "pre_llm_call",
+        {
+            "session_id": "session-1",
+            "user_message": "alice@example.com",
+            "model": "gpt-test",
+            "platform": "hermes",
+        },
+        observed_at="2026-05-18T00:00:00Z",
+    )
+    assert record is not None
+
+    def fake_cli(args: list[str], **_kwargs: object) -> CliResult:
+        if args[0] == "scan-pii":
+            return CliResult(
+                stdout=json.dumps({"redacted_text": "a***@example.com"}),
+                stderr="",
+                exit_code=0,
+            )
+        return CliResult(stdout="", stderr="", exit_code=0)
+
+    mock_cli.side_effect = fake_cli
+
+    result = record_hermes_observability(record, timeout=5.0)
+
+    assert result.exit_code == 0
+    assert mock_cli.call_count == 2
+    assert mock_cli.call_args_list[0].args[0][0] == "scan-pii"
+    payload = json.loads(mock_cli.call_args_list[1].kwargs["stdin"])
+    assert payload["metrics"]["prompt"] == "a***@example.com"
+    assert payload["metrics"]["user_input"] == "a***@example.com"
+
+
+@patch("hermes_plugin_src.cli_runner.call_agent_sec_cli")
+def test_record_hermes_observability_skips_none_fields_and_preserves_them_on_failure(
+    mock_cli: MagicMock,
+) -> None:
+    post_tool_none = build_record(
+        "post_tool_call",
+        {
+            "session_id": "session-1",
+            "tool_call_id": "tool-1",
+            "tool_name": "terminal",
+            "args": {"command": "true"},
+            "result": None,
+        },
+        observed_at="2026-05-18T00:00:01Z",
+    )
+    assert post_tool_none is not None
+    mock_cli.return_value = CliResult(stdout="", stderr="", exit_code=0)
+
+    result = record_hermes_observability(post_tool_none, timeout=5.0)
+
+    assert result.exit_code == 0
+    assert mock_cli.call_count == 1
+    assert mock_cli.call_args.args[0] == [
+        "observability",
+        "record",
+        "--format",
+        "json",
+        "--stdin",
+    ]
+    payload = json.loads(mock_cli.call_args.kwargs["stdin"])
+    assert payload["metrics"]["result"] is None
+    assert payload["metrics"]["error"] is None
+
+    mock_cli.reset_mock()
+    mock_cli.side_effect = lambda args, **_kwargs: (
+        CliResult(stdout="", stderr="daemon unavailable", exit_code=1)
+        if args[0] == "scan-pii"
+        else CliResult(stdout="", stderr="", exit_code=0)
+    )
+    post_tool_with_output = build_record(
+        "post_tool_call",
+        {
+            "session_id": "session-1",
+            "tool_call_id": "tool-1",
+            "tool_name": "terminal",
+            "args": {"command": "echo hi"},
+            "result": {"stdout": "alice@example.com", "exit_code": 0},
+        },
+        observed_at="2026-05-18T00:00:02Z",
+    )
+    assert post_tool_with_output is not None
+
+    record_hermes_observability(post_tool_with_output, timeout=5.0)
+
+    assert mock_cli.call_count == 2
+    failed_payload = json.loads(mock_cli.call_args_list[1].kwargs["stdin"])
+    assert "result" not in failed_payload["metrics"]
+    assert "error" in failed_payload["metrics"]
+    assert failed_payload["metrics"]["error"] is None
+
+
+@patch("hermes_plugin_src.cli_runner.call_agent_sec_cli")
+def test_record_hermes_observability_caches_failed_scan_across_duplicate_fields(
+    mock_cli: MagicMock,
+) -> None:
+    record = build_record(
+        "pre_llm_call",
+        {
+            "session_id": "session-1",
+            "user_message": "alice@example.com",
+            "model": "gpt-test",
+        },
+        observed_at="2026-05-18T00:00:03Z",
+    )
+    assert record is not None
+    mock_cli.side_effect = lambda args, **_kwargs: (
+        CliResult(stdout="", stderr="timed out", exit_code=124)
+        if args[0] == "scan-pii"
+        else CliResult(stdout="", stderr="", exit_code=0)
+    )
+
+    result = record_hermes_observability(record, timeout=5.0)
+
+    assert result.exit_code == 0
+    assert mock_cli.call_count == 2
+    payload = json.loads(mock_cli.call_args_list[1].kwargs["stdin"])
+    assert "prompt" not in payload["metrics"]
+    assert "user_input" not in payload["metrics"]
+    assert payload["metrics"]["model_id"] == "gpt-test"
