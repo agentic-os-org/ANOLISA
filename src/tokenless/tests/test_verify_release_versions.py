@@ -192,6 +192,15 @@ class TestRequirementsReferenceContract(unittest.TestCase):
     def test_no_wheel_url_rejected(self):
         self.assert_rejects("0.9.0-rc.1", "some other content\n", "no wheel URL")
 
+    def test_release_tag_without_wheel_url_rejected(self):
+        """A correct release tag path is not a pin; the wheel URL is."""
+        self.assert_rejects(
+            "0.9.0-rc.1",
+            "anolisa-tokenless @ https://github.com/alibaba/anolisa/releases/"
+            "download/tokenless/v0.9.0-rc.1/\n",
+            "no wheel URL",
+        )
+
 
 class TestWheelVersionHelper(unittest.TestCase):
     """packaging/raw/wheel-version.py is what the Makefile rule asks."""
