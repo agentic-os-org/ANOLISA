@@ -78,5 +78,7 @@ mod loader;
 mod matcher;
 #[path = "tests/parser.rs"]
 mod parser;
+#[path = "tests/preview.rs"]
+mod preview;
 #[path = "tests/project.rs"]
 mod project;
