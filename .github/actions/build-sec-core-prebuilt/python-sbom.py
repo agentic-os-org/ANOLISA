@@ -3,9 +3,15 @@
 
 import importlib.metadata
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
+
+
+def canonicalize_pypi_name(value: str) -> str:
+    """Return the PEP 503 project name used in package URLs."""
+    return re.sub(r"[-_.]+", "-", value).lower()
 
 
 runtime = Path(sys.argv[1])
@@ -26,7 +32,9 @@ site_packages = runtime / "lib/python3.11/site-packages"
 packages = []
 for distribution in importlib.metadata.distributions(path=[str(site_packages)]):
     name = distribution.metadata["Name"]
-    reference = f"pkg:pypi/{name.lower().replace('_', '-')}@{distribution.version}"
+    reference = (
+        f"pkg:pypi/{canonicalize_pypi_name(name)}@{distribution.version}"
+    )
     component = {
         "type": "library",
         "name": name,
