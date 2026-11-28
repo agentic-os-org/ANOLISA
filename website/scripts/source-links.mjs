@@ -59,12 +59,17 @@ export function resolveMarkdownSourceLink(root, source, url) {
     ? path.resolve(pathname.startsWith('/') ? root : path.dirname(path.resolve(root, source)),
       decodeURIComponent(pathname.replace(/^\//, '')))
     : path.resolve(root, source);
+  const rootPath = path.resolve(root);
+  if (target !== rootPath && !target.startsWith(`${rootPath}${path.sep}`)) {
+    return {invalid: true, reason: 'outside repository'};
+  }
   return target.endsWith('.md') ? {target, fragment} : undefined;
 }
 
 export async function checkMarkdownSourceLink(root, source, url) {
   const resolved = resolveMarkdownSourceLink(root, source, url);
   if (!resolved) return undefined;
+  if (resolved.invalid) return `${source}: Markdown link leaves the repository root ${url}`;
   let markdown;
   try {
     markdown = await readFile(resolved.target, 'utf8');
