@@ -23,15 +23,6 @@ export interface MergedSession {
   subagent_count: number;
 }
 
-/** Last activity of a log-collected trajectory in epoch milliseconds. */
-function trajectoryLastActiveMs(t: TrajectorySummary): number | null {
-  if (t.end_time) {
-    const ms = Date.parse(t.end_time);
-    if (!Number.isNaN(ms)) return ms;
-  }
-  return t.collected_at_ns > 0 ? Math.floor(t.collected_at_ns / 1_000_000) : null;
-}
-
 /** Trailing 36-char UUID of a Codex rollout stem (`rollout-<ts>-<uuid>`). */
 const TRAILING_UUID_RE =
   /^rollout-.+-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
@@ -49,6 +40,7 @@ export function mergeSessions(
   const logRows = Array.isArray(logs) ? logs : [];
   const logSessionIds = new Set(logRows.map((row) => row.session_id));
   const byId = new Map<string, MergedSession>();
+  const lastPreviewMsById = new Map<string, number | null>();
 
   // Count subagents per parent session. A subagent's session_id follows the
   // composite form "<parent>:subagent:<child>"; tally by the parent prefix.
@@ -71,6 +63,8 @@ export function mergeSessions(
   }
 
   for (const s of ebpfRows) {
+    const lastSeenMs = s.last_seen_ns > 0 ? Math.floor(s.last_seen_ns / 1_000_000) : null;
+    lastPreviewMsById.set(s.session_id, s.last_user_query?.trim() ? lastSeenMs : null);
     byId.set(s.session_id, {
       session_id: s.session_id,
       sources: ['ebpf'],
@@ -82,7 +76,7 @@ export function mergeSessions(
       output_tokens: s.total_output_tokens,
       first_message: s.first_user_query ?? null,
       last_message: s.last_user_query ?? null,
-      last_active_ms: s.last_seen_ns > 0 ? Math.floor(s.last_seen_ns / 1_000_000) : null,
+      last_active_ms: lastSeenMs,
       subagent_count: subagentCount.get(s.session_id) ?? 0,
     });
   }
@@ -111,7 +105,9 @@ export function mergeSessions(
         continue;
       }
     }
-    const lastMs = trajectoryLastActiveMs(t);
+    const parsedEnd = Date.parse(t.end_time ?? '');
+    const endMs = Number.isFinite(parsedEnd) ? parsedEnd : null;
+    const lastMs = endMs ?? (t.collected_at_ns > 0 ? Math.floor(t.collected_at_ns / 1_000_000) : null);
     // Codex rollout trajectories keep the full file stem (`rollout-<ts>-<uuid>`)
     // as session_id while the eBPF side reports the bare trailing UUID; fall
     // back to it so a session captured by both paths is merged, not duplicated.
@@ -123,9 +119,16 @@ export function mergeSessions(
       existing.project = t.project || existing.project;
       existing.agent_name = existing.agent_name || t.agent_name;
       existing.model = existing.model || t.model_name;
-      // The log side carries the full trajectory — its previews win.
+      // The complete log remains the preferred source for the first prompt.
       existing.first_message = t.first_user_message ?? existing.first_message;
-      existing.last_message = t.last_user_message ?? existing.last_message;
+      // Collection time can be newer than the prompt it read. Compare actual
+      // source activity, and keep the chosen preview's time across ID aliases.
+      const previousPreviewMs = lastPreviewMsById.get(existing.session_id);
+      const hasNewerPreview = previousPreviewMs != null && endMs !== null && previousPreviewMs > endMs;
+      if (t.last_user_message != null && !hasNewerPreview) {
+        existing.last_message = t.last_user_message;
+        lastPreviewMsById.set(existing.session_id, t.last_user_message.trim() ? endMs : null);
+      }
       // A Codex parent's children are tallied under the collected rollout
       // stem while this row may have been initialized from the bare eBPF
       // UUID (count 0). Carry the collected parent's count over, taking the
@@ -139,6 +142,7 @@ export function mergeSessions(
         existing.last_active_ms = lastMs;
       }
     } else {
+      lastPreviewMsById.set(t.session_id, t.last_user_message?.trim() ? endMs : null);
       byId.set(t.session_id, {
         session_id: t.session_id,
         sources: ['log'],

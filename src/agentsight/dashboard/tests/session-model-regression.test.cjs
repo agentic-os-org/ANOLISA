@@ -40,6 +40,40 @@ test('Codex rollout UUID aliases retain the captured row identity', () => {
   assert.deepEqual(result[0].sources, ['ebpf', 'log']);
 });
 
+test('an older collected trajectory cannot replace a newer live prompt preview', () => {
+  const liveMs = Date.parse('2026-11-28T12:05:00Z');
+  const id = '00000000-0000-0000-0000-000000000117';
+  for (const logId of [id, `rollout-2026-11-28T12-00-00-${id}`]) {
+    const [row] = merge([captured(id, { last_seen_ns: liveMs * 1_000_000 })], [
+      logged(logId, { end_time: '2026-11-28T12:00:00Z', collected_at_ns: (liveMs + 60_000) * 1_000_000 }),
+    ]);
+    assert.equal(row.last_message, 'capture last', logId);
+    assert.equal(row.first_message, 'log first', logId);
+  }
+});
+
+test('the collected tail stays preferred when newer, tied, or actual activity is uncertain', () => {
+  const liveMs = Date.parse('2026-11-28T12:05:00Z');
+  const live = captured('session', { last_seen_ns: liveMs * 1_000_000 });
+  for (const end of ['2026-11-28T12:05:00Z', '2026-11-28T12:06:00Z', undefined, 'invalid']) {
+    const [row] = merge([live], [logged('session', { end_time: end })]);
+    assert.equal(row.last_message, 'log last', String(end));
+  }
+  const older = logged('session', { end_time: '2026-11-28T12:00:00Z' });
+  assert.equal(merge([{ ...live, last_seen_ns: 0 }], [older])[0].last_message, 'log last');
+  assert.equal(merge([{ ...live, last_user_query: ' ' }], [older])[0].last_message, 'log last');
+});
+
+test('an older alias cannot replace a newer collected preview after merging into the live row', () => {
+  const id = '00000000-0000-0000-0000-000000000118';
+  const live = captured(id, { last_seen_ns: Date.parse('2026-11-28T12:00:00Z') * 1_000_000 });
+  const newest = logged(id, { end_time: '2026-11-28T12:06:00Z', last_user_message: 'newer collected' });
+  const older = logged(`rollout-2026-11-28T12-01-00-${id}`, { end_time: '2026-11-28T12:01:00Z' });
+  for (const snapshots of [[newest, older], [older, newest]]) {
+    assert.equal(merge([live], snapshots)[0].last_message, 'newer collected');
+  }
+});
+
 test('Codex rollout alias carries subagent counts to the captured bare UUID', () => {
   const id = '00000000-0000-0000-0000-000000000002';
   const stem = `rollout-2026-10-01-${id}`;
