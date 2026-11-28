@@ -21,6 +21,8 @@
  * mapping are testable.
  */
 
+import path from "node:path";
+
 export type CorpusWindow = {
   /** The selected lines, joined with "\n". */
   content: string;
@@ -149,10 +151,32 @@ export const AGENT_MEMORY_CORPUS_READ_HINT =
  * `extraPaths` or inside a qmd collection root, neither of which a plugin can
  * see.
  */
-export function isHostBuiltinMemoryPath(storePath: string): boolean {
-  // The host normalises before testing: trim, drop leading "." and "/"
-  // characters, and accept "\" as a separator.
-  const normalized = storePath.trim().replace(/^[./]+/, "").replace(/\\/g, "/");
+const SYNTHETIC_POSIX_WORKSPACE = "/__openclaw_ws__";
+const SYNTHETIC_WIN32_WORKSPACE = "C:\\__openclaw_ws__";
+
+export function isHostBuiltinMemoryPath(
+  storePath: string,
+  pathMod: Pick<
+    typeof path,
+    "isAbsolute" | "relative" | "resolve" | "sep"
+  > = path,
+): boolean {
+  // Mirror readMemoryFile (memory-host-sdk `host/read-file.ts`): resolve
+  // against a workspace root with the runtime platform's `path`, convert "\"
+  // to "/" on `path.relative(...)`, reject workspace escapes and absolute
+  // paths, then run `isMemoryPath` (`replace(/^[./]+/, "")`).
+  const rawPath = storePath.trim();
+  if (!rawPath || pathMod.isAbsolute(rawPath)) return false;
+  const wsRoot =
+    pathMod.sep === "\\"
+      ? SYNTHETIC_WIN32_WORKSPACE
+      : SYNTHETIC_POSIX_WORKSPACE;
+  const absPath = pathMod.resolve(wsRoot, rawPath);
+  const relPath = pathMod.relative(wsRoot, absPath).replace(/\\/g, "/");
+  if (!relPath || relPath.startsWith("..") || pathMod.isAbsolute(relPath)) {
+    return false;
+  }
+  const normalized = relPath.replace(/^[./]+/, "");
   if (!normalized) return false;
   if (normalized === "MEMORY.md") return true;
   if (normalized.toLowerCase() === "dreams.md") return true;

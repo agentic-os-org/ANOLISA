@@ -22,6 +22,7 @@ import { readMemoryFile } from "openclaw/plugin-sdk/memory-core-host-engine-stor
 import {
   AGENT_MEMORY_CORPUS,
   fromCorpusReadHandle,
+  isHostBuiltinMemoryPath,
   sliceCorpusWindow,
   toCorpusReadHandle,
   toCorpusSearchResult,
@@ -32,6 +33,16 @@ const STORE = new Map<string, string>([
   ["MEMORY.md", "store one\nstore two"],
   ["dreams.md", "store dream one\nstore dream two"],
   ["memory/sample.md", "store mem one\nstore mem two"],
+  [".\\MEMORY.md", "store dot-backslash mem"],
+  [".\\dreams.md", "store dot-backslash dream"],
+  [".\\memory\\sample.md", "store dot-backslash sample"],
+  ["MEMORY.md/", "store trailing-slash mem"],
+  ["dreams.md/", "store trailing-slash dream"],
+  ["notes/../MEMORY.md", "store dotseg mem"],
+  ["notes/../dreams.md", "store dotseg dream"],
+  ["notes/../memory/sample.md", "store dotseg sample"],
+  ["memory\\..\\notes.md", "store backslash-dotseg note"],
+  ["memory/../notes.md", "store collapsed note"],
   ["notes/observed/sample.md", "note one\nnote two"],
   ["agent-memory/notes.md", "namespaced one\nnamespaced two"],
 ]);
@@ -179,21 +190,38 @@ describe("memory_get routing through the pinned host", () => {
 
   describe("the bare store path it replaces", () => {
     it("is answered by the workspace file when one exists", async () => {
-      const route = await hostMemoryGet({
-        workspaceDir: shadowingWorkspace,
-        relPath: "MEMORY.md",
-        store: STORE,
-      });
-      assert.deepEqual(route, {
-        via: "builtin",
-        text: "builtin one\nbuiltin two\n",
-      });
+      for (const relPath of ["MEMORY.md", "MEMORY.md/", "notes/../MEMORY.md"]) {
+        const route = await hostMemoryGet({
+          workspaceDir: shadowingWorkspace,
+          relPath,
+          store: STORE,
+        });
+        assert.deepEqual(
+          route,
+          {
+            via: "builtin",
+            text: "builtin one\nbuiltin two\n",
+          },
+          relPath,
+        );
+      }
     });
 
     it("is answered with empty text when no workspace file exists", async () => {
       // Neither answer throws, so neither ever reaches a supplement: this is
       // the dead end the handle exists to avoid.
-      for (const relPath of ["MEMORY.md", "memory/sample.md", "dreams.md"]) {
+      const bareShadowed = [
+        "MEMORY.md",
+        "memory/sample.md",
+        "dreams.md",
+        "dreams.md/",
+        ".\\MEMORY.md",
+        ".\\dreams.md",
+        ".\\memory\\sample.md",
+        "notes/../dreams.md",
+        ...(path.sep === "/" ? ["memory\\..\\notes.md"] : []),
+      ];
+      for (const relPath of bareShadowed) {
         const route = await hostMemoryGet({
           workspaceDir: bareWorkspace,
           relPath,
@@ -213,6 +241,52 @@ describe("memory_get routing through the pinned host", () => {
       });
       assert.equal(route.via, "supplement");
       assert.equal(route.text, "note one\nnote two");
+
+      const collapsed = await hostMemoryGet({
+        workspaceDir: shadowingWorkspace,
+        relPath: "memory/../notes.md",
+        store: STORE,
+      });
+      assert.equal(collapsed.via, "supplement");
+      assert.equal(collapsed.text, "store collapsed note");
+    });
+
+    it("agrees 100% with readMemoryFile across edge-case .md paths", async () => {
+      for (const relPath of [
+        "MEMORY.md",
+        "dreams.md",
+        "Dreams.md",
+        "memory/sample.md",
+        ".\\MEMORY.md",
+        ".\\dreams.md",
+        ".\\memory\\sample.md",
+        "MEMORY.md/",
+        "dreams.md/",
+        "memory/sample.md/",
+        "notes/../MEMORY.md",
+        "notes/../dreams.md",
+        "notes/../memory/sample.md",
+        "memory\\..\\notes.md",
+        "memory/../notes.md",
+        "/MEMORY.md",
+        "\\MEMORY.md",
+        "../MEMORY.md",
+        "a/../../MEMORY.md",
+        "..MEMORY.md",
+        "notes/observed/sample.md",
+        "memory",
+        "memory/",
+        "",
+      ]) {
+        let hostAnswers = false;
+        try {
+          await readMemoryFile({ workspaceDir: shadowingWorkspace, relPath });
+          hostAnswers = true;
+        } catch (err) {
+          assert.match(String(err), /path required/, relPath);
+        }
+        assert.equal(isHostBuiltinMemoryPath(relPath), hostAnswers, relPath);
+      }
     });
   });
 });
