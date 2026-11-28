@@ -79,7 +79,7 @@ def check_freshness(directory: Path) -> tuple[bool | None, str]:
     if len(md_files) < 13:
         return None, f"文档不完整（{len(md_files)}/13）"
     
-    now = datetime.now()
+    now = datetime.now().astimezone()
     threshold = now - timedelta(days=MAX_DAYS)
     
     newest_time = None
@@ -87,6 +87,8 @@ def check_freshness(directory: Path) -> tuple[bool | None, str]:
         crawl_time = get_crawl_time(md_file)
         if crawl_time is None:
             continue
+        # Interpret legacy naive timestamps locally and compare aware instants.
+        crawl_time = crawl_time.astimezone()
         if newest_time is None or crawl_time > newest_time:
             newest_time = crawl_time
     
