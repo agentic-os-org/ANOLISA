@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ws-ckpt end-to-end integration test
 #
-# Requires: root, btrfs-progs, rsync
+# Requires: root, btrfs-progs, jq, rsync, util-linux
 # Usage:    sudo bash tests/integration/e2e.sh
 #
 # Creates a temporary loop-btrfs filesystem, starts the daemon, exercises every
@@ -35,7 +35,20 @@ cleanup() {
     echo ""
     echo "=== Cleanup ==="
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null && wait "$DAEMON_PID" 2>/dev/null || true
-    umount "$MNT" 2>/dev/null || true
+    # BtrfsLoop can overmount the fixture when auto-detection skips loop devices.
+    # Unmount both layers before detaching the test-owned loop devices.
+    while mountpoint -q "$MNT"; do
+        if ! umount "$MNT"; then
+            echo "Could not unmount $MNT. Test files and any state backup remain for inspection." >&2
+            return 1
+        fi
+    done
+    if [ -f "$STATE_DIR/btrfs-data.img" ]; then
+        local daemon_loop
+        while IFS= read -r daemon_loop; do
+            losetup -d "$daemon_loop"
+        done < <(losetup --associated "$STATE_DIR/btrfs-data.img" --noheadings --output NAME)
+    fi
     [ -n "$LOOP_DEV" ] && losetup -d "$LOOP_DEV" 2>/dev/null || true
     # Clean test state from hardcoded state_dir
     rm -rf "$STATE_DIR"
@@ -130,15 +143,30 @@ fi
 # ── start daemon ──────────────────────────────────────────────────────────────
 
 echo "=== Starting daemon ==="
-"$BIN" daemon --mount-path "$MNT" --socket "$SOCKET" >"$TMPBASE/daemon.log" 2>&1 &
-DAEMON_PID=$!
-# Wait for socket
-for i in $(seq 1 30); do
-    [ -S "$SOCKET" ] && break
-    sleep 0.2
-done
-[ -S "$SOCKET" ] || { echo "FATAL: daemon socket not ready after 6s"; exit 1; }
-echo "Daemon started (PID $DAEMON_PID)"
+start_daemon() {
+    rm -f "$SOCKET"
+    "$BIN" daemon --mount-path "$MNT" --socket "$SOCKET" >"$TMPBASE/daemon.log" 2>&1 &
+    DAEMON_PID=$!
+    for _ in $(seq 1 30); do
+        if [ -S "$SOCKET" ]; then
+            echo "Daemon started (PID $DAEMON_PID)"
+            return
+        fi
+        kill -0 "$DAEMON_PID" 2>/dev/null || break
+        sleep 0.2
+    done
+    echo "FATAL: daemon socket not ready"
+    tail -50 "$TMPBASE/daemon.log"
+    exit 1
+}
+
+stop_daemon() {
+    kill "$DAEMON_PID"
+    wait "$DAEMON_PID"
+    DAEMON_PID=""
+}
+
+start_daemon
 
 # ── set WS_CKPT env for CLI ──────────────────────────────────────────────────
 
@@ -305,6 +333,76 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+
+# A damaged active index must stay isolated across a checkpoint and restart.
+echo ""
+echo "=== Workspace index recovery isolation ==="
+A="$TMPBASE/workspace-a"
+B="$TMPBASE/workspace-b"
+mkdir -p "$A" "$B"
+echo "A snapshot" >"$A/payload"
+echo "B snapshot" >"$B/payload"
+assert_ok "isolation: init A" "$BIN" init -w "$A"
+assert_ok "isolation: init B" "$BIN" init -w "$B"
+assert_ok "isolation: checkpoint A" "$BIN" checkpoint -w "$A" -i a-original
+assert_ok "isolation: checkpoint B" "$BIN" checkpoint -w "$B" -i b-original
+echo "A live" >"$A/payload"
+cp "$A/payload" "$TMPBASE/a-live"
+
+stop_daemon
+MANIFEST="$STATE_DIR/state.json"
+A_ID=$(jq -er --arg path "$A" '.workspaces[] | select(.workspace_path == $path) | .ws_id' "$MANIFEST")
+A_INDEX="$STATE_DIR/indexes/$A_ID/index.json"
+A_SNAPSHOT="$(jq -er '.paths.snapshots_root' "$MANIFEST")/$A_ID/a-original"
+cp "$A_SNAPSHOT/payload" "$TMPBASE/a-snapshot"
+cp "$A_INDEX" "$TMPBASE/a-index.valid"
+printf '%s' '{broken' >"$TMPBASE/a-index.broken"
+cp "$TMPBASE/a-index.broken" "$A_INDEX"
+jq -e --arg id "$A_ID" '.workspaces[] | select(.ws_id == $id)' "$MANIFEST" >"$TMPBASE/a-registration.json"
+
+start_daemon
+"$BIN" status -w "$A" --format json >"$TMPBASE/a-status.json"
+assert_ok "isolation: status explains A and leaves its snapshot count unknown" \
+    jq -e --arg id "$A_ID" --arg path "$A" \
+    '(.workspaces == []) and (.unavailable_workspaces | length == 1) and
+     (.unavailable_workspaces[0] | .ws_id == $id and .path == $path and
+         (.reason | contains("parse snapshot index")) and (has("snapshot_count") | not))' \
+    "$TMPBASE/a-status.json"
+assert_fail "isolation: checkpoint on A refused" "$BIN" checkpoint -w "$A" -i refused
+assert_fail "isolation: cleanup on A refused" "$BIN" cleanup -w "$A"
+assert_fail "isolation: recover on A refused" "$BIN" recover -w "$A" --force
+assert_fail "isolation: recover --all refused before touching B" "$BIN" recover --all --force
+assert_output_contains "isolation: scoped list shows B's original snapshot" "b-original" "$BIN" list -w "$B"
+assert_ok "isolation: checkpoint B while A is unavailable" "$BIN" checkpoint -w "$B" -i b-second
+jq -e --arg id "$A_ID" '.workspaces[] | select(.ws_id == $id)' "$MANIFEST" >"$TMPBASE/a-registration.saved.json"
+assert_ok "isolation: B's checkpoint preserved A's registration" cmp "$TMPBASE/a-registration.json" "$TMPBASE/a-registration.saved.json"
+
+stop_daemon
+start_daemon
+assert_output_contains "isolation: A remains registered and unavailable after restart" "unavailable" \
+    "$BIN" status -w "$A_ID"
+assert_output_contains "isolation: B's new checkpoint survived restart" "b-second" "$BIN" list -w "$B"
+assert_ok "isolation: damaged index bytes preserved" cmp "$TMPBASE/a-index.broken" "$A_INDEX"
+assert_ok "isolation: A's live data preserved" cmp "$TMPBASE/a-live" "$A/payload"
+assert_ok "isolation: A's original snapshot preserved" cmp "$TMPBASE/a-snapshot" "$A_SNAPSHOT/payload"
+
+stop_daemon
+cp "$TMPBASE/a-index.valid" "$A_INDEX"
+start_daemon
+assert_output_contains "isolation: A lists its original snapshot after index repair" "a-original" "$BIN" list -w "$A"
+assert_ok "isolation: A checkpoints after index repair" "$BIN" checkpoint -w "$A" -i a-restored
+
+stop_daemon
+printf '%s' '{broken manifest' >"$MANIFEST"
+exit_code=0
+timeout 15 "$BIN" daemon --mount-path "$MNT" --socket "$SOCKET" >"$TMPBASE/daemon.log" 2>&1 || exit_code=$?
+if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ] && grep -q 'refusing fresh backend detection' "$TMPBASE/daemon.log"; then
+    echo "  PASS  isolation: damaged global manifest fails startup"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  isolation: expected startup to reject damaged global manifest (exit $exit_code)"
+    FAIL=$((FAIL + 1))
+fi
 
 # ── summary ───────────────────────────────────────────────────────────────────
 

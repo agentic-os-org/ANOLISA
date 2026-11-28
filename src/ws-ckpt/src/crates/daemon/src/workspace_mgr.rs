@@ -10,7 +10,7 @@ use ws_ckpt_common::{
 };
 
 use crate::index_store;
-use crate::state::{normalize_registration_path, DaemonState};
+use crate::state::{normalize_registration_path, DaemonState, WorkspaceRegistration};
 
 // ── helpers ──
 
@@ -206,13 +206,17 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     // Init is globally serialized; use stable path identities if
     // concurrent initialization of unrelated workspaces becomes necessary.
     let init_guard = state.init_lock.lock().await;
-    if let Some(existing) = state.resolve_workspace(workspace).await {
-        if let Some(error) = state.detached_registration_error(&existing).await {
-            return Ok(error);
+    match state.lookup_workspace(workspace).await {
+        Some(WorkspaceRegistration::Ready(existing)) => {
+            if let Some(error) = state.detached_registration_error(&existing).await {
+                return Ok(error);
+            }
+            return Ok(Response::InitOk {
+                ws_id: existing.read().await.ws_id.clone(),
+            });
         }
-        return Ok(Response::InitOk {
-            ws_id: existing.read().await.ws_id.clone(),
-        });
+        Some(WorkspaceRegistration::Unavailable(entry)) => return Ok(entry.response()),
+        None => {}
     }
     if let Some(original) = orphan_workspace_path(workspace).await? {
         if state.registration_path_is_internal(&original)? || original == std::path::Path::new("/")
@@ -225,7 +229,11 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
         let original_str = original
             .to_str()
             .context("workspace path is not valid UTF-8")?;
-        if state.get_by_path(&original).is_none() {
+        let registered = state.registration_by_path(&original);
+        if let Some(WorkspaceRegistration::Unavailable(entry)) = &registered {
+            return Ok(entry.response());
+        }
+        if registered.is_none() {
             let candidates = orphan_storage_paths(state, original_str).await?;
             let subvol = candidates
                 .first()
@@ -321,16 +329,17 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
             _ => None,
         };
         if let Some(ws_id) = single {
-            if let Some(existing) = state.get_by_wsid(&ws_id) {
-                let ws = existing.read().await;
-                warn!(
-                    "init target {} resolves to managed subvolume {:?}; \
-                     treating as already initialized",
-                    workspace, abs_path
-                );
-                return Ok(Response::InitOk {
-                    ws_id: ws.ws_id.clone(),
-                });
+            match state.registration_by_id(&ws_id) {
+                Some(WorkspaceRegistration::Ready(_)) => {
+                    warn!(
+                        "init target {} resolves to managed subvolume {:?}; \
+                         treating as already initialized",
+                        workspace, abs_path
+                    );
+                    return Ok(Response::InitOk { ws_id });
+                }
+                Some(WorkspaceRegistration::Unavailable(entry)) => return Ok(entry.response()),
+                None => {}
             }
             // Orphan subvol — re-adopt if its snapshot bucket exists
             // (created at init, proving it was a real workspace).
@@ -416,7 +425,7 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     let _wsid_guard = loop {
         let guard = state.lock_wsid(&ws_id).await;
         let index_dir = state.index_dir(&ws_id);
-        let occupied = state.get_by_wsid(&ws_id).is_some()
+        let occupied = state.registration_by_id(&ws_id).is_some()
             || data_root.join(&ws_id).try_exists()?
             || state.backend.snapshots_root().join(&ws_id).try_exists()?
             || index_dir.try_exists()?
@@ -532,14 +541,9 @@ pub async fn delete_snapshot(
     force: bool,
 ) -> anyhow::Result<Response> {
     // 1. Resolve workspace (by ID, absolute path, or relative path)
-    let ws_lock = match state.resolve_workspace(workspace).await {
-        Some(ws) => ws,
-        None => {
-            return Ok(error_resp(
-                ErrorCode::WorkspaceNotFound,
-                format!("workspace not found: {}", workspace),
-            ));
-        }
+    let ws_lock = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
     let Some((_ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&ws_lock).await
     else {
@@ -684,12 +688,12 @@ async fn recover_workspace_inner(
 ) -> anyhow::Result<Response> {
     let _init_guard = state.init_lock.lock().await;
     // 1. resolve workspace (by ID, path, or relative)
-    let mut resolved = state.resolve_workspace(workspace).await;
+    let mut resolved = state.lookup_workspace(workspace).await;
     if resolved.is_none() {
         if let Some(original) = orphan_workspace_path(workspace).await? {
             // Parent aliases can hide a registered workspace from full-path
             // canonicalization, which follows the final managed symlink.
-            resolved = state.get_by_path(&original);
+            resolved = state.registration_by_path(&original);
             if resolved.is_none() {
                 let original_str = original
                     .to_str()
@@ -721,11 +725,15 @@ async fn recover_workspace_inner(
             }
         }
     }
-    let Some(ws_lock) = resolved else {
-        return Ok(error_resp(
-            ErrorCode::WorkspaceNotFound,
-            format!("workspace not found: {}", workspace),
-        ));
+    let ws_lock = match resolved {
+        Some(WorkspaceRegistration::Ready(arc)) => arc,
+        Some(WorkspaceRegistration::Unavailable(entry)) => return Ok(entry.response()),
+        None => {
+            return Ok(error_resp(
+                ErrorCode::WorkspaceNotFound,
+                format!("workspace not found: {}", workspace),
+            ));
+        }
     };
 
     // Block every mutation of this workspace through unregister, index removal,
@@ -861,11 +869,9 @@ pub async fn unregister_missing_workspace(
     workspace: &str,
 ) -> anyhow::Result<Response> {
     let _init_guard = state.init_lock.lock().await;
-    let Some(ws_lock) = state.resolve_workspace(workspace).await else {
-        return Ok(error_resp(
-            ErrorCode::WorkspaceNotFound,
-            format!("workspace not found: {}", workspace),
-        ));
+    let ws_lock = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
     let Some((ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&ws_lock).await
     else {
@@ -1724,7 +1730,7 @@ mod tests {
                 ),
                 "{response:?}"
             );
-            assert!(state.all_workspaces().is_empty());
+            assert!(state.ready_workspaces().is_empty());
             let response = init(&state, alias.to_str().unwrap()).await.unwrap();
             assert!(matches!(response, Response::InitOk { .. }), "{response:?}");
             let ws = state.get_by_wsid("ws-owned").unwrap();
@@ -1755,7 +1761,7 @@ mod tests {
                 ),
                 "{response:?}"
             );
-            assert!(state.all_workspaces().is_empty());
+            assert!(state.ready_workspaces().is_empty());
         }
     }
 

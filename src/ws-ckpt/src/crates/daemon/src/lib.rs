@@ -134,7 +134,7 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
 
     // 15. Flush all workspace index.json files
     info!("Flushing workspace indexes...");
-    let all_ws = state.all_workspaces();
+    let all_ws = state.ready_workspaces();
     for ws in &all_ws {
         let ws_guard = ws.read().await;
         let ws_dir = state.index_dir(&ws_guard.ws_id);

@@ -187,12 +187,11 @@ async fn resolve_fresh_with_backend(
             let sf = persist::load_state(state_dir)?;
             if let Some(ref state_file) = sf {
                 Arc::new(
-                    DaemonState::rebuild_from_persisted(
+                    DaemonState::rebuild_after_legacy_migration(
                         state_file,
                         config.clone(),
                         backend,
                         state_dir.to_path_buf(),
-                        "auto-detect",
                     )
                     .await
                     .context("Failed to rebuild daemon state after legacy migration")?,

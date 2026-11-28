@@ -15,8 +15,8 @@ use ws_ckpt_common::persist::{
 };
 use ws_ckpt_common::{
     load_workspace_policy, load_workspace_policy_with_failsafe, DaemonConfig, ErrorCode,
-    LoadPolicyOutcome, Response, SnapshotIndex, WorkspaceInfo, WorkspacePolicy, INDEXES_DIR,
-    INDEX_FILE,
+    LoadPolicyOutcome, Response, SnapshotIndex, UnavailableWorkspaceInfo, WorkspaceInfo,
+    WorkspacePolicy, INDEXES_DIR, INDEX_FILE,
 };
 
 use crate::fs_watcher::WorkspaceWatcher;
@@ -112,8 +112,83 @@ fn normalize_registration_parent(path: &Path) -> std::io::Result<PathBuf> {
 
 #[derive(Default)]
 struct WorkspaceRegistry {
-    workspaces: HashMap<String, Arc<RwLock<WorkspaceState>>>,
+    workspaces: HashMap<String, WorkspaceRegistration>,
     path_to_wsid: HashMap<PathBuf, String>,
+}
+
+/// Runtime state of a registered identity. Only ready registrations own an index.
+#[derive(Clone)]
+pub(crate) enum WorkspaceRegistration {
+    Ready(Arc<RwLock<WorkspaceState>>),
+    Unavailable(Arc<UnavailableWorkspace>),
+}
+
+impl WorkspaceRegistration {
+    fn ready(&self) -> Option<Arc<RwLock<WorkspaceState>>> {
+        match self {
+            Self::Ready(arc) => Some(arc.clone()),
+            Self::Unavailable(_) => None,
+        }
+    }
+}
+
+/// Keep the original record across manifest writes while the index is isolated.
+pub(crate) struct UnavailableWorkspace {
+    entry: WorkspaceEntry,
+    pub(crate) path: PathBuf,
+    reason: String,
+}
+
+impl UnavailableWorkspace {
+    pub(crate) fn info(&self) -> UnavailableWorkspaceInfo {
+        UnavailableWorkspaceInfo {
+            ws_id: self.entry.ws_id.clone(),
+            path: self.path.to_string_lossy().into_owned(),
+            reason: self.reason.clone(),
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        format!(
+            "workspace {:?} at {:?} is unavailable: {}",
+            self.entry.ws_id, self.path, self.reason
+        )
+    }
+
+    pub(crate) fn response(&self) -> Response {
+        Response::Error {
+            code: ErrorCode::IoError,
+            message: self.message(),
+        }
+    }
+}
+
+/// Failure to resolve a usable snapshot index for an ordinary request.
+pub(crate) enum WorkspaceLookupError {
+    NotRegistered,
+    Unavailable(Arc<UnavailableWorkspace>),
+}
+
+impl WorkspaceLookupError {
+    fn ready(
+        registration: Option<WorkspaceRegistration>,
+    ) -> Result<Arc<RwLock<WorkspaceState>>, Self> {
+        match registration {
+            Some(WorkspaceRegistration::Ready(arc)) => Ok(arc),
+            Some(WorkspaceRegistration::Unavailable(entry)) => Err(Self::Unavailable(entry)),
+            None => Err(Self::NotRegistered),
+        }
+    }
+
+    pub(crate) fn response(self, workspace: &str) -> Response {
+        match self {
+            Self::NotRegistered => Response::Error {
+                code: ErrorCode::WorkspaceNotFound,
+                message: format!("workspace not found: {workspace}"),
+            },
+            Self::Unavailable(entry) => entry.response(),
+        }
+    }
 }
 
 pub struct DaemonState {
@@ -360,7 +435,7 @@ impl DaemonState {
             remaining,
             crate::health_probe::scope(async {
                 let mut over_limit_workspace_count = 0_u32;
-                for workspace in self.all_workspaces() {
+                for workspace in self.ready_workspaces() {
                     let state = workspace.read().await;
                     if state.index.snapshots.len() as u32 > ws_ckpt_common::ADVISORY_SNAPSHOT_LIMIT
                     {
@@ -450,6 +525,36 @@ impl DaemonState {
         state_dir: PathBuf,
         selection_method: &str,
     ) -> anyhow::Result<Self> {
+        Self::rebuild_registrations(
+            state_file,
+            config,
+            backend,
+            state_dir,
+            selection_method,
+            true,
+        )
+        .await
+    }
+
+    /// Validate the indexes produced by the first-start legacy migration.
+    pub(crate) async fn rebuild_after_legacy_migration(
+        state_file: &DaemonStateFile,
+        config: DaemonConfig,
+        backend: Arc<dyn StorageBackend>,
+        state_dir: PathBuf,
+    ) -> anyhow::Result<Self> {
+        Self::rebuild_registrations(state_file, config, backend, state_dir, "auto-detect", false)
+            .await
+    }
+
+    async fn rebuild_registrations(
+        state_file: &DaemonStateFile,
+        config: DaemonConfig,
+        backend: Arc<dyn StorageBackend>,
+        state_dir: PathBuf,
+        selection_method: &str,
+        isolate_decode_errors: bool,
+    ) -> anyhow::Result<Self> {
         let mut state = Self::new(config, backend, state_dir);
         state.selection_method = selection_method.to_string();
 
@@ -470,9 +575,29 @@ impl DaemonState {
             let index = if let Some((index, _)) = &recovered {
                 index.clone()
             } else {
-                match tokio::fs::read_to_string(&index_path).await {
-                    Ok(content) => serde_json::from_str::<SnapshotIndex>(&content)
-                        .with_context(|| format!("parse snapshot index {index_path:?}"))?,
+                match tokio::fs::read(&index_path).await {
+                    Ok(bytes) => match Self::decode_active_index(&index_path, &bytes) {
+                        Ok(index) => index,
+                        Err(error) if !isolate_decode_errors => return Err(error),
+                        Err(error) => {
+                            let unavailable = UnavailableWorkspace {
+                                entry: entry.clone(),
+                                path: workspace_path.clone(),
+                                reason: format!("{error:#}"),
+                            };
+                            warn!("{}", unavailable.message());
+                            state
+                                .insert_registration(
+                                    ws_id.clone(),
+                                    workspace_path,
+                                    WorkspaceRegistration::Unavailable(Arc::new(unavailable)),
+                                )
+                                .with_context(|| {
+                                    format!("restore workspace registration {ws_id:?}")
+                                })?;
+                            continue;
+                        }
+                    },
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         SnapshotIndex::new(workspace_path.clone())
                     }
@@ -535,30 +660,33 @@ impl DaemonState {
         }
 
         // Reconcile both sides of a crash between backend mutation and index save.
-        for ws_id in state.workspace_ids() {
-            if let Some(ws_arc) = state.get_by_wsid(&ws_id) {
-                let mut ws = ws_arc.write().await;
-                let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
-                let mut changed =
-                    index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await?;
-                let live_path = state.backend.data_root().join(&ws_id);
-                tracing::warn_span!("reconcile_live_head", ws_id = %ws_id).in_scope(|| {
-                    match index_store::reconcile_live_head(&live_path, &snapshot_dir, &mut ws.index)
-                    {
-                        Ok(moved) => changed |= moved,
-                        Err(e) => warn!("Skipping index head check for {ws_id}: {e:#}"),
-                    }
-                });
-                if changed {
-                    ws.rebuild_snapshot_order();
-                    index_store::save(&state.index_dir(&ws_id), &ws.index)
-                        .await
-                        .with_context(|| format!("save reconciled index for {ws_id}"))?;
+        for ws_arc in state.ready_workspaces() {
+            let mut ws = ws_arc.write().await;
+            let ws_id = ws.ws_id.clone();
+            let snapshot_dir = state.backend.snapshots_root().join(&ws_id);
+            let mut changed = index_store::reconcile_from_fs(&snapshot_dir, &mut ws.index).await?;
+            let live_path = state.backend.data_root().join(&ws_id);
+            tracing::warn_span!("reconcile_live_head", ws_id = %ws_id).in_scope(|| {
+                match index_store::reconcile_live_head(&live_path, &snapshot_dir, &mut ws.index) {
+                    Ok(moved) => changed |= moved,
+                    Err(e) => warn!("Skipping index head check for {ws_id}: {e:#}"),
                 }
+            });
+            if changed {
+                ws.rebuild_snapshot_order();
+                index_store::save(&state.index_dir(&ws_id), &ws.index)
+                    .await
+                    .with_context(|| format!("save reconciled index for {ws_id}"))?;
             }
         }
 
         Ok(state)
+    }
+
+    fn decode_active_index(path: &Path, bytes: &[u8]) -> anyhow::Result<SnapshotIndex> {
+        let content = std::str::from_utf8(bytes)
+            .with_context(|| format!("decode snapshot index {path:?} as UTF-8"))?;
+        serde_json::from_str(content).with_context(|| format!("parse snapshot index {path:?}"))
     }
 
     // The manifest is the unregister commit point. An archive for a still-listed
@@ -670,23 +798,56 @@ impl DaemonState {
         registry
             .path_to_wsid
             .iter()
-            .map(|(path, ws_id)| WorkspaceEntry {
-                ws_id: ws_id.clone(),
-                workspace_path: path.clone(),
-                registered_at: Utc::now(),
-                origin_backend: self.backend.backend_type(),
+            .map(|(path, ws_id)| match registry.workspaces.get(ws_id) {
+                Some(WorkspaceRegistration::Unavailable(unavailable)) => unavailable.entry.clone(),
+                _ => WorkspaceEntry {
+                    ws_id: ws_id.clone(),
+                    workspace_path: path.clone(),
+                    registered_at: Utc::now(),
+                    origin_backend: self.backend.backend_type(),
+                },
             })
             .collect()
     }
 
-    fn workspace_ids(&self) -> Vec<String> {
+    /// Shared filesystem checks apply whenever a workspace is registered.
+    pub(crate) fn has_registrations(&self) -> bool {
+        !self
+            .registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .workspaces
+            .is_empty()
+    }
+
+    pub(crate) fn unavailable_workspaces(&self) -> Vec<UnavailableWorkspaceInfo> {
         self.registry
             .read()
             .unwrap_or_else(|err| err.into_inner())
             .workspaces
-            .keys()
-            .cloned()
+            .values()
+            .filter_map(|registration| match registration {
+                WorkspaceRegistration::Unavailable(workspace) => Some(workspace.info()),
+                WorkspaceRegistration::Ready(_) => None,
+            })
             .collect()
+    }
+
+    pub(crate) fn has_unavailable_workspaces(&self) -> bool {
+        self.registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .workspaces
+            .values()
+            .any(|entry| matches!(entry, WorkspaceRegistration::Unavailable(_)))
+    }
+
+    /// A global snapshot operation needs complete indexes to make a reliable decision.
+    pub(crate) fn incomplete_snapshot_scope_error(&self) -> Option<Response> {
+        self.has_unavailable_workspaces().then(|| Response::Error {
+                code: ErrorCode::IoError,
+                message: "global snapshot operations are unavailable while a workspace index is unavailable. Specify --workspace/-w for an available workspace".into(),
+            })
     }
 
     /// Idempotently call the backend's bootstrap hook (runs at most once).
@@ -708,6 +869,18 @@ impl DaemonState {
     }
 
     pub fn get_by_wsid(&self, ws_id: &str) -> Option<Arc<RwLock<WorkspaceState>>> {
+        self.registration_by_id(ws_id)
+            .and_then(|entry| entry.ready())
+    }
+
+    pub(crate) fn require_ready_by_id(
+        &self,
+        ws_id: &str,
+    ) -> Result<Arc<RwLock<WorkspaceState>>, WorkspaceLookupError> {
+        WorkspaceLookupError::ready(self.registration_by_id(ws_id))
+    }
+
+    pub(crate) fn registration_by_id(&self, ws_id: &str) -> Option<WorkspaceRegistration> {
         self.registry
             .read()
             .unwrap_or_else(|err| err.into_inner())
@@ -716,7 +889,13 @@ impl DaemonState {
             .cloned()
     }
 
+    #[cfg(test)]
     pub fn get_by_path(&self, path: &Path) -> Option<Arc<RwLock<WorkspaceState>>> {
+        self.registration_by_path(path)
+            .and_then(|entry| entry.ready())
+    }
+
+    pub(crate) fn registration_by_path(&self, path: &Path) -> Option<WorkspaceRegistration> {
         {
             let registry = self.registry.read().unwrap_or_else(|err| err.into_inner());
             if let Some(ws_id) = registry.path_to_wsid.get(path) {
@@ -751,7 +930,7 @@ impl DaemonState {
             .unwrap_or_else(|err| err.into_inner())
             .workspaces
             .get(ws_id)
-            .is_some_and(|entry| Arc::ptr_eq(entry, workspace))
+            .is_some_and(|entry| matches!(entry, WorkspaceRegistration::Ready(arc) if Arc::ptr_eq(arc, workspace)))
     }
 
     /// Confirms that both registration indexes still name the same workspace.
@@ -769,12 +948,12 @@ impl DaemonState {
             && registry
                 .workspaces
                 .get(ws_id)
-                .is_some_and(|entry| Arc::ptr_eq(entry, workspace))
+                .is_some_and(|entry| matches!(entry, WorkspaceRegistration::Ready(arc) if Arc::ptr_eq(arc, workspace)))
     }
 
     /// Resolve a workspace by identifier: tries workspace ID first, then filesystem path.
     /// Supports absolute paths, relative paths, and workspace IDs (e.g., "ws-6d5aaa").
-    pub async fn resolve_workspace(&self, workspace: &str) -> Option<Arc<RwLock<WorkspaceState>>> {
+    pub(crate) async fn lookup_workspace(&self, workspace: &str) -> Option<WorkspaceRegistration> {
         if workspace.trim().is_empty() {
             return None;
         }
@@ -788,17 +967,17 @@ impl DaemonState {
             }
         };
         // 1. Try as workspace ID
-        if let Some(arc) = self.get_by_wsid(workspace) {
+        if let Some(arc) = self.registration_by_id(workspace) {
             return Some(arc);
         }
         // Exact registrations must win even if a managed link was retargeted;
         // mutation callers must check its own detached-registration guard.
         let path = Path::new(workspace);
-        if let Some(arc) = self.get_by_path(path) {
+        if let Some(arc) = self.registration_by_path(path) {
             return Some(arc);
         }
         if let Ok(abs_path) = tokio::fs::canonicalize(workspace).await {
-            if let Some(arc) = self.get_by_path(&abs_path) {
+            if let Some(arc) = self.registration_by_path(&abs_path) {
                 return Some(arc);
             }
             // Aliases follow the final managed symlink to data_root/ws_id.
@@ -807,13 +986,25 @@ impl DaemonState {
                 if let Ok(rest) = abs_path.strip_prefix(data_root) {
                     if rest.components().count() == 1 {
                         if let Some(ws_id) = rest.to_str() {
-                            return self.get_by_wsid(ws_id);
+                            return self.registration_by_id(ws_id);
                         }
                     }
                 }
             }
         }
         None
+    }
+
+    pub(crate) async fn require_ready_workspace(
+        &self,
+        workspace: &str,
+    ) -> Result<Arc<RwLock<WorkspaceState>>, WorkspaceLookupError> {
+        WorkspaceLookupError::ready(self.lookup_workspace(workspace).await)
+    }
+
+    #[cfg(test)]
+    pub async fn resolve_workspace(&self, workspace: &str) -> Option<Arc<RwLock<WorkspaceState>>> {
+        self.require_ready_workspace(workspace).await.ok()
     }
 
     /// True iff `registration_path` still resolves to the workspace's live
@@ -938,9 +1129,6 @@ impl DaemonState {
         failsafe: bool,
     ) -> anyhow::Result<()> {
         let path = normalize_registration_path(&path)?;
-        if path == Path::new("/") || self.registration_path_is_internal(&path)? {
-            anyhow::bail!("workspace registration anchor {path:?} must be a user path outside backend storage");
-        }
         index.workspace_path = path.clone();
         let mut workspace = WorkspaceState {
             ws_id: ws_id.clone(),
@@ -952,7 +1140,22 @@ impl DaemonState {
             policy_io_mu: Arc::new(Mutex::new(())),
         };
         workspace.rebuild_snapshot_order();
-        let state = Arc::new(RwLock::new(workspace));
+        self.insert_registration(
+            ws_id,
+            path,
+            WorkspaceRegistration::Ready(Arc::new(RwLock::new(workspace))),
+        )
+    }
+
+    fn insert_registration(
+        &self,
+        ws_id: String,
+        path: PathBuf,
+        registration: WorkspaceRegistration,
+    ) -> anyhow::Result<()> {
+        if path == Path::new("/") || self.registration_path_is_internal(&path)? {
+            anyhow::bail!("workspace registration anchor {path:?} must be a user path outside backend storage");
+        }
         {
             let mut registry = self.registry.write().unwrap_or_else(|err| err.into_inner());
             if registry.workspaces.contains_key(&ws_id) {
@@ -961,7 +1164,7 @@ impl DaemonState {
             if let Some(existing) = registry.path_to_wsid.get(&path) {
                 anyhow::bail!("workspace path {path:?} is already registered as {existing:?}");
             }
-            registry.workspaces.insert(ws_id.clone(), state);
+            registry.workspaces.insert(ws_id.clone(), registration);
             registry.path_to_wsid.insert(path, ws_id);
         }
         self.config_notify.notify_waiters();
@@ -995,17 +1198,15 @@ impl DaemonState {
         const RELOAD_CONCURRENCY: usize = 32;
         let sem = Arc::new(Semaphore::new(RELOAD_CONCURRENCY));
 
-        let ws_ids = self.workspace_ids();
+        let indexes_dir = self.state_dir.join(INDEXES_DIR);
         let mut set = tokio::task::JoinSet::new();
-        for ws_id in ws_ids {
-            let arc = match self.get_by_wsid(&ws_id) {
-                Some(a) => a,
-                None => continue, // unregistered between snapshot and now
-            };
-            let dir = self.index_dir(&ws_id);
+        for arc in self.ready_workspaces() {
+            let indexes_dir = indexes_dir.clone();
             let sem = Arc::clone(&sem);
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore not closed");
+                let ws_id = arc.read().await.ws_id.clone();
+                let dir = indexes_dir.join(&ws_id);
                 Self::reload_one_workspace_policy_inner(&ws_id, dir, &arc).await;
             });
         }
@@ -1081,7 +1282,7 @@ impl DaemonState {
     /// cleanup wins over a globally-off default.
     pub async fn any_ws_has_effective_cleanup(&self) -> bool {
         let cfg_snapshot = self.config_snapshot();
-        for arc in self.all_workspaces() {
+        for arc in self.ready_workspaces() {
             let ws = arc.read().await;
             if !ws.policy.effective_for(&cfg_snapshot).is_disabled() {
                 return true;
@@ -1510,13 +1711,14 @@ impl DaemonState {
         Ok(())
     }
 
-    pub fn all_workspaces(&self) -> Vec<Arc<RwLock<WorkspaceState>>> {
+    /// Enumerate only registrations with a usable index.
+    pub(crate) fn ready_workspaces(&self) -> Vec<Arc<RwLock<WorkspaceState>>> {
         self.registry
             .read()
             .unwrap_or_else(|err| err.into_inner())
             .workspaces
             .values()
-            .cloned()
+            .filter_map(WorkspaceRegistration::ready)
             .collect()
     }
 
@@ -1525,7 +1727,7 @@ impl DaemonState {
     pub async fn resolve_snapshot_globally(&self, snapshot_ref: &str) -> Option<(String, String)> {
         let mut found: Vec<(String, String)> = Vec::new();
 
-        for workspace in self.all_workspaces() {
+        for workspace in self.ready_workspaces() {
             let ws = workspace.read().await;
             if ws.index.snapshots.contains_key(snapshot_ref) {
                 let ws_path = ws.path.to_string_lossy().to_string();
@@ -1540,12 +1742,12 @@ impl DaemonState {
         }
     }
 
-    /// Collect summary information about all registered workspaces. Awaits the
+    /// Collect summary information about ready workspaces. Awaits the
     /// read lock so the result reflects real path/snapshot_count even when a
     /// ws is held under a write lock.
     pub async fn get_all_workspace_info(&self) -> Vec<WorkspaceInfo> {
         let mut out = Vec::new();
-        for arc in self.all_workspaces() {
+        for arc in self.ready_workspaces() {
             let state = arc.read().await;
             out.push(WorkspaceInfo {
                 ws_id: state.ws_id.clone(),
@@ -1654,7 +1856,7 @@ mod tests {
     #[test]
     fn new_state_has_empty_workspaces() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
-        assert!(state.all_workspaces().is_empty());
+        assert!(state.ready_workspaces().is_empty());
     }
 
     #[tokio::test]
@@ -1897,15 +2099,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_preserves_invalid_indexes_instead_of_adopting_protected_snapshots() {
+    async fn restart_isolates_invalid_active_indexes_and_preserves_registration() {
         let temp = tempfile::tempdir().unwrap();
         let state = unregister_restart_fixture(temp.path()).await;
+        let live = state.backend.data_root().join("ws-restart");
+        std::fs::create_dir_all(&live).unwrap();
+        let registered_path = temp.path().join("missing-workspace");
+        std::os::unix::fs::symlink(&live, &registered_path).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&registered_path, &alias).unwrap();
         let manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
         let path = state.index_dir("ws-restart").join(INDEX_FILE);
-        // Invalid JSON and an unreadable index must both stop reconciliation.
-        for contents in [b"{broken".as_slice(), b"\xff".as_slice()] {
+
+        for (contents, reason) in [
+            (b"{broken".as_slice(), "parse snapshot index"),
+            (b"\xff".as_slice(), "as UTF-8"),
+        ] {
             std::fs::write(&path, contents).unwrap();
-            assert!(DaemonState::rebuild_from_persisted(
+            let migrated = DaemonState::rebuild_after_legacy_migration(
+                &manifest,
+                test_config(),
+                state.backend.clone(),
+                state.state_dir.clone(),
+            )
+            .await;
+            assert!(migrated
+                .err()
+                .is_some_and(|error| error.to_string().contains(reason)));
+            let rebuilt = DaemonState::rebuild_from_persisted(
                 &manifest,
                 test_config(),
                 state.backend.clone(),
@@ -1913,7 +2134,28 @@ mod tests {
                 "persisted",
             )
             .await
-            .is_err());
+            .unwrap();
+            assert!(rebuilt.has_registrations());
+            assert!(rebuilt.ready_workspaces().is_empty());
+            assert!(!rebuilt.has_watcher("ws-restart"));
+
+            for workspace in [
+                "ws-restart",
+                registered_path.to_str().unwrap(),
+                alias.to_str().unwrap(),
+            ] {
+                assert!(matches!(rebuilt.lookup_workspace(workspace).await,
+                    Some(WorkspaceRegistration::Unavailable(entry))
+                        if entry.entry.ws_id == "ws-restart"
+                        && entry.path == registered_path
+                        && entry.reason.contains(reason)));
+            }
+            rebuilt.save_manifest().await.unwrap();
+            let saved = persist::load_state(&state.state_dir).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(&saved.workspaces).unwrap(),
+                serde_json::to_value(&manifest.workspaces).unwrap(),
+            );
             assert_eq!(std::fs::read(&path).unwrap(), contents);
             assert!(state
                 .backend
@@ -1921,6 +2163,28 @@ mod tests {
                 .join("ws-restart/retained-snapshot")
                 .exists());
         }
+    }
+
+    #[tokio::test]
+    async fn restart_still_fails_on_active_index_io_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = unregister_restart_fixture(temp.path()).await;
+        let manifest = persist::load_state(&state.state_dir).unwrap().unwrap();
+        let path = state.index_dir("ws-restart").join(INDEX_FILE);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let error = DaemonState::rebuild_from_persisted(
+            &manifest,
+            test_config(),
+            state.backend.clone(),
+            state.state_dir.clone(),
+            "persisted",
+        )
+        .await
+        .err()
+        .expect("reading a directory as an index must fail startup");
+        assert!(error.to_string().contains("read snapshot index"));
+        assert!(path.is_dir());
     }
 
     #[tokio::test]
@@ -1981,7 +2245,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(rebuilt.all_workspaces().is_empty());
+        assert!(rebuilt.ready_workspaces().is_empty());
         assert!(!active.exists());
         assert!(archive.join(INDEX_FILE).exists());
         assert!(archive.join("policy.toml").exists());
@@ -2175,7 +2439,7 @@ mod tests {
                 SnapshotIndex::new(PathBuf::from("/b")),
             )
             .unwrap();
-        assert_eq!(state.all_workspaces().len(), 2);
+        assert_eq!(state.ready_workspaces().len(), 2);
     }
 
     #[tokio::test]
@@ -2857,7 +3121,7 @@ mod tests {
         );
         let entries = state.collect_workspace_entries();
         assert_eq!(entries.len(), 1);
-        assert_eq!(state.all_workspaces().len(), 1);
+        assert_eq!(state.ready_workspaces().len(), 1);
         assert!(Arc::ptr_eq(
             &state.get_by_path(&path).unwrap(),
             &state.get_by_wsid(&entries[0].ws_id).unwrap()

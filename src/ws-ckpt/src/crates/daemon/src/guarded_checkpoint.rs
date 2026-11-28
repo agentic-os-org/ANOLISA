@@ -13,7 +13,8 @@ use ws_ckpt_common::{
     GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2, LIVE_CHILD,
 };
 
-use crate::state::DaemonState;
+use crate::state::{DaemonState, WorkspaceLookupError, WorkspaceState};
+use tokio::sync::RwLock;
 
 pub(crate) async fn workspace_identity(
     state: &Arc<DaemonState>,
@@ -39,8 +40,22 @@ pub(crate) async fn workspace_identity(
         );
     }
     let _wsid_guard = state.lock_wsid(&candidate).await;
-    let Some(workspace) = state.get_by_wsid(&candidate) else {
-        return workspace_not_found(registration_path);
+    let workspace = match state.require_ready_by_id(&candidate) {
+        Ok(arc) => arc,
+        Err(WorkspaceLookupError::Unavailable(entry)) => {
+            if entry.path.to_str() != Some(registration_path)
+                || state.wsid_for_exact_registration_path(path).as_deref()
+                    != Some(candidate.as_str())
+                || !state.registration_is_live(&candidate, path).await
+            {
+                return workspace_not_found(registration_path);
+            }
+            return rejected(
+                GuardedCheckpointRejectionCodeV2::DaemonNotReady,
+                entry.message(),
+            );
+        }
+        Err(error) => return checkpoint_lookup_error(error, registration_path),
     };
     if !state.exact_registration_is_current(path, &candidate, &workspace) {
         return workspace_not_found(registration_path);
@@ -121,18 +136,21 @@ pub(crate) async fn checkpoint(
     };
 
     let _wsid_guard = state.lock_wsid(ws_id).await;
-    let Some(workspace) = state.get_by_wsid(ws_id) else {
-        return workspace_not_found(ws_id);
+    let workspace = match state.require_ready_by_id(ws_id) {
+        Ok(arc) => arc,
+        Err(WorkspaceLookupError::Unavailable(entry))
+            if !state.registration_is_live(ws_id, &entry.path).await =>
+        {
+            return checkpoint_registration_mismatch();
+        }
+        Err(error) => return checkpoint_lookup_error(error, ws_id),
     };
     let mut workspace = workspace.write().await;
     if workspace.ws_id != ws_id {
         return workspace_not_found(ws_id);
     }
     if !state.registration_is_live(ws_id, &workspace.path).await {
-        return rejected(
-            GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath,
-            "registered workspace path no longer resolves to the live subvolume",
-        );
+        return checkpoint_registration_mismatch();
     }
 
     let generation = match state.backend.live_generation(ws_id).await {
@@ -305,8 +323,9 @@ pub(crate) async fn checkpoint_evidence(
     }
 
     let _wsid_guard = state.lock_wsid(ws_id).await;
-    let Some(workspace) = state.get_by_wsid(ws_id) else {
-        return workspace_not_found(ws_id);
+    let workspace = match state.require_ready_by_id(ws_id) {
+        Ok(arc) => arc,
+        Err(error) => return checkpoint_lookup_error(error, ws_id),
     };
     let workspace = workspace.read().await;
     let Some(evidence) = workspace.index.governed_evidence.get(checkpoint_id) else {
@@ -356,8 +375,10 @@ pub(crate) async fn rollback_preview(
     }
 
     let _wsid_guard = state.lock_wsid(ws_id).await;
-    let Some(workspace_arc) = state.get_by_wsid(ws_id) else {
-        return rollback_workspace_not_found(ws_id);
+    let workspace_arc = match require_rollback_workspace(state, ws_id, Some(registered_path)).await
+    {
+        Ok(arc) => arc,
+        Err(response) => return *response,
     };
     let workspace = workspace_arc.read().await;
     if let Err(response) = validate_rollback_workspace(
@@ -433,8 +454,10 @@ pub(crate) async fn rollback(
     }
 
     let _wsid_guard = state.lock_wsid(ws_id).await;
-    let Some(workspace_arc) = state.get_by_wsid(ws_id) else {
-        return rollback_workspace_not_found(ws_id);
+    let workspace_arc = match require_rollback_workspace(state, ws_id, Some(registered_path)).await
+    {
+        Ok(arc) => arc,
+        Err(response) => return *response,
     };
     let mut workspace = workspace_arc.write().await;
 
@@ -696,8 +719,9 @@ pub(crate) async fn rollback_evidence(
         return rollback_rejected(GuardedRollbackRejectionCodeV2::InvalidOperationId, message);
     }
     let _wsid_guard = state.lock_wsid(ws_id).await;
-    let Some(workspace) = state.get_by_wsid(ws_id) else {
-        return rollback_workspace_not_found(ws_id);
+    let workspace = match require_rollback_workspace(state, ws_id, None).await {
+        Ok(arc) => arc,
+        Err(response) => return *response,
     };
     let workspace = workspace.read().await;
     let Some(evidence) = workspace.index.guarded_rollbacks.get(operation_id) else {
@@ -767,6 +791,38 @@ fn validate_rollback_request(
     Ok(())
 }
 
+// The caller holds the workspace ID lock. Ready rollback operations validate
+// identity and replay evidence at their existing points in the request flow.
+async fn require_rollback_workspace(
+    state: &DaemonState,
+    ws_id: &str,
+    registered_path: Option<&str>,
+) -> Result<Arc<RwLock<WorkspaceState>>, Box<Response>> {
+    match state.require_ready_by_id(ws_id) {
+        Ok(workspace) => Ok(workspace),
+        Err(WorkspaceLookupError::NotRegistered) => {
+            Err(Box::new(rollback_workspace_not_found(ws_id)))
+        }
+        Err(WorkspaceLookupError::Unavailable(entry)) => {
+            if let Some(path) = registered_path {
+                if entry.path.to_str() != Some(path)
+                    || state
+                        .wsid_for_exact_registration_path(Path::new(path))
+                        .as_deref()
+                        != Some(ws_id)
+                    || !state.registration_is_live(ws_id, &entry.path).await
+                {
+                    return Err(Box::new(rollback_registration_mismatch()));
+                }
+            }
+            Err(Box::new(rollback_rejected(
+                GuardedRollbackRejectionCodeV2::DaemonNotReady,
+                entry.message(),
+            )))
+        }
+    }
+}
+
 async fn validate_rollback_workspace(
     state: &DaemonState,
     workspace_arc: &Arc<tokio::sync::RwLock<crate::state::WorkspaceState>>,
@@ -780,10 +836,7 @@ async fn validate_rollback_workspace(
         || !state.exact_registration_is_current(Path::new(registered_path), ws_id, workspace_arc)
         || !state.registration_is_live(ws_id, &workspace.path).await
     {
-        return Err(Box::new(rollback_rejected(
-            GuardedRollbackRejectionCodeV2::InvalidRegistrationPath,
-            "registered workspace path no longer identifies the requested live workspace",
-        )));
+        return Err(Box::new(rollback_registration_mismatch()));
     }
     match workspace.index.snapshots.get(target_snapshot_id) {
         Some(snapshot) if !snapshot.missing => Ok(()),
@@ -956,6 +1009,13 @@ fn rollback_cwd_rejection(response: Response) -> Response {
     }
 }
 
+fn rollback_registration_mismatch() -> Response {
+    rollback_rejected(
+        GuardedRollbackRejectionCodeV2::InvalidRegistrationPath,
+        "registered workspace path no longer identifies the requested live workspace",
+    )
+}
+
 fn rollback_workspace_not_found(workspace: &str) -> Response {
     rollback_rejected(
         GuardedRollbackRejectionCodeV2::WorkspaceNotFound,
@@ -1085,6 +1145,23 @@ fn evidence_is_visible(
         GuardedCheckpointOutcomeV2::Created { .. } => false,
         GuardedCheckpointOutcomeV2::Skipped { .. } => true,
     }
+}
+
+fn checkpoint_lookup_error(error: WorkspaceLookupError, workspace: &str) -> Response {
+    match error {
+        WorkspaceLookupError::NotRegistered => workspace_not_found(workspace),
+        WorkspaceLookupError::Unavailable(entry) => rejected(
+            GuardedCheckpointRejectionCodeV2::DaemonNotReady,
+            entry.message(),
+        ),
+    }
+}
+
+fn checkpoint_registration_mismatch() -> Response {
+    rejected(
+        GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath,
+        "registered workspace path no longer resolves to the live subvolume",
+    )
 }
 
 fn workspace_not_found(workspace: &str) -> Response {

@@ -218,9 +218,9 @@ pub async fn checkpoint(
     pin: bool,
 ) -> anyhow::Result<Response> {
     // 1. Resolve workspace (by ID, absolute path, or relative path)
-    let arc = match state.resolve_workspace(workspace).await {
-        Some(a) => a,
-        None => return Ok(workspace_not_found(workspace)),
+    let arc = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
     let Some((_ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await
     else {
@@ -354,9 +354,9 @@ pub async fn rollback(
     num_ancestors: Option<u32>,
 ) -> anyhow::Result<Response> {
     // 1. Resolve workspace
-    let arc = match state.resolve_workspace(workspace).await {
-        Some(a) => a,
-        None => return Ok(workspace_not_found(workspace)),
+    let arc = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
     let Some((_ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await
     else {
@@ -434,9 +434,9 @@ pub async fn rollback_preview(
     to: Option<&str>,
     num_ancestors: Option<u32>,
 ) -> anyhow::Result<Response> {
-    let arc = match state.resolve_workspace(workspace).await {
-        Some(a) => a,
-        None => return Ok(workspace_not_found(workspace)),
+    let arc = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
     let Some((_ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await
     else {
@@ -533,9 +533,9 @@ pub async fn list_snapshots(
     workspace: &str,
     orphans_only: bool,
 ) -> anyhow::Result<Response> {
-    let arc = match state.resolve_workspace(workspace).await {
-        Some(a) => a,
-        None => return Ok(workspace_not_found(workspace)),
+    let arc = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
 
     // Detached-registration guard: the listed snapshots belong to a subvolume
@@ -576,7 +576,10 @@ pub async fn list_all_snapshots(
     state: &Arc<DaemonState>,
     orphans_only: bool,
 ) -> anyhow::Result<Response> {
-    let all_ws = state.all_workspaces();
+    if let Some(error) = state.incomplete_snapshot_scope_error() {
+        return Ok(error);
+    }
+    let all_ws = state.ready_workspaces();
     let mut all_entries: Vec<SnapshotEntry> = Vec::new();
 
     for arc in all_ws {
@@ -687,15 +690,19 @@ pub async fn list_snapshot_page(
     orphans_only: bool,
 ) -> anyhow::Result<Response> {
     let arcs = if let Some(workspace) = workspace {
-        let Some(arc) = state.resolve_workspace(workspace).await else {
-            return Ok(workspace_not_found(workspace));
+        let arc = match state.require_ready_workspace(workspace).await {
+            Ok(arc) => arc,
+            Err(error) => return Ok(error.response(workspace)),
         };
         if let Some(resp) = state.detached_registration_error(&arc).await {
             return Ok(resp);
         }
         vec![arc]
     } else {
-        state.all_workspaces()
+        if let Some(error) = state.incomplete_snapshot_scope_error() {
+            return Ok(error);
+        }
+        state.ready_workspaces()
     };
 
     let scope = if workspace.is_some() {
@@ -879,9 +886,9 @@ pub async fn diff_snapshots(
     from: &str,
     to: Option<&str>,
 ) -> anyhow::Result<Response> {
-    let arc = match state.resolve_workspace(workspace).await {
-        Some(a) => a,
-        None => return Ok(workspace_not_found(workspace)),
+    let arc = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
     let Some((_ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await
     else {
@@ -979,9 +986,9 @@ pub async fn cleanup_snapshots(
 ) -> anyhow::Result<Response> {
     let keep = keep.unwrap_or(20) as usize;
 
-    let arc = match state.resolve_workspace(workspace).await {
-        Some(a) => a,
-        None => return Ok(workspace_not_found(workspace)),
+    let arc = match state.require_ready_workspace(workspace).await {
+        Ok(arc) => arc,
+        Err(error) => return Ok(error.response(workspace)),
     };
     let Some((ws_id, _mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await
     else {

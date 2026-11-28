@@ -273,6 +273,14 @@ def resolve_workspace_path(workspace: str) -> str:
         if output.exit_code:
             raise ValueError(output.stderr or output.stdout)
         report = json.loads(output.stdout)
+        unavailable = report.get("unavailable_workspaces") if isinstance(report, dict) else None
+        if (
+            isinstance(unavailable, list)
+            and unavailable
+            and isinstance(unavailable[0], dict)
+            and isinstance(unavailable[0].get("reason"), str)
+        ):
+            raise ValueError(f"workspace index is unavailable: {unavailable[0]['reason']}")
         entries = report.get("workspaces") if isinstance(report, dict) else None
         if (
             not isinstance(entries, list)

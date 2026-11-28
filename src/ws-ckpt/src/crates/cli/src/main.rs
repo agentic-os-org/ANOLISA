@@ -636,10 +636,8 @@ async fn run(cli: Cli) -> Result<()> {
             handle_diff_response(response, &format)?;
         }
         Commands::Status { workspace, format } => {
-            let request = Request::Status {
-                workspace: workspace.as_deref().map(resolve_workspace_arg),
-            };
-            let response = send_request_to_daemon(&request).await?;
+            let response =
+                fetch_workspace_status(workspace.as_deref().map(resolve_workspace_arg)).await?;
             // Watcher health rides a sidecar request so the bincode status
             // layout stays byte-compatible with older daemons and the
             // cosh-ng mirror (#7592 review). An older daemon fails the
@@ -958,7 +956,11 @@ fn resolve_workspace_arg(workspace: &str) -> String {
 
 /// Send a request to the daemon via Unix Socket and receive a response
 async fn send_request_to_daemon(request: &Request) -> Result<Response> {
-    match send_request(request, configured_peer_uid()?).await {
+    handle_daemon_exchange(send_request(request, configured_peer_uid()?).await)
+}
+
+fn handle_daemon_exchange(response: std::result::Result<Response, IpcFailure>) -> Result<Response> {
+    match response {
         Ok(response) => Ok(response),
         Err(IpcFailure::Connect(error)) => match error.kind() {
             io::ErrorKind::NotFound => {
@@ -1038,15 +1040,35 @@ async fn send_request(
         .map_err(IpcFailure::PossiblyApplied)
 }
 
+#[derive(Debug)]
+struct ClosedBeforeResponse;
+
+impl std::fmt::Display for ClosedBeforeResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("daemon closed the connection before responding")
+    }
+}
+
 async fn exchange_frame(stream: &mut UnixStream, frame: &[u8]) -> Result<Response> {
     stream
         .write_all(frame)
         .await
         .context("failed to send request")?;
-    let len = stream
-        .read_u32_le()
+    let mut header = [0; 4];
+    let received = match stream.read(&mut header).await {
+        Ok(0) => {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof)).context(ClosedBeforeResponse)
+        }
+        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {
+            return Err(error).context(ClosedBeforeResponse);
+        }
+        result => result.context("failed to read response length")?,
+    };
+    stream
+        .read_exact(&mut header[received..])
         .await
         .context("failed to read response length")?;
+    let len = u32::from_le_bytes(header);
     anyhow::ensure!(
         len <= MAX_FRAME_SIZE,
         "Response frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
@@ -1548,7 +1570,22 @@ fn print_recovery_warning(warning: &str) {
     }
 }
 
-/// Handle StatusOk response, formatting the status report.
+/// Older daemons close the connection when they cannot decode WorkspaceStatus.
+async fn fetch_workspace_status(workspace: Option<String>) -> Result<Response> {
+    let peer_uid = configured_peer_uid()?;
+    let request = Request::WorkspaceStatus {
+        workspace: workspace.clone(),
+    };
+    let response = send_request(&request, peer_uid).await;
+    if matches!(&response, Err(IpcFailure::PossiblyApplied(error)) if error.is::<ClosedBeforeResponse>())
+    {
+        return handle_daemon_exchange(
+            send_request(&Request::Status { workspace }, peer_uid).await,
+        );
+    }
+    handle_daemon_exchange(response)
+}
+
 /// Fetch watcher health from the daemon. `None` on any error, timeout, or
 /// older daemon (which cannot decode the request and drops the
 /// connection): the caller then omits the section instead of failing
@@ -1592,7 +1629,7 @@ fn scope_watcher_health_to_report(
     })
 }
 
-/// Handle StatusOk response.
+/// Format workspace status from either protocol version.
 ///
 /// `watcher_health` is the sidecar data from [`fetch_watcher_health`];
 /// `None` means the daemon did not answer it (older daemon or timeout) and
@@ -1602,70 +1639,88 @@ fn handle_status_response(
     format: &str,
     watcher_health: Option<(Vec<String>, u64)>,
 ) -> Result<()> {
-    match response {
-        Response::StatusOk { report } => {
-            // Scope the global sidecar to the workspaces this report covers
-            // before rendering (#7592 review).
-            let watcher_health = scope_watcher_health_to_report(watcher_health, &report);
-            if format == "json" {
-                let mut value = serde_json::to_value(&report)?;
-                if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health
-                {
-                    value["workspaces_without_watcher"] =
-                        serde_json::json!(workspaces_without_watcher);
-                    value["watcher_queue_overflows"] = serde_json::json!(watcher_queue_overflows);
-                }
-                emit_json(value);
-            } else {
-                println!("\x1b[1mDaemon Status\x1b[0m");
-                println!("  Uptime: {} seconds", report.uptime_secs);
-                println!(
-                    "  Filesystem: {:.2} GB used / {:.2} GB total",
-                    report.fs_used_bytes as f64 / 1_073_741_824.0,
-                    report.fs_total_bytes as f64 / 1_073_741_824.0,
-                );
-                println!();
-                if report.workspaces.is_empty() {
-                    println!("  No workspaces registered.");
-                } else {
-                    println!("  {:<25} {:<40} SNAPSHOTS", "WORKSPACE", "PATH");
-                    println!("  {}", "-".repeat(75));
-                    for ws in &report.workspaces {
-                        println!(
-                            "  {:<25} {:<40} {}",
-                            escape_terminal_text(&ws.ws_id),
-                            escape_terminal_text(&ws.path),
-                            ws.snapshot_count
-                        );
-                    }
-                    println!("\n  Total: {} workspace(s)", report.workspaces.len());
-                }
-                if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health
-                {
-                    if !workspaces_without_watcher.is_empty() {
-                        println!(
-                            "\x1b[33m  Watcher: {} workspace(s) run without a live file \
-                             watcher (change detection degraded): {}\x1b[0m",
-                            workspaces_without_watcher.len(),
-                            escape_terminal_text(&workspaces_without_watcher.join(", "))
-                        );
-                    }
-                    if *watcher_queue_overflows > 0 {
-                        println!(
-                            "\x1b[33m  Watcher: the shared inotify queue overflowed {} \
-                             time(s); dropped events forced quiescence re-checks\x1b[0m",
-                            watcher_queue_overflows
-                        );
-                    }
-                }
-            }
-        }
+    let (report, unavailable_workspaces) = match response {
+        Response::WorkspaceStatusOk {
+            report,
+            unavailable_workspaces,
+        } => (report, Some(unavailable_workspaces)),
+        Response::StatusOk { report } => (report, None),
         Response::Error { code, message } => {
-            eprintln!("\x1b[31mError [{:?}]: {}\x1b[0m", code, message);
+            eprintln!(
+                "\x1b[31mError [{:?}]: {}\x1b[0m",
+                code,
+                escape_terminal_text(&message)
+            );
             process::exit(1);
         }
         _ => {
             eprintln!("\x1b[33mUnexpected response type\x1b[0m");
+            return Ok(());
+        }
+    };
+    // Scope the global sidecar to the workspaces this report covers
+    // before rendering (#7592 review).
+    let watcher_health = scope_watcher_health_to_report(watcher_health, &report);
+    if format == "json" {
+        let mut value = serde_json::to_value(&report)?;
+        if let Some(workspaces) = &unavailable_workspaces {
+            value["unavailable_workspaces"] = serde_json::to_value(workspaces)?;
+        }
+        if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health {
+            value["workspaces_without_watcher"] = serde_json::json!(workspaces_without_watcher);
+            value["watcher_queue_overflows"] = serde_json::json!(watcher_queue_overflows);
+        }
+        emit_json(value);
+    } else {
+        println!("\x1b[1mDaemon Status\x1b[0m");
+        println!("  Uptime: {} seconds", report.uptime_secs);
+        println!(
+            "  Filesystem: {:.2} GB used / {:.2} GB total",
+            report.fs_used_bytes as f64 / 1_073_741_824.0,
+            report.fs_total_bytes as f64 / 1_073_741_824.0,
+        );
+        println!();
+        let unavailable = unavailable_workspaces.as_deref().unwrap_or_default();
+        let total = report.workspaces.len() + unavailable.len();
+        if total == 0 {
+            println!("  No workspaces registered.");
+        } else {
+            println!("  {:<25} {:<40} SNAPSHOTS", "WORKSPACE", "PATH");
+            println!("  {}", "-".repeat(75));
+            for ws in &report.workspaces {
+                println!(
+                    "  {:<25} {:<40} {}",
+                    escape_terminal_text(&ws.ws_id),
+                    escape_terminal_text(&ws.path),
+                    ws.snapshot_count
+                );
+            }
+            for ws in unavailable {
+                println!(
+                    "  {:<25} {:<40} unknown (unavailable: {})",
+                    escape_terminal_text(&ws.ws_id),
+                    escape_terminal_text(&ws.path),
+                    escape_terminal_text(&ws.reason)
+                );
+            }
+            println!("\n  Total: {total} workspace(s)");
+        }
+        if let Some((workspaces_without_watcher, watcher_queue_overflows)) = &watcher_health {
+            if !workspaces_without_watcher.is_empty() {
+                println!(
+                    "\x1b[33m  Watcher: {} workspace(s) run without a live file \
+                             watcher (change detection degraded): {}\x1b[0m",
+                    workspaces_without_watcher.len(),
+                    escape_terminal_text(&workspaces_without_watcher.join(", "))
+                );
+            }
+            if *watcher_queue_overflows > 0 {
+                println!(
+                    "\x1b[33m  Watcher: the shared inotify queue overflowed {} \
+                             time(s); dropped events forced quiescence re-checks\x1b[0m",
+                    watcher_queue_overflows
+                );
+            }
         }
     }
     Ok(())

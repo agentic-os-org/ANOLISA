@@ -13,7 +13,7 @@ use ws_ckpt_common::{
     EffectivePolicy, GlobalPolicySnapshot, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2,
     GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, PolicyFieldOp, RecoveryPreview, Request,
     Response, SnapshotEntry, SnapshotListItem, SnapshotMeta, StatusReport,
-    WorkspaceGenerationTokenV2, WorkspaceInfo, WorkspacePolicy,
+    UnavailableWorkspaceInfo, WorkspaceGenerationTokenV2, WorkspaceInfo, WorkspacePolicy,
 };
 
 /// Helper: create a temporary socket path using tempfile
@@ -102,6 +102,27 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 fs_total_bytes: 1_000_000_000,
                 fs_used_bytes: 500_000_000,
             },
+        },
+        Request::WorkspaceStatus { workspace } => Response::WorkspaceStatusOk {
+            report: StatusReport {
+                uptime_secs: 42,
+                workspaces: workspace
+                    .is_none()
+                    .then(|| WorkspaceInfo {
+                        ws_id: "ws-test".into(),
+                        path: "/tmp/ws".into(),
+                        snapshot_count: 3,
+                    })
+                    .into_iter()
+                    .collect(),
+                fs_total_bytes: 1_000_000_000,
+                fs_used_bytes: 500_000_000,
+            },
+            unavailable_workspaces: vec![UnavailableWorkspaceInfo {
+                ws_id: "ws-damaged".into(),
+                path: workspace.unwrap_or_else(|| "/tmp/damaged".into()),
+                reason: "parse snapshot index".into(),
+            }],
         },
         Request::WatcherHealth => Response::WatcherHealthOk {
             workspaces_without_watcher: vec!["ws-degraded".to_string()],
@@ -693,6 +714,50 @@ async fn full_status_request_response_over_socket() {
         _ => panic!("expected StatusOk, got {:?}", response),
     }
 
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn workspace_status_round_trips_with_unavailable_index_details() {
+    let socket_path = temp_socket_path();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            mock_server_handle(stream).await;
+        }
+    });
+
+    for workspace in [None, Some("/tmp/damaged".to_owned())] {
+        let mut client = UnixStream::connect(&socket_path).await.unwrap();
+        let request = Request::WorkspaceStatus {
+            workspace: workspace.clone(),
+        };
+        client
+            .write_all(&encode_frame(&request).unwrap())
+            .await
+            .unwrap();
+        let len = client.read_u32_le().await.unwrap();
+        let mut payload = vec![0; len as usize];
+        client.read_exact(&mut payload).await.unwrap();
+        let response = decode_payload(&payload).unwrap();
+        let Response::WorkspaceStatusOk {
+            report,
+            unavailable_workspaces,
+        } = response
+        else {
+            panic!("expected WorkspaceStatusOk, got {response:?}");
+        };
+        assert_eq!(report.workspaces.len(), usize::from(workspace.is_none()));
+        assert_eq!(
+            unavailable_workspaces,
+            vec![UnavailableWorkspaceInfo {
+                ws_id: "ws-damaged".into(),
+                path: "/tmp/damaged".into(),
+                reason: "parse snapshot index".into(),
+            }],
+        );
+    }
     server.await.unwrap();
 }
 

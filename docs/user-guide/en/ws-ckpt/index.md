@@ -314,6 +314,28 @@ Both commands ask for confirmation by default. `--force` only skips that prompt;
 it does not permit overwriting conflicting data or unregistering a workspace
 whose live subvolume still exists.
 
+### Workspaces with an unreadable snapshot index
+
+When the daemon cannot decode a registered workspace's active snapshot index at
+startup, `ws-ckpt status -w /path/to/workspace --format json` reports its ID, path
+and reason in `unavailable_workspaces`. Its snapshot count is unknown. The
+daemon preserves the registration, index bytes, working tree and snapshots.
+The working tree keeps its existing filesystem permissions.
+
+While the index is unavailable, ws-ckpt rejects that workspace's snapshot
+queries, evidence lookups, policy operations, and management commands such as
+`checkpoint`, `cleanup`, `recover` and `unregister`. Use `-w` to list or delete
+snapshots in an available workspace. The global forms of `list` (including
+`--orphans` and pagination) and `delete`, and `recover --all`, fail until all
+registered indexes are available. Use `config -g` for global settings while
+workspace policy totals are unavailable.
+
+To restore service for the workspace, stop the daemon and save a copy of the
+damaged `<state-dir>/indexes/<ws_id>/index.json`. Repair the active index or
+restore a known-good copy, then restart the daemon. Check that scoped `status`
+shows a snapshot count and that `list -w /path/to/workspace` shows the expected
+snapshots before resuming management operations.
+
 ### diff Output Markers
 
 Text remains the default. Use JSON when consuming file changes programmatically:

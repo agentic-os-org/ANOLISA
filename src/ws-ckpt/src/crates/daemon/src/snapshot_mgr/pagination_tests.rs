@@ -46,7 +46,7 @@ impl Fixture {
 
     async fn expected(&self, scope: Option<&str>, orphans: bool) -> Vec<Identity> {
         let mut expected = Vec::new();
-        for arc in self.state.all_workspaces() {
+        for arc in self.state.ready_workspaces() {
             let ws = arc.read().await;
             if scope.is_some_and(|id| id != ws.ws_id) {
                 continue;

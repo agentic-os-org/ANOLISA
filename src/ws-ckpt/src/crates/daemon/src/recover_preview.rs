@@ -9,32 +9,45 @@ use anyhow::Context;
 use sha2::{Digest, Sha256};
 use ws_ckpt_common::{ErrorCode, RecoveryPreview, Response};
 
-use crate::state::{DaemonState, WorkspaceState};
+use crate::state::{DaemonState, WorkspaceRegistration, WorkspaceState};
 
 pub(crate) async fn preview(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<Response> {
     let _init_guard = state.init_lock.lock().await;
-    if let Some(arc) = state.resolve_workspace(workspace).await {
-        let Some((_, _mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await
-        else {
-            return Ok(not_found(workspace));
-        };
-        let ws = arc.read().await;
-        return Ok(Response::RecoverPreviewOk {
-            preview: registered_preview(state, &ws).await?,
-        });
-    }
-    if let Some(original) = crate::workspace_mgr::orphan_workspace_path(workspace).await? {
-        if state.registration_path_is_internal(&original)? || original == Path::new("/") {
-            return Ok(Response::Error {
-                code: ErrorCode::InvalidPath,
-                message: "cannot restore an orphan inside managed storage".into(),
-            });
+    let registration = match state.lookup_workspace(workspace).await {
+        Some(registration) => registration,
+        None => {
+            let Some(original) = crate::workspace_mgr::orphan_workspace_path(workspace).await?
+            else {
+                return Ok(not_found(workspace));
+            };
+            match state.registration_by_path(&original) {
+                Some(registration) => registration,
+                None => {
+                    if state.registration_path_is_internal(&original)? || original == Path::new("/")
+                    {
+                        return Ok(Response::Error {
+                            code: ErrorCode::InvalidPath,
+                            message: "cannot restore an orphan inside managed storage".into(),
+                        });
+                    }
+                    return Ok(Response::RecoverPreviewOk {
+                        preview: orphan_preview(state, &original).await?,
+                    });
+                }
+            }
         }
-        return Ok(Response::RecoverPreviewOk {
-            preview: orphan_preview(state, &original).await?,
-        });
-    }
-    Ok(not_found(workspace))
+    };
+    let arc = match registration {
+        WorkspaceRegistration::Ready(arc) => arc,
+        WorkspaceRegistration::Unavailable(entry) => return Ok(entry.response()),
+    };
+    let Some((_, _mutation_guard)) = state.lock_workspace_mutation_if_current(&arc).await else {
+        return Ok(not_found(workspace));
+    };
+    let ws = arc.read().await;
+    Ok(Response::RecoverPreviewOk {
+        preview: registered_preview(state, &ws).await?,
+    })
 }
 
 fn not_found(workspace: &str) -> Response {
