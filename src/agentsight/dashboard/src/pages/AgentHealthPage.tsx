@@ -381,9 +381,26 @@ const AgentCard: React.FC<{
   const [directory, setDirectory] = useState(() => defaultProtectionDir(agent.workspace_path));
   const [sources, setSources] = useState<string[]>([]);
   const [trustedTarget, setTrustedTarget] = useState('');
+  const previewEpoch = useRef(0);
+  useEffect(() => () => { previewEpoch.current += 1; }, []);
+
+  const closeProtectionDialog = () => {
+    previewEpoch.current += 1;
+    setShowProtection(false);
+  };
 
   const loadProtectionDefaults = async (customDirectory?: string) => {
-    const preview = await fetchAgentProtectionPreview(agent.pid, customDirectory);
+    const epoch = ++previewEpoch.current;
+    let preview;
+    try {
+      preview = await fetchAgentProtectionPreview(agent.pid, customDirectory);
+    } catch (error) {
+      if (epoch !== previewEpoch.current) return null;
+      throw error;
+    }
+    // Directory scans cannot replace a newer scan, an explicit edit, or a
+    // different dialog lifetime with paths the user no longer selected.
+    if (epoch !== previewEpoch.current) return null;
     // 后端保证 workspace_path 非根，但仍归一化兜底：无效时回退到 agent 真实工作目录，绝不落到 `/`。
     setDirectory(defaultProtectionDir(preview.workspace_path) || defaultProtectionDir(agent.workspace_path));
     setSources(preview.source_paths);
@@ -409,6 +426,7 @@ const AgentCard: React.FC<{
   // 统一的弹窗打开入口：每次打开都按 agent 真实工作目录重新播种「保护目录」，
   // 避免停用保护后重开时沿用脏值或退化为 `/`（与首次开启行为一致）。
   const openProtectionDialog = () => {
+    previewEpoch.current += 1;
     const seeded = defaultProtectionDir(agent.workspace_path);
     setDirectory(seeded);
     setShowProtection(true);
@@ -424,6 +442,7 @@ const AgentCard: React.FC<{
       addToast('未发现敏感文件，请在设置中选择包含 .env 或凭据文件的目录');
       return;
     }
+    previewEpoch.current += 1;
     setProtecting(true);
     try {
       // 原子替换（先建后删）：先创建新的凭据保护绑定，成功后再解绑旧绑定。
@@ -474,6 +493,7 @@ const AgentCard: React.FC<{
     setDirectory(defaultProtectionDir(agent.workspace_path));
     try {
       const preview = await loadProtectionDefaults();
+      if (!preview) return;
       // React state updates do not refresh this activation's closure. Use the
       // complete preview rather than a previous (possibly cancelled) draft.
       await applyProtection(preview.source_paths, preview.trusted_endpoints ?? []);
@@ -750,19 +770,19 @@ const AgentCard: React.FC<{
         </div>
       )}
       {showProtection && (
-        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={() => setShowProtection(false)}>
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={closeProtectionDialog}>
           <div className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-gray-200 p-5" onClick={event => event.stopPropagation()}>
             <div className="flex items-start justify-between gap-4">
               <div><h3 className="text-base font-semibold text-gray-900">Agent 安全保护</h3><p className="mt-1 text-xs text-gray-500">默认使用审计模式，不阻断任务；不会读取文件内容。Agent 重启后需重新开启。</p></div>
-              <button onClick={() => setShowProtection(false)} className="text-gray-400 hover:text-gray-600">✕</button>
+              <button onClick={closeProtectionDialog} className="text-gray-400 hover:text-gray-600">✕</button>
             </div>
             <label className="block mt-4 text-xs font-medium text-gray-700">保护目录</label>
-            <div className="mt-1 flex gap-2"><input value={directory} onChange={event => setDirectory(event.target.value)} className="min-w-0 flex-1 rounded border border-gray-300 px-3 py-2 text-sm" placeholder="未获取到工作目录，请手动填写绝对路径后点扫描" /><button onClick={handleScan} className="rounded border border-gray-300 px-3 text-xs hover:bg-gray-50">扫描</button></div>
+            <div className="mt-1 flex gap-2"><input value={directory} onChange={event => { previewEpoch.current += 1; setDirectory(event.target.value); }} className="min-w-0 flex-1 rounded border border-gray-300 px-3 py-2 text-sm" placeholder="未获取到工作目录，请手动填写绝对路径后点扫描" /><button onClick={handleScan} className="rounded border border-gray-300 px-3 text-xs hover:bg-gray-50">扫描</button></div>
             <label className="block mt-4 text-xs font-medium text-gray-700">敏感文件（每行一个）</label>
-            <textarea value={sources.join('\n')} onChange={event => setSources(event.target.value.split('\n').map(value => value.trim()).filter(Boolean))} rows={4} className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-xs font-mono" placeholder="扫描后自动填充 .env、credential、私钥等文件" />
+            <textarea value={sources.join('\n')} onChange={event => { previewEpoch.current += 1; setSources(event.target.value.split('\n').map(value => value.trim()).filter(Boolean)); }} rows={4} className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-xs font-mono" placeholder="扫描后自动填充 .env、credential、私钥等文件" />
             <label className="block mt-4 text-xs font-medium text-gray-700">可信网络目标（可选）</label>
-            <input value={trustedTarget} onChange={event => setTrustedTarget(event.target.value)} className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm" placeholder="例如 10.0.0.8:443；当前运行时最多 1 个" />
-            <div className="mt-5 flex justify-end gap-2"><button onClick={() => setShowProtection(false)} className="rounded border border-gray-300 px-4 py-2 text-sm">取消</button><button onClick={() => void applyProtection()} disabled={protecting || sources.length === 0} className="rounded bg-blue-600 px-4 py-2 text-sm text-white disabled:opacity-50">开启审计保护</button></div>
+            <input value={trustedTarget} onChange={event => { previewEpoch.current += 1; setTrustedTarget(event.target.value); }} className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm" placeholder="例如 10.0.0.8:443；当前运行时最多 1 个" />
+            <div className="mt-5 flex justify-end gap-2"><button onClick={closeProtectionDialog} className="rounded border border-gray-300 px-4 py-2 text-sm">取消</button><button onClick={() => void applyProtection()} disabled={protecting || sources.length === 0} className="rounded bg-blue-600 px-4 py-2 text-sm text-white disabled:opacity-50">开启审计保护</button></div>
           </div>
         </div>
       )}
