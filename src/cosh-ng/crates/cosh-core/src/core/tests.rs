@@ -4470,6 +4470,153 @@ async fn audit_failure_after_transport_failure_still_pairs_the_history() {
     );
 }
 
+fn search_batch(ids_and_arguments: &[(&str, &str)]) -> Vec<GenerateEvent> {
+    let mut events = Vec::new();
+    for (index, (id, arguments)) in ids_and_arguments.iter().enumerate() {
+        let index = index as u32;
+        events.push(GenerateEvent::ToolCallStart {
+            index,
+            id: (*id).to_string(),
+            name: "mcp__remote__search".to_string(),
+        });
+        events.push(GenerateEvent::ToolCallDelta {
+            index,
+            arguments_delta: (*arguments).to_string(),
+        });
+        events.push(GenerateEvent::ToolCallEnd { index });
+    }
+    events.push(GenerateEvent::MessageEnd);
+    events
+}
+
+fn tool_result_ids(core: &CoshCore) -> Vec<&str> {
+    core.messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect()
+}
+
+#[tokio::test]
+async fn loop_warning_waits_until_the_whole_tool_batch_has_results() {
+    // GH-10544: appending the warning inside the per-call loop put a system
+    // message between two results of the same batch, so compaction rejected a
+    // transcript whose declared IDs were all answered.
+    let provider = MockProvider::new(vec![
+        search_batch(&[
+            ("call-1", "{}"),
+            ("call-2", "{}"),
+            ("call-3", "{}"),
+            ("call-4", r#"{"query":"other"}"#),
+        ]),
+        vec![
+            GenerateEvent::TextDelta("done".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = ApprovalMode::Trust;
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(TestMcpTool));
+    let mut core = CoshCore::new_legacy(config, Box::new(provider), tools);
+    let mut reader = empty_reader().await;
+    let mut writer = Vec::new();
+
+    core.handle_user_message("search the same thing", &mut reader, &mut writer)
+        .await
+        .expect("the batch runs to completion");
+
+    let roles: Vec<&str> = core
+        .messages
+        .iter()
+        .map(|message| message.role.as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "tool",
+            "tool",
+            "system",
+            "assistant"
+        ],
+        "the warning must follow every result of the batch: {:?}",
+        core.messages
+    );
+    assert_eq!(
+        tool_result_ids(&core),
+        ["call-1", "call-2", "call-3", "call-4"]
+    );
+    assert_eq!(
+        core.messages[6].content.as_text(),
+        LoopDetector::loop_warning(),
+        "the third repeated call is what trips the detector"
+    );
+    assert!(
+        crate::compaction::has_new_compactable_prefix(&core.messages, 1, 0).is_ok(),
+        "a batch answered in full must not be rejected as unresolved: {:?}",
+        core.messages
+    );
+}
+
+#[tokio::test]
+async fn interrupted_approval_answers_every_remaining_call_in_the_batch() {
+    // The interrupted call ends the run, but every other declared ID still owes
+    // exactly one result or the persisted transcript cannot be compacted.
+    let provider = MockProvider::new(vec![vec![
+        GenerateEvent::ToolCallStart {
+            index: 0,
+            id: "call-1".to_string(),
+            name: "shell".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 0,
+            arguments_delta: r#"{"command":"echo one"}"#.to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 0 },
+        GenerateEvent::ToolCallStart {
+            index: 1,
+            id: "call-2".to_string(),
+            name: "shell".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 1,
+            arguments_delta: r#"{"command":"echo two"}"#.to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 1 },
+        GenerateEvent::MessageEnd,
+    ]]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut core = trust_shell_core(Arc::clone(&calls), provider);
+    core.client_capabilities = fully_capable_client();
+    let mut reader = empty_reader().await;
+    let mut writer = Vec::new();
+
+    core.handle_user_message("run both", &mut reader, &mut writer)
+        .await
+        .expect("an unanswered approval ends the turn as interrupted, not as an error");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no decision arrived, so neither call may run"
+    );
+    assert_eq!(
+        tool_result_ids(&core),
+        ["call-1", "call-2"],
+        "every declared call must be answered: {:?}",
+        core.messages
+    );
+    assert!(
+        crate::compaction::has_new_compactable_prefix(&core.messages, 1, 0).is_ok(),
+        "an interrupted batch must stay compactable: {:?}",
+        core.messages
+    );
+}
+
 // ─── #2067: trust-mode shell handoff reroute & blocked-call release ───
 
 fn trust_shell_core(calls: Arc<AtomicUsize>, provider: MockProvider) -> CoshCore {
