@@ -476,3 +476,304 @@ fn out_of_window_tail_survives_byte_for_byte_through_the_pipeline() {
     assert!(output.starts_with(&format!("{head}```json\n")), "{output}");
     assert!(output.ends_with(&tail), "{output}");
 }
+
+#[test]
+fn markdown_table_with_inline_backticks_keeps_json_looking_cell_unchanged() {
+    let padded_ones = format!("[{}                1]", "                1,".repeat(19));
+    let input =
+        format!("| a | b |\n|---|---|\n| 1 | 2 |\n```label``` | details\n{padded_ones} | x | y\n");
+
+    let run = PostToolPipeline::run(&request(&input), &mixed_config(), None);
+    assert_eq!(run.response.output, input);
+    assert_eq!(run.response.content_type, Some(ContentType::Tabular));
+    assert!(run.response.applied_operations.is_empty());
+}
+
+#[test]
+fn markdown_table_followed_by_fenced_json_keeps_mixed_compression() {
+    let body = mixed_json_region(40);
+    let input = format!("| col | val |\n|---|---|\n| a | 1 |\n\n```json\n{body}\n```\n");
+    assert_ne!(detect(&input), ContentType::Tabular);
+    let run = PostToolPipeline::run(&request(&input), &mixed_config(), None);
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.applied_operations,
+        [AppliedOperation::JsonCleanup]
+    );
+    assert!(run.response.output.starts_with("| col | val |\n"));
+    assert!(run.response.after_tokens < run.response.before_tokens);
+}
+
+#[test]
+fn tab_padded_markdown_table_followed_by_fenced_json_keeps_mixed_compression() {
+    let body = mixed_json_region(40);
+    let mut table = String::from("| a\t| b |\n|---\t|---|\n");
+    for _ in 0..8 {
+        table.push_str("| 1\t| 2 |\n");
+    }
+    let input = format!("{table}\n```json\n{body}\n```\n");
+    assert_ne!(detect(&input), ContentType::Tabular);
+    let run = PostToolPipeline::run(&request(&input), &mixed_config(), None);
+    assert_eq!(run.response.disposition, Disposition::Applied);
+    assert_eq!(
+        run.response.applied_operations,
+        [AppliedOperation::JsonCleanup]
+    );
+    assert!(run.response.output.starts_with(&table));
+    assert!(run.response.after_tokens < run.response.before_tokens);
+}
+
+#[test]
+fn tab_padded_one_column_gfm_table_followed_by_fenced_json_keeps_mixed_compression() {
+    let body = mixed_json_region(40);
+    for (header, delim, row) in [
+        ("| a |\t\n", ":---:\t\n", "| x |\t\n"),
+        ("a\t\n", "|:---:|\t\n", "| x |\t\n"),
+        ("Summary\t\n", ":---:\t\n", "x\t\n"),
+    ] {
+        let mut table = String::from(header);
+        table.push_str(delim);
+        for _ in 0..8 {
+            table.push_str(row);
+        }
+        let input = format!("{table}\n```json\n{body}\n```\n");
+        assert_eq!(
+            detect(&input),
+            ContentType::PlainText,
+            "one-column tab-padded GFM + fence must not route to Tabular: {header:?} / {delim:?}"
+        );
+        let run = PostToolPipeline::run(&request(&input), &mixed_config(), None);
+        assert_eq!(run.response.content_type, Some(ContentType::PlainText));
+        assert_eq!(run.response.disposition, Disposition::Applied);
+        assert_eq!(
+            run.response.applied_operations,
+            [AppliedOperation::JsonCleanup]
+        );
+        assert!(run.response.output.starts_with(&table));
+        assert!(run.response.after_tokens < run.response.before_tokens);
+    }
+
+    // Rectangular TSV control with colon/pipe-like cells stays on the Tabular route.
+    let mut rect_tsv = String::from("name\tmarker\r\nalice\t:---:\r\nbob\t|:---:|\r\n");
+    for i in 0..8 {
+        rect_tsv.push_str(&format!("u{i}\tv{i}\r\n"));
+    }
+    assert_eq!(detect(&rect_tsv), ContentType::Tabular);
+    let run = PostToolPipeline::run(&request(&rect_tsv), &mixed_config(), None);
+    assert_eq!(run.response.content_type, Some(ContentType::Tabular));
+    assert!(
+        !run.response
+            .applied_operations
+            .contains(&AppliedOperation::JsonCleanup)
+    );
+    assert_eq!(
+        parse_delimited_cells(&run.response.output, '\t'),
+        parse_delimited_cells(&rect_tsv, '\t')
+    );
+}
+
+fn parse_delimited_cells(input: &str, delimiter: char) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_quotes = false;
+    let mut started = false;
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '"' if field.is_empty() => {
+                in_quotes = true;
+                started = true;
+            }
+            c if c == delimiter => {
+                row.push(std::mem::take(&mut field));
+                started = true;
+            }
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if started || !row.is_empty() {
+                    row.push(std::mem::take(&mut field));
+                    rows.push(std::mem::take(&mut row));
+                    started = false;
+                }
+            }
+            '\n' => {
+                if started || !row.is_empty() {
+                    row.push(std::mem::take(&mut field));
+                    rows.push(std::mem::take(&mut row));
+                    started = false;
+                }
+            }
+            c => {
+                field.push(c);
+                started = true;
+            }
+        }
+    }
+    if started || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows
+}
+
+#[test]
+fn quoted_multiline_csv_with_markdown_separator_and_json_stays_tabular() {
+    let padded_ones = format!("[\n{}\n  1\n]", "                1,\n".repeat(20));
+    for record_count in [3usize, 12usize] {
+        let mut rows = String::from("id,note\r\n");
+        rows.push_str(&format!(
+            "1,\"intro | note\r\n|---|---|\r\n```json\r\n{padded_ones}\r\n```\r\nend\"\r\n"
+        ));
+        for i in 2..=record_count {
+            rows.push_str(&format!("{i},short\r\n"));
+        }
+        assert_eq!(detect(&rows), ContentType::Tabular);
+        let run = PostToolPipeline::run(&request(&rows), &mixed_config(), None);
+        assert_eq!(run.response.content_type, Some(ContentType::Tabular));
+        assert!(
+            !run.response
+                .applied_operations
+                .contains(&AppliedOperation::JsonCleanup)
+        );
+        assert_eq!(
+            parse_delimited_cells(&run.response.output, ','),
+            parse_delimited_cells(&rows, ','),
+            "CSV cells must remain equivalent after tabular routing (records={record_count})"
+        );
+    }
+}
+
+#[test]
+fn valid_tsv_with_pipe_and_separator_cells_stays_tabular_with_equal_cells() {
+    let input = "name\tnotes\r\nalice\t|short\r\n---\t|---\r\nbob\tshort\r\n";
+    assert_eq!(detect(input), ContentType::Tabular);
+    let run = PostToolPipeline::run(&request(input), &mixed_config(), None);
+    assert_eq!(run.response.content_type, Some(ContentType::Tabular));
+    assert!(
+        !run.response
+            .applied_operations
+            .contains(&AppliedOperation::JsonCleanup)
+    );
+    assert_eq!(
+        parse_delimited_cells(&run.response.output, '\t'),
+        parse_delimited_cells(input, '\t')
+    );
+}
+
+#[test]
+fn markdown_table_followed_by_html_block_routes_as_plain_text() {
+    let input = "| a | b |\n|---|---|\n| 1 | 2 |\n<div>follow-up | notes</div>";
+    assert_eq!(detect(input), ContentType::PlainText);
+    let run = PostToolPipeline::run(&request(input), &mixed_config(), None);
+    assert_eq!(run.response.content_type, Some(ContentType::PlainText));
+}
+
+#[test]
+fn setext_headings_and_thematic_breaks_after_table_preserve_mixed_compression() {
+    let padded_array = format!("[{}1]\n", "                1,".repeat(20));
+    // Setext heading variants (colon-free `-` underlines).
+    for header in [
+        "Summary\n-------\n",
+        "Summary\n---\n",
+        "Summary\n--\n",
+        "Summary\n-\n",
+        "| a |\n---\n",
+        "| a |\n--\n",
+    ] {
+        let input = format!("{header}{padded_array}");
+        assert_eq!(detect(&input), ContentType::PlainText);
+        let run = PostToolPipeline::run(&request(&input), &mixed_config(), None);
+        assert_eq!(run.response.content_type, Some(ContentType::PlainText));
+        assert!(
+            run.response
+                .applied_operations
+                .contains(&AppliedOperation::JsonCleanup)
+        );
+    }
+
+    // Thematic breaks after valid table: ---, ***, ___, _ _ _
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    for sep in ["---", "***", "___", "_ _ _"] {
+        let input = format!("{table}{sep}\n{padded_array}");
+        assert_eq!(detect(&input), ContentType::PlainText);
+        let run = PostToolPipeline::run(&request(&input), &mixed_config(), None);
+        assert_eq!(run.response.content_type, Some(ContentType::PlainText));
+        assert!(
+            run.response
+                .applied_operations
+                .contains(&AppliedOperation::JsonCleanup)
+        );
+    }
+
+    // Lone pipe after valid table leaves following array eligible for compression
+    let lone_pipe_input = format!("{table}|\n{padded_array}");
+    assert_eq!(detect(&lone_pipe_input), ContentType::PlainText);
+    let run = PostToolPipeline::run(&request(&lone_pipe_input), &mixed_config(), None);
+    assert_eq!(run.response.content_type, Some(ContentType::PlainText));
+    assert!(
+        run.response
+            .applied_operations
+            .contains(&AppliedOperation::JsonCleanup)
+    );
+
+    // Two-hyphen control stays tabular (does NOT route to mixed json cleanup)
+    let two_hyphen_table = format!("{table}--\n");
+    assert_eq!(detect(&two_hyphen_table), ContentType::Tabular);
+    let run = PostToolPipeline::run(&request(&two_hyphen_table), &mixed_config(), None);
+    assert_eq!(run.response.content_type, Some(ContentType::Tabular));
+    assert!(
+        !run.response
+            .applied_operations
+            .contains(&AppliedOperation::JsonCleanup)
+    );
+    assert_eq!(run.response.output, two_hyphen_table);
+}
+
+#[test]
+fn standalone_gfm_table_shapes_stay_byte_identical() {
+    let padded_array = format!("[{}1]\n", "                1,".repeat(20));
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+
+    // Standalone GFM tables with escaped-pipe body rows (example 200) or
+    // one-column header/alignment delimiters (including pipe-free colon
+    // delimiters) stay byte-for-byte on the Tabular route.
+    for kept in [
+        format!("{table}left \\| right\n{padded_array}"),
+        format!("{table}| left \\| right |\n{padded_array}"),
+        format!("| a |\n:---:\n{padded_array}"),
+        format!("| a |\n|:---:|\n{padded_array}"),
+        format!("a\n|:---:|\n{padded_array}"),
+        format!("Summary\n:---:\n{padded_array}"),
+        format!("Summary\n:---\n{padded_array}"),
+        format!("Summary\n---:\n{padded_array}"),
+        format!("Summary\n:-\n{padded_array}"),
+        format!("left \\| right\n:---:\n{padded_array}"),
+    ] {
+        assert_eq!(detect(&kept), ContentType::Tabular, "{kept:?}");
+        let run = PostToolPipeline::run(&request(&kept), &mixed_config(), None);
+        assert_eq!(run.response.content_type, Some(ContentType::Tabular));
+        assert!(
+            !run.response
+                .applied_operations
+                .contains(&AppliedOperation::JsonCleanup)
+        );
+        assert_eq!(run.response.output, kept);
+    }
+}

@@ -415,6 +415,323 @@ fn detects_tabular_content() {
         detect("| col | n |\n|---|---:|\n| x | 1 |"),
         ContentType::Tabular
     );
+    assert_eq!(
+        detect("| col | n |  \r\n|---|---:|\r\n| a\\|b | 1 |  \r\n"),
+        ContentType::Tabular
+    );
+    // Horizontal rule below a single pipe row or mixed prose/fences must not become Tabular.
+    assert_eq!(detect("| a | b |\n---\nSome prose"), ContentType::PlainText);
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n\nFollow-up prose."),
+        ContentType::PlainText
+    );
+    let table_then_json = format!(
+        "| a | b |\n|---|---|\n| 1 | 2 |\n\n```json\n{}\n```",
+        r#"{"items": [1, 2, 3]}"#
+    );
+    assert_ne!(detect(&table_then_json), ContentType::Tabular);
+    let table_then_tilde = "| a | b |\n|---|---|\n| 1 | 2 |\n\n   ~~~rust\nfn f() {}\n   ~~~";
+    assert_ne!(detect(table_then_tilde), ContentType::Tabular);
+    // Standalone GFM table with multi-byte cells and escaped pipes stays Tabular.
+    assert_eq!(
+        detect("| label | value |\n|---|---|\n| café \\| 中 | 42 |\n"),
+        ContentType::Tabular
+    );
+    // Regression: exhausting MAX_SCAN_LINES must not pop a trailing prose line and
+    // misclassify a large table + prose document as a standalone table.
+    let mut overflow_then_prose = String::from("| a | b |\n|---|---|\n");
+    for i in 0..197 {
+        overflow_then_prose.push_str(&format!("| {i} | {i} |\n"));
+    }
+    overflow_then_prose.push_str("Notes:\ntrailing prose that must break the table");
+    assert_eq!(detect(&overflow_then_prose), ContentType::PlainText);
+    // Over-window table followed by fenced JSON must fall through cleanly rather
+    // than blocking mixed-content routing.
+    let mut big_table_then_json = String::from("| a | b |\n|---|---|\n");
+    for i in 0..250 {
+        big_table_then_json.push_str(&format!("| {i} | {i} |\n"));
+    }
+    big_table_then_json.push_str("\n```json\n{\"items\": [1, 2, 3]}\n```\n");
+    assert_ne!(detect(&big_table_then_json), ContentType::Tabular);
+
+    // GFM Example 199: optional edge pipes on data row.
+    assert_eq!(
+        detect("| baz | bar |\n| --- | --- |\nhello | world"),
+        ContentType::Tabular
+    );
+    // GFM Example 204: data rows with fewer or more cells than header.
+    assert_eq!(
+        detect("| foo | bar |\n| --- | --- |\n| baz |\n| boo | foo | goo |"),
+        ContentType::Tabular
+    );
+
+    // Block boundary checks: interior blank lines break table blocks.
+    assert_eq!(
+        detect("| a | b |\n\n|---|---|\n| 1 | 2 |"),
+        ContentType::PlainText
+    );
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n\n| c | d |\n|---|---|\n| 3 | 4 |"),
+        ContentType::PlainText
+    );
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n\npipe | in | prose"),
+        ContentType::PlainText
+    );
+    // GFM tab stop rule: space + tab evaluates to column 4, starting an indented code block.
+    assert_eq!(
+        detect(" \t| a | b |\n \t|---|---|\n \t| 1 | \"2\" |"),
+        ContentType::PlainText
+    );
+    // Block boundaries (GFM §4.6 & §4.12): blockquotes, headings, HTML blocks (types 1–6),
+    // fences, or lists after a table break Tabular; inline Type-7 HTML stays part of the row.
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n> follow-up | quoted"),
+        ContentType::PlainText
+    );
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n# result | notes"),
+        ContentType::PlainText
+    );
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n<div>follow-up | notes</div>"),
+        ContentType::PlainText
+    );
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n<!-- follow-up | notes -->"),
+        ContentType::PlainText
+    );
+    assert_eq!(
+        detect("| a | b |\n|---|---|\n| 1 | 2 |\n<span>inline | ok</span>"),
+        ContentType::Tabular
+    );
+    // Standalone TSV with pipe-bearing records (including a `---|---` row) stays Tabular.
+    let mut tsv_with_pipe_record = String::from("col1\tcol2\n---\t|---\n");
+    for i in 0..8 {
+        tsv_with_pipe_record.push_str(&format!("k{i}\tv{i}\n"));
+    }
+    assert_eq!(detect(&tsv_with_pipe_record), ContentType::Tabular);
+    assert_eq!(
+        detect("name\tnotes\r\nalice\t|short\r\n---\t|---\r\nbob\tshort\r\n"),
+        ContentType::Tabular
+    );
+
+    // 64 KiB byte budget: separator after a >64 KiB quoted CSV line must not alter classification.
+    let csv_byte_prefix = format!("name,notes\na,short\nb,short\nc,\"{}\n", "x".repeat(65_536));
+    let csv_with_sep_past_64k = format!("{csv_byte_prefix}|---|---|\nend\"\n");
+    let csv_with_word_past_64k = format!("{csv_byte_prefix}divider\nend\"\n");
+    assert_eq!(
+        detect(&csv_with_sep_past_64k),
+        detect(&csv_with_word_past_64k)
+    );
+    assert_eq!(detect(&csv_with_sep_past_64k), ContentType::Tabular);
+}
+
+#[test]
+fn detects_markdown_table_with_inline_backticks_in_first_cell() {
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    assert_eq!(
+        detect(&format!("{table}```label``` | details\n")),
+        ContentType::Tabular
+    );
+}
+
+#[test]
+fn preserves_pipe_free_gfm_data_row_as_standalone_table() {
+    // GFM §4.12: a row without pipes renders as a data row with trailing empty
+    // cells. Without a blank line it stays part of the table.
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let array_row = format!("[{}1]\n", "                1,".repeat(20));
+    assert_eq!(detect(&format!("{table}{array_row}")), ContentType::Tabular);
+}
+
+#[test]
+fn blank_line_separated_array_after_table_is_not_standalone() {
+    // A blank line ends the table; the array becomes a separate paragraph that
+    // may be compressed, so the document is not a standalone table.
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let array_row = format!("[{}1]\n", "                1,".repeat(20));
+    assert_eq!(
+        detect(&format!("{table}\n{array_row}")),
+        ContentType::PlainText
+    );
+}
+
+#[test]
+fn zero_pipe_and_setext_heading_documents_are_not_standalone_tables() {
+    let padded = format!("[{}1]\n", "                1,".repeat(20));
+    for (name, doc) in [
+        ("setext_h2_padded", format!("Summary\n-------\n{padded}")),
+        (
+            "piped_header_setext_h2_padded",
+            format!("| a |\n---\n{padded}"),
+        ),
+        ("alpha_beta", "alpha\n---\nbeta\ngamma".to_owned()),
+        ("triple_dashes", "---\n---\n---".to_owned()),
+        ("summary_h2_alone", "Summary\n-------\n".to_owned()),
+        ("piped_header_alone", "| a |\n---\n".to_owned()),
+    ] {
+        assert_eq!(
+            detect(&doc),
+            ContentType::PlainText,
+            "failed zero-pipe/setext case {name}: {doc:?}"
+        );
+    }
+}
+
+#[test]
+fn thematic_breaks_and_block_interrupts_after_valid_table_break_tabular() {
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let padded = format!("[{}1]\n", "                1,".repeat(20));
+    for sep in ["---", "***", "___", "_ _ _"] {
+        assert_eq!(
+            detect(&format!("{table}{sep}\n{padded}")),
+            ContentType::PlainText,
+            "thematic break {sep} followed by array must route as plain text"
+        );
+        assert_eq!(
+            detect(&format!("{table}{sep}\n")),
+            ContentType::PlainText,
+            "thematic break {sep} after table must route as plain text"
+        );
+    }
+    // Lone pipe after table or alone
+    assert_eq!(
+        detect(&format!("{table}|\n{padded}")),
+        ContentType::PlainText
+    );
+    assert_eq!(detect(&format!("{table}|\n")), ContentType::PlainText);
+    assert_eq!(detect("|\n"), ContentType::PlainText);
+
+    // CommonMark ordered list item interrupts table
+    assert_eq!(
+        detect(&format!("{table}10. item\n")),
+        ContentType::PlainText
+    );
+}
+
+#[test]
+fn hyphen_controls_in_gfm_tables() {
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    // Two-hyphen row is not a thematic break (CommonMark §4.9 requires 3+ markers)
+    // and stays a valid pipe-free data row inside the table.
+    assert_eq!(detect(&format!("{table}--\n")), ContentType::Tabular);
+    // Delimiter rows with pipes stay valid GFM tables.
+    assert_eq!(
+        detect("col1 | col2\n---|---\n1 | 2\n"),
+        ContentType::Tabular
+    );
+    assert_eq!(
+        detect("| col1 | col2 |\n|---|---|\n| 1 | 2 |\n"),
+        ContentType::Tabular
+    );
+}
+
+#[test]
+fn escaped_pipe_body_rows_and_single_col_tables_stay_tabular() {
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let padded = format!("[{}1]\n", "                1,".repeat(20));
+
+    // GFM example 200: body row containing only escaped pipes (`left \| right`).
+    assert_eq!(
+        detect(&format!("{table}left \\| right\n{padded}")),
+        ContentType::Tabular
+    );
+    assert_eq!(
+        detect(&format!("{table}| left \\| right |\n{padded}")),
+        ContentType::Tabular
+    );
+
+    // One-column tables (including pipe-free headers paired with a
+    // colon-containing alignment delimiter).
+    for one_col in [
+        format!("| a |\n:---:\n{padded}"),
+        format!("| a |\n:---\n{padded}"),
+        format!("| a |\n---:\n{padded}"),
+        format!("| a |\n|:---:|\n{padded}"),
+        format!("a\n|:---:|\n{padded}"),
+        format!("a\n|---|\n{padded}"),
+        format!("Summary\n:---:\n{padded}"),
+        format!("Summary\n:---\n{padded}"),
+        format!("Summary\n---:\n{padded}"),
+        format!("Summary\n:-:\n{padded}"),
+        format!("Summary\n:--\n{padded}"),
+        format!("Summary\n:-\n{padded}"),
+        format!("Total revenue\n:---:\n{padded}"),
+        format!("left \\| right\n:---:\n{padded}"),
+    ] {
+        assert_eq!(detect(&one_col), ContentType::Tabular, "{one_col:?}");
+    }
+
+    // Setext headings (no alignment colon) and mismatched column counts remain PlainText.
+    for non_table in [
+        format!("Summary\n---\n{padded}"),
+        format!("Summary\n-------\n{padded}"),
+        format!("Summary\n--\n{padded}"),
+        format!("Summary\n-\n{padded}"),
+        format!("| a |\n---\n{padded}"),
+        format!("| a |\n--\n{padded}"),
+        format!("| a | b |\n:---:\n{padded}"),
+    ] {
+        assert_eq!(detect(&non_table), ContentType::PlainText, "{non_table:?}");
+    }
+}
+
+#[test]
+fn fenced_code_with_pipes_interrupts_markdown_table() {
+    let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    for opener in ["```text | details", "~~~text | details"] {
+        // An unclosed fence extends to EOF, even when every line has pipes.
+        assert_eq!(
+            detect(&format!("{table}{opener}\n| code | body |\n")),
+            ContentType::PlainText
+        );
+    }
+}
+
+#[test]
+fn tab_padded_one_column_gfm_table_before_fence_exits_delimited_fallback() {
+    let fence = "\n```json\n{\"items\": [1, 2, 3]}\n```\n";
+    for (header, delim, row) in [
+        ("| a |\t\n", ":---:\t\n", "| x |\t\n"),
+        ("| a |\t\n", ":---\t\n", "| x |\t\n"),
+        ("| a |\t\n", "---:\t\n", "| x |\t\n"),
+        ("| a |\t\n", ":-\t\n", "| x |\t\n"),
+        ("a\t\n", "|:---:|\t\n", "| x |\t\n"),
+        ("a\t\n", "|---|\t\n", "| x |\t\n"),
+        ("Summary\t\n", ":---:\t\n", "x\t\n"),
+    ] {
+        // 10 leading tab-terminated records pass TabularCompressor::detect,
+        // but the trailing fence breaks rectangular TSV and the one-column
+        // GFM table evidence must route the document to PlainText.
+        let mut table = String::from(header);
+        table.push_str(delim);
+        for _ in 0..8 {
+            table.push_str(row);
+        }
+        assert_eq!(
+            detect(&format!("{table}{fence}")),
+            ContentType::PlainText,
+            "mixed one-column GFM + fence should route to PlainText: {header:?} / {delim:?}"
+        );
+        // Without the trailing fence, the standalone table stays Tabular.
+        assert_eq!(
+            detect(&table),
+            ContentType::Tabular,
+            "standalone tab-padded one-column table must stay Tabular: {header:?} / {delim:?}"
+        );
+    }
+
+    // Valid rectangular TSV containing one-column-like markers stays Tabular.
+    let mut rect_tsv = String::from("col\tmeta\n:---:\taligned\n");
+    for i in 0..8 {
+        rect_tsv.push_str(&format!("row{i}\tval{i}\n"));
+    }
+    assert_eq!(detect(&rect_tsv), ContentType::Tabular);
+
+    // Quoted multiline CSV containing a one-column GFM table stays Tabular.
+    let quoted_csv = "id,note\r\n1,\"| a |\r\n:---:\r\n| x |\"\r\n2,short\r\n3,short\r\n";
+    assert_eq!(detect(quoted_csv), ContentType::Tabular);
 }
 
 #[test]

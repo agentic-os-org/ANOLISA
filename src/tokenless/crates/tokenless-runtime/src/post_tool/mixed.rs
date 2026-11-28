@@ -314,7 +314,7 @@ fn scan_lines_prefixed(content: &str) -> impl Iterator<Item = (usize, &str)> + '
 /// indented at most three spaces (checked by the caller), with an info string
 /// free of backticks when the marker is a backtick. Returns the marker byte,
 /// the marker run length, and the info string.
-fn opening_fence(trimmed: &str) -> Option<(u8, usize, &str)> {
+pub(super) fn opening_fence(trimmed: &str) -> Option<(u8, usize, &str)> {
     let marker = trimmed.as_bytes().first().copied()?;
     if marker != b'`' && marker != b'~' {
         return None;
