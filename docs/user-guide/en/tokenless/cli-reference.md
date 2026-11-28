@@ -591,7 +591,7 @@ tokenless stats diff --session <session-id> \
 | `--sort saved\|time` | Session overview | Largest saving first by default, or newest first |
 | `-U, --context <n>` | Content diff | Unchanged lines around changes, default `3` |
 | `--no-color` | Text output | Disables ANSI colors |
-| `--json` | Any scope | Emits schema `1.0` JSON with structured diff hunks |
+| `--json` | Any scope | Emits schema `1.0` JSON. Session overviews contain only metrics. Record and tool-use reports can include structured diff hunks. |
 
 Content diffing is omitted when either endpoint is unavailable or exceeds 1 MiB, and rendered hunks stop after 500 lines. Take care when using a shared terminal or collecting output because record and tool-use diffs can contain stored source text. See [Measuring savings](measuring-savings.md) and [Configuration and data privacy](configuration-and-privacy.md).
 
