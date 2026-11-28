@@ -20,6 +20,7 @@
 
 ### AI 工具
 - **install-claude-code** — 安装和配置 Claude Code IDE
+- **install-hermes** — 安装和配置 Hermes Agent（添加 LLM 供应商、消息平台、Web UI）
 - **install-qwenpaw** — 部署 QwenPaw AI 助手（支持钉钉集成）
 - **install-openclaw** — 安装和配置 OpenClaw
 - **install-tokenless** — 安装和配置 Tokenless（LLM token 优化）
@@ -29,6 +30,7 @@
 ### 系统管理
 - **alinux-admin** — ALinux 4 系统管理（systemd、SSH、firewalld、NetworkManager）
 - **backup-restore** — 系统备份与恢复
+- **ktuner** — 内核参数自动调优（分析、应用、回滚）
 - **storage-resize** — 阿里云磁盘扩容（XFS/EXT4/Btrfs）
 
 ### 开发运维
@@ -41,6 +43,12 @@
 
 ### 安全
 - **alinux-cve-query** — 查询 Alibaba Cloud Linux CVE 漏洞信息
+
+### 其他
+- **anolisa-guide** — ANOLISA 各组件使用、配置与计费指南
+- **anolisa-register** — 管理 ANOLISA 注册状态与数据上传开关
+- **clawhub-skill-mng** — 搜索、安装、更新和管理 Agent 技能
+- **cosh-guide** - Copilot Shell 用户指南
 
 ## 已退场技能
 
