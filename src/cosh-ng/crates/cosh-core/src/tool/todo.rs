@@ -6,7 +6,13 @@ use serde_json::Value;
 use super::{Tool, ToolContext, ToolKind, ToolResult};
 
 pub struct TodoTool {
-    items: Mutex<Vec<TodoItem>>,
+    state: Mutex<TodoState>,
+}
+
+struct TodoState {
+    items: Vec<TodoItem>,
+    // Callers may retain removed IDs, so never reuse them during this tool's lifetime.
+    next_id: usize,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -19,7 +25,10 @@ struct TodoItem {
 impl TodoTool {
     pub fn new() -> Self {
         Self {
-            items: Mutex::new(Vec::new()),
+            state: Mutex::new(TodoState {
+                items: Vec::new(),
+                next_id: 1,
+            }),
         }
     }
 }
@@ -66,7 +75,8 @@ impl Tool for TodoTool {
             .and_then(|v| v.as_str())
             .ok_or("missing 'action' parameter")?;
 
-        let mut items = self.items.lock().map_err(|e| format!("lock error: {e}"))?;
+        let mut state = self.state.lock().map_err(|e| format!("lock error: {e}"))?;
+        let TodoState { items, next_id } = &mut *state;
 
         match action {
             "add" => {
@@ -74,7 +84,8 @@ impl Tool for TodoTool {
                     .get("text")
                     .and_then(|v| v.as_str())
                     .ok_or("missing 'text' for add")?;
-                let id = items.len() + 1;
+                let id = *next_id;
+                *next_id = id.checked_add(1).ok_or("todo item ID exhausted")?;
                 items.push(TodoItem {
                     id,
                     text: text.to_string(),
@@ -139,6 +150,16 @@ mod tests {
         )
     }
 
+    fn isolated_ctx() -> (tempfile::TempDir, ToolContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
+        (dir, ctx)
+    }
+
     #[tokio::test]
     async fn todo_add_and_list() {
         let tool = TodoTool::new();
@@ -194,5 +215,103 @@ mod tests {
             .await
             .unwrap();
         assert!(r.output.contains("No items"));
+    }
+
+    #[tokio::test]
+    async fn todo_deletion_keeps_other_item_ids_distinct() {
+        let tool = TodoTool::new();
+        let (_dir, ctx) = isolated_ctx();
+        for text in ["first", "second"] {
+            tool.invoke(serde_json::json!({"action": "add", "text": text}), &ctx)
+                .await
+                .unwrap();
+        }
+        tool.invoke(serde_json::json!({"action": "remove", "id": 1}), &ctx)
+            .await
+            .unwrap();
+
+        let added = tool
+            .invoke(serde_json::json!({"action": "add", "text": "third"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(added.output, "Added item #3: third");
+        tool.invoke(serde_json::json!({"action": "done", "id": 2}), &ctx)
+            .await
+            .unwrap();
+        let listed = tool
+            .invoke(serde_json::json!({"action": "list"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(listed.output, "[x] #2: second\n[ ] #3: third");
+
+        tool.invoke(serde_json::json!({"action": "remove", "id": 2}), &ctx)
+            .await
+            .unwrap();
+        let listed = tool
+            .invoke(serde_json::json!({"action": "list"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(listed.output, "[ ] #3: third");
+    }
+
+    #[tokio::test]
+    async fn todo_removed_ids_stay_invalid_after_list_becomes_empty() {
+        let tool = TodoTool::new();
+        let (_dir, ctx) = isolated_ctx();
+        tool.invoke(serde_json::json!({"action": "add", "text": "first"}), &ctx)
+            .await
+            .unwrap();
+        tool.invoke(serde_json::json!({"action": "remove", "id": 1}), &ctx)
+            .await
+            .unwrap();
+        let added = tool
+            .invoke(serde_json::json!({"action": "add", "text": "second"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(added.output, "Added item #2: second");
+
+        for action in ["done", "remove"] {
+            let stale = tool
+                .invoke(serde_json::json!({"action": action, "id": 1}), &ctx)
+                .await
+                .unwrap();
+            assert!(stale.is_error);
+            assert_eq!(stale.output, "Item #1 not found");
+        }
+        let listed = tool
+            .invoke(serde_json::json!({"action": "list"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(listed.output, "[ ] #2: second");
+    }
+
+    #[tokio::test]
+    async fn todo_failed_additions_preserve_ids_and_items() {
+        let tool = TodoTool::new();
+        let (_dir, ctx) = isolated_ctx();
+        let invalid = tool
+            .invoke(serde_json::json!({"action": "add"}), &ctx)
+            .await;
+        assert_eq!(invalid.err().as_deref(), Some("missing 'text' for add"));
+        let added = tool
+            .invoke(serde_json::json!({"action": "add", "text": "first"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(added.output, "Added item #1: first");
+
+        tool.state.lock().unwrap().next_id = usize::MAX;
+        let exhausted = tool
+            .invoke(
+                serde_json::json!({"action": "add", "text": "overflow"}),
+                &ctx,
+            )
+            .await;
+        assert_eq!(exhausted.err().as_deref(), Some("todo item ID exhausted"));
+        assert_eq!(tool.state.lock().unwrap().next_id, usize::MAX);
+        let listed = tool
+            .invoke(serde_json::json!({"action": "list"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(listed.output, "[ ] #1: first");
     }
 }
