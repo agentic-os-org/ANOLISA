@@ -311,6 +311,7 @@ impl PyTokenlessRuntime {
         diff_compression_enabled=true,
         mixed_content_enabled=false,
         html_extraction_enabled=true,
+        embedded_content_enabled=true,
         browser_snapshot_enabled=true,
         stats_enabled=true,
         sls_enabled=false,
@@ -323,6 +324,7 @@ impl PyTokenlessRuntime {
         diff_compression_enabled: bool,
         mixed_content_enabled: bool,
         html_extraction_enabled: bool,
+        embedded_content_enabled: bool,
         browser_snapshot_enabled: bool,
         stats_enabled: bool,
         sls_enabled: bool,
@@ -338,6 +340,7 @@ impl PyTokenlessRuntime {
             diff_compression_enabled,
             mixed_content_enabled,
             html_extraction_enabled,
+            embedded_content_enabled,
             browser_snapshot_enabled,
             exclude_commands,
         })

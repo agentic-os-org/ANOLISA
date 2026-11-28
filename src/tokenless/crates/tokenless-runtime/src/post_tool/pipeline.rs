@@ -39,6 +39,7 @@ pub(crate) struct PostToolPipelineConfig {
     pub(crate) search_path_sharing_enabled: bool,
     pub(crate) diff_compression_enabled: bool,
     pub(crate) html_extraction_enabled: bool,
+    pub(crate) embedded_content_enabled: bool,
     pub(crate) browser_snapshot_enabled: bool,
     pub(crate) stash_enabled: bool,
     pub(crate) require_reversibility: bool,
@@ -350,10 +351,16 @@ impl PostToolPipeline {
                 allow_unrecoverable: !config.require_reversibility || !config.compression_enabled,
                 // Rewriting a field keeps the document JSON, so text
                 // replacement is not required. Data printed from a local
-                // file may be edited, so its HTML stays verbatim exactly like
-                // a printed page; Read results never reach this point.
+                // file (`file_read`) keeps only HTML verbatim like a printed
+                // page while non-HTML embedded domains still route; error
+                // results disable embedded HTML/Tabular and switch embedded
+                // build logs to `DiagnosticFailure`. `file_content` was
+                // already passed through at pipeline entry.
                 embedded_html: config.html_extraction_enabled
+                    && !is_error
                     && request.content_origin != ContentOrigin::FileRead,
+                embedded_content: config.embedded_content_enabled,
+                is_error,
             };
             let outcome = match JsonCompressor::new(config.json.clone())
                 .compress(&request.content, &context)
@@ -447,6 +454,7 @@ impl PostToolPipeline {
                 &request.capabilities.recovery,
                 config.allow_toon && request.capabilities.replace_with_text,
                 config.html_extraction_enabled && request.content_origin != ContentOrigin::FileRead,
+                config.embedded_content_enabled,
             ) {
                 Some(outcome) => DomainCandidate {
                     output: outcome.output,
@@ -609,8 +617,10 @@ pub(super) fn json_operations(operations: &[JsonOperation]) -> Vec<AppliedOperat
             JsonOperation::RecordReduction => AppliedOperation::JsonRecordReduction,
             JsonOperation::Truncation => AppliedOperation::JsonTruncation,
             // The response reports the JSON content type, which distinguishes
-            // an embedded fragment from a rendered page.
+            // an embedded view from a standalone document.
             JsonOperation::EmbeddedHtml => AppliedOperation::HtmlExtraction,
+            JsonOperation::EmbeddedBuildLog => AppliedOperation::BuildLogReduction,
+            JsonOperation::EmbeddedTabular => AppliedOperation::TabularCompaction,
             JsonOperation::Toon => AppliedOperation::Toon,
         })
         .collect()

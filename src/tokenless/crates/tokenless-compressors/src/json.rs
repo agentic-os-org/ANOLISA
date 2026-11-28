@@ -22,7 +22,7 @@ mod exact;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use embedded::{EmbeddedKind, EmbeddedRouter};
+use embedded::EmbeddedRouter;
 use exact::{ExactMap, ExactValue};
 use serde_json::Value;
 use tokenless_ccr::{
@@ -81,6 +81,14 @@ pub struct JsonCompressionContext<'a> {
     /// Rewrites also need `stash` and an available `recovery`, because each
     /// one is backed by the exact original value.
     pub embedded_html: bool,
+    /// Whether non-HTML domains embedded in string values (build logs,
+    /// CSV/TSV tables, and serialized JSON containers) may be routed in place.
+    /// Rewrites also need `stash` and an available `recovery`.
+    pub embedded_content: bool,
+    /// Whether the outer tool result represents a non-zero / error outcome.
+    /// When `true`, embedded HTML and tabular views stay disabled while
+    /// embedded build logs render in [`crate::BuildLogMode::DiagnosticFailure`].
+    pub is_error: bool,
 }
 
 /// Stable operations performed inside the JSON domain.
@@ -96,6 +104,12 @@ pub enum JsonOperation {
     /// String values carrying HTML were rendered as Markdown, each original
     /// value retrievable from Stash.
     EmbeddedHtml,
+    /// String values carrying build or test logs were reduced in place, each
+    /// original value retrievable from Stash.
+    EmbeddedBuildLog,
+    /// String values carrying CSV/TSV tables were compacted in place, each
+    /// original value retrievable from Stash.
+    EmbeddedTabular,
     /// TOON was selected as the final representation.
     Toon,
 }
@@ -109,6 +123,8 @@ impl JsonOperation {
             Self::RecordReduction => "json-record-reduction",
             Self::Truncation => "json-truncation",
             Self::EmbeddedHtml => "json-embedded-html",
+            Self::EmbeddedBuildLog => "json-embedded-build-log",
+            Self::EmbeddedTabular => "json-embedded-tabular",
             Self::Toon => "json-toon",
         }
     }
@@ -234,7 +250,10 @@ impl JsonCompressor {
         // its writes become orphans the caller's ledger deletes. Writes are
         // kept in the order they happened, which the ledger relies on to
         // tell this run's refreshes from a foreign writer's.
-        let mut router = EmbeddedRouter::new(context);
+        let string_limit = (self.config.truncate_strings_at < usize::MAX
+            && (context.stash.is_some() || context.allow_unrecoverable))
+            .then_some(self.config.truncate_strings_at);
+        let mut router = EmbeddedRouter::new(context, string_limit);
         let mut stash_writes = Vec::new();
         let mut stash_errors = 0;
         if router.is_some() {
@@ -350,6 +369,12 @@ fn build_candidate(
     }
     if transformed_selected && session.embedded_html > 0 {
         operations.push(JsonOperation::EmbeddedHtml);
+    }
+    if transformed_selected && session.embedded_build_log > 0 {
+        operations.push(JsonOperation::EmbeddedBuildLog);
+    }
+    if transformed_selected && session.embedded_tabular > 0 {
+        operations.push(JsonOperation::EmbeddedTabular);
     }
     if toon_selected {
         operations.push(JsonOperation::Toon);
@@ -653,6 +678,9 @@ struct Session<'a> {
     /// Routes string values carrying another content domain, when enabled.
     embedded: Option<EmbeddedRouter<'a>>,
     embedded_html: usize,
+    embedded_build_log: usize,
+    embedded_tabular: usize,
+    embedded_leaf_rewrites: usize,
 }
 
 impl<'a> Session<'a> {
@@ -675,11 +703,14 @@ impl<'a> Session<'a> {
             unrecoverable_truncations: 0,
             embedded: None,
             embedded_html: 0,
+            embedded_build_log: 0,
+            embedded_tabular: 0,
+            embedded_leaf_rewrites: 0,
         }
     }
 
     fn embedded_rewrites(&self) -> usize {
-        self.embedded_html
+        self.embedded_leaf_rewrites
     }
 
     fn recoverability(&self) -> Recoverability {
@@ -731,18 +762,33 @@ impl<'a> Session<'a> {
     }
 
     fn compress_string<'doc>(&mut self, value: &str, depth: usize) -> ExactValue<'doc> {
+        let max_outer_chars = self
+            .bounds_enabled
+            .then_some(self.config.truncate_strings_at);
         if let Some(router) = self.embedded.as_mut()
-            && let Some(rewrite) =
-                router.route(value, depth, &mut self.stash_writes, &mut self.stash_errors)
+            && let Some(rewrite) = router.route(
+                value,
+                depth,
+                max_outer_chars,
+                &mut self.stash_writes,
+                &mut self.stash_errors,
+            )
             // A bounded candidate keeps its string limit. A view over it falls
             // back to plain truncation, whose marker recovers the original in
             // one step rather than through a truncated view.
             && (!self.bounds_enabled
                 || rewrite.value.chars().count() <= self.config.truncate_strings_at)
         {
-            match rewrite.kind {
-                EmbeddedKind::Html => self.embedded_html += 1,
+            if rewrite.domains.html {
+                self.embedded_html += 1;
             }
+            if rewrite.domains.build_log {
+                self.embedded_build_log += 1;
+            }
+            if rewrite.domains.tabular {
+                self.embedded_tabular += 1;
+            }
+            self.embedded_leaf_rewrites += rewrite.leaf_rewrites;
             return ExactValue::String(rewrite.value);
         }
         if !self.bounds_enabled || value.chars().count() <= self.config.truncate_strings_at {

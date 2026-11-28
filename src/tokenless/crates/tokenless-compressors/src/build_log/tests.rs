@@ -1464,3 +1464,58 @@ make: Leaving directory '/work'\n";
     assert_eq!(make_out.recoverability, crate::Recoverability::Retrievable);
     assert_eq!(make_out.stash_writes.len(), 1);
 }
+
+#[test]
+fn embedded_view_allows_omissions_without_store_and_honors_diagnostic_failure_mode() {
+    let mut generic_log = String::from("$ ./scripts/sync.sh\n");
+    for idx in 1..=20 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut generic_log,
+            format_args!("Processing shard-{idx:02} of 20...\n"),
+        );
+    }
+    generic_log.push_str("exit status: 0\n");
+
+    let success_view = BuildLogCompressor
+        .render_embedded_view(&generic_log, BuildLogMode::Success)
+        .expect("anchored generic collapses in Success mode even without StashStore");
+    assert!(
+        success_view.contains("repeated progress lines omitted.\n"),
+        "{success_view}"
+    );
+    assert!(
+        BuildLogCompressor
+            .render_embedded_view(&generic_log, BuildLogMode::DiagnosticFailure)
+            .is_none(),
+        "DiagnosticFailure disables generic progress omission"
+    );
+
+    let mut cargo_fail = String::new();
+    for idx in 1..=22 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut cargo_fail,
+            format_args!("   Compiling crate-{idx:02} v0.1.0 (/work/crate-{idx:02})\n"),
+        );
+    }
+    cargo_fail.push_str(
+        "error[E0308]: mismatched types\n  --> src/lib.rs:19:5\n   |\n         19 |     42\n   |     ^^ expected `bool`, found integer\n         = note: required by return signature\n",
+    );
+    let fail_view = BuildLogCompressor
+        .render_embedded_view(&cargo_fail, BuildLogMode::DiagnosticFailure)
+        .expect("Cargo routine compile lines collapse in DiagnosticFailure mode");
+    assert!(
+        fail_view.contains("compilation progress lines omitted.\n"),
+        "{fail_view}"
+    );
+    for anchor in [
+        "error[E0308]: mismatched types",
+        "--> src/lib.rs:19:5",
+        "^^ expected `bool`, found integer",
+        "= note: required by return signature",
+    ] {
+        assert!(
+            fail_view.contains(anchor),
+            "missing `{anchor}` in:\n{fail_view}"
+        );
+    }
+}

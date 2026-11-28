@@ -289,3 +289,36 @@ fn to_serde_value_approximates_every_retained_literal() {
         assert_eq!(approximate, serde_json::from_str::<Value>(&source).unwrap());
     }
 }
+
+#[test]
+fn canonical_string_literal_check_and_cow_duplicate_key_slot_scan_are_exact() {
+    for sample in [
+        "plain ascii text",
+        "中文与 emoji 🚀",
+        "line 1\nline 2\t\"quoted\"\\slash\r\x08\x0c",
+        "control \x1b[31mred\x1b[0m\x00nul",
+    ] {
+        let encoded = encode_string_literal(sample);
+        assert_eq!(
+            encoded,
+            write_to_string(&ExactValue::String(sample.to_owned()))
+        );
+        assert_eq!(encoded_string_char_len(sample), encoded.chars().count());
+        assert!(is_canonical_string_literal(&encoded, sample), "{encoded}");
+    }
+    assert!(!is_canonical_string_literal(
+        r#""\u003cdiv\u003e""#,
+        "<div>"
+    ));
+    assert!(!is_canonical_string_literal(r#""a\/b""#, "a/b"));
+    assert!(!is_canonical_string_literal(r#""\u001B""#, "\x1b"));
+
+    // Duplicate object keys shadow earlier string slots even when one spelling
+    // is borrowed (`"dup"`) and the later spelling uses an escape (`"\u0064up"`).
+    let raw = r#"{"dup":{"dead":"shadowed"},"keep":["first"],"\u0064up":{"live":"survives"}}"#;
+    let slots = scan_string_slots(raw).unwrap();
+    let decoded: Vec<&str> = slots.iter().map(|slot| slot.decoded.as_str()).collect();
+    assert_eq!(decoded, ["first", "survives"]);
+    assert_eq!(slots[0].inner_depth, 1);
+    assert_eq!(slots[1].inner_depth, 1);
+}

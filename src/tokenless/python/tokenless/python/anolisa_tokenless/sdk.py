@@ -272,6 +272,9 @@ class TokenlessConfig:
     browser_snapshot_enabled: bool = field(
         default_factory=lambda: _env_flag("TOKENLESS_BROWSER_SNAPSHOT_ENABLED", True)
     )
+    embedded_content_enabled: bool = field(
+        default_factory=lambda: _env_flag("TOKENLESS_EMBEDDED_CONTENT_ENABLED", True)
+    )
     rtk_rollout: RtkRolloutConfig = _UNSET
     exclude_commands: tuple[str, ...] = _UNSET
 
@@ -474,6 +477,7 @@ class TokenlessSdk:
             diff_compression_enabled=self.config.diff_compression_enabled,
             mixed_content_enabled=self.config.mixed_content_enabled,
             html_extraction_enabled=self.config.html_extraction_enabled,
+            embedded_content_enabled=self.config.embedded_content_enabled,
             browser_snapshot_enabled=self.config.browser_snapshot_enabled,
             exclude_commands=list(self.config.exclude_commands),
         )

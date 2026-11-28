@@ -64,6 +64,7 @@ pub(crate) fn compress_regions(
     recovery: &RecoveryMethod,
     allow_toon: bool,
     embedded_html: bool,
+    embedded_content: bool,
 ) -> Option<MixedResult> {
     let json_compressor = JsonCompressor::new(config.json.clone());
     let mut output = String::with_capacity(content.len());
@@ -99,6 +100,8 @@ pub(crate) fn compress_regions(
                     allow_unrecoverable: !config.require_reversibility
                         || !config.compression_enabled,
                     embedded_html,
+                    embedded_content,
+                    is_error: false,
                 };
                 // A region whose selected candidate does not save space is
                 // kept byte-for-byte, but its tentative Stash writes still

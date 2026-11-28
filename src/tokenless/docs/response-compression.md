@@ -2,7 +2,7 @@
 
 ## 一、功能概述
 
-PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给七个领域之一：JSON、Build Log、Tabular、Search Results 路径共享、HTML 页面转写与 Browser Snapshot 重编码默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。HTML 转写开启、来源不是 `file_read` 且 Stash 与恢复路径可用时，再生成把字符串值中的 HTML 就地转写为 Markdown 的嵌入内容候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功及带 `exit_code` 的失败 `command_output` 或 `file_read`（失败路径启用 `BuildLogMode::DiagnosticFailure`），沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略；Browser Snapshot 重编码把 Playwright MCP 的无障碍快照无损重写为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀，解析失败时整体透传；chrome-devtools-mcp 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）。这三个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 按 `exit_code` 分级处理：未携带 `exit_code` 或属于硬执行失败/短错误（Level E1）时保留原始输出；携带正常退出码且长度达到门槛的失败进入 Level E2 安全压缩并由 `FactInvariantGuard` 守卫事实（环境错误归因已下线，`additional_context` 恒为 `None`）；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型与内容来源静态派发给七个领域之一：JSON、Build Log、Tabular、Search Results 路径共享、HTML 页面转写与 Browser Snapshot 重编码默认启用；Diff 上下文裁剪也默认启用，可通过 `TOKENLESS_DIFF_COMPRESSION_ENABLED=0` 关闭。JSON 压缩器只解析一次输入，先生成保留全部字段、空值和数组元素的 Compact JSON/TOON 候选。Stash 与恢复路径可用时，再生成把字符串值中的嵌入内容（HTML 转写开启且非错误、非 `file_read` 来源时的 HTML 片段，以及 `TOKENLESS_EMBEDDED_CONTENT_ENABLED` 开启时的构建/测试日志、非错误状态下的 CSV/TSV 表格与嵌套序列化 JSON 容器）就地路由压缩的候选（见下文“JSON 值中的嵌入内容”），整体更小时取代前者。两者中较优的无损候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器处理成功及带 `exit_code` 的失败 `command_output` 或 `file_read`（失败路径启用 `BuildLogMode::DiagnosticFailure`），沿用 SGR 颜色清理，对已识别 pnpm 日志进行无需恢复的布局压紧，并对构建、测试和包安装日志中的常规进度进行可恢复缩减。Tabular 压缩器生成保留单元格或可恢复选取整行的 CSV/TSV 视图；Search Results 压缩器在连续行之间共享重复路径，不丢弃任何命中；Diff 裁剪只删减未修改的上下文行，元信息与改动行原样保留；HTML 转写选取 `<main>`、`role=main` 或唯一的最外层 `<article>` 作为主内容根（都不存在时为 `<body>`），只渲染该根并移除其中可枚举的非内容元素，根外节点计数后省略；Browser Snapshot 重编码把 Playwright MCP 的无障碍快照无损重写为 TSV 记录表，去除交互角色的冗余 cursor 标注并按净收益共享 URL 前缀，解析失败时整体透传；chrome-devtools-mcp 快照仅识别、原文直通（上游裸引号无显式记录边界，无损不可分解）。这三个领域都把原文写入 Stash，只有恢复路径可用时才会执行，结果可通过 Retrieve 找回。Tool Error 按 `exit_code` 分级处理：未携带 `exit_code` 或属于硬执行失败/短错误（Level E1）时保留原始输出；携带正常退出码且长度达到门槛的失败进入 Level E2 安全压缩并由 `FactInvariantGuard` 守卫事实（环境错误归因已下线，`additional_context` 恒为 `None`）；`file_content` 来源与其他内容类型透传。此外还有一个默认关闭的 Mixed Content 领域：整内容
 候选全部未命中时，按显式定界的 typed region 逐段压缩混合输出（见「三、递归处理顺序」
 之后的「Mixed Content 领域」一节）。
 
@@ -267,7 +267,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 
 | ContentType | 前提 | 领域处理 | 默认 |
 |------|------|------|------|
-| `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无；字符串值中的 HTML 另需 HTML 转写开启、来源不是 `file_read`、Stash 与恢复路径可用 | `JsonCompressor`：Record Reduction、截断、Compact JSON、可选 TOON，以及字符串值中 HTML 的就地转写 | 启用 |
+| `json`（含宿主强制 JSON 与包裹的结构化 JSON） | 无；字符串值中的嵌入内容要求 Stash 与恢复路径可用（HTML 另需 HTML 转写开启、非错误状态且来源不是 `file_read`；非 HTML 嵌入域可通过 `TOKENLESS_EMBEDDED_CONTENT_ENABLED=0` 关闭，错误状态下跳过 Tabular 并以 `DiagnosticFailure` 渲染 Build Log） | `JsonCompressor`：Record Reduction、截断、Compact JSON、可选 TOON，以及字符串值中 HTML、Build Log、Tabular 与序列化 JSON 的就地递归路由 | 启用 |
 | `build_log` | 来源为 `command_output` 或 `file_read` | `BuildLogCompressor`：SGR Cleanup、pnpm 无需恢复的布局压紧、Stack Trace 保护、可恢复 Progress Reduction | 启用 |
 | `tabular` | 宿主支持文本替换 | `TabularCompressor`：保留全部单元格的 CSV/TSV 压紧，无收益时原样返回，不写 Stash | 启用 |
 | `search_results` | 宿主支持文本替换；已识别 `Grep` 或 Shell 搜索直接交给压缩器；其他来源中，带行号记录要求 `api_response`，纯路径列表也允许 `command_output` | `SearchResultsCompressor`：连续记录共享完整路径，或全部路径共享目录前缀，无损且无需 Stash | 启用，`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=false` 关闭 |
@@ -275,8 +275,11 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 | `html` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `HtmlExtractor`：只渲染主内容根（`<main>`、`role=main`、唯一的最外层 `<article>` 或 body），移除可枚举非内容元素（含表单控件、媒体嵌入、dialog）后转写为 Markdown，根外节点计数省略，嵌套超过 512 层不解析 | 启用，`TOKENLESS_HTML_EXTRACTION_ENABLED=false` 关闭 |
 | `browser_snapshot` | 来源不是 `file_read`，宿主支持文本替换，Stash 与恢复路径可用 | `BrowserSnapshotCompressor`：PW 快照无损重编码为 TSV 记录表，交互角色去冗余 cursor，URL 前缀按净收益共享；包装与尾注逐字保留，解析失败整体透传。CDT 快照仅识别、原文直通（裸引号无显式边界，无损不可分解） | 启用，`TOKENLESS_BROWSER_SNAPSHOT_ENABLED=0` 关闭 |
 
-**JSON 值中的嵌入内容**：`json/embedded.rs` 按节点路由字符串值，判断只看值本身，不看字段
-名。目前识别的唯一内容域是 HTML：值至少 256 个字符，以受支持的 HTML5 或 SVG 标签、注释或
+**JSON 值中的嵌入内容**：`json/embedded.rs` 按节点路由字符串值，判断只看值本身（要求至少 256 个字符且不超过 256 KiB），不看字段名。非 HTML 嵌入路由默认启用，可通过 `TOKENLESS_EMBEDDED_CONTENT_ENABLED=0`（SDK：`embedded_content_enabled=False`）独立关闭；`file_read` 来源仅绕过 HTML（保持本地文件内 HTML 可编辑），Build Log、Tabular 与序列化 JSON 仍与顶层不变量一致照常压缩；Level E2 错误状态（`status == error` 且携带非硬失败 `exit_code`）下禁用嵌入 HTML 与嵌入 Tabular，并将嵌入 Build Log 切换为 `BuildLogMode::DiagnosticFailure` 以通过 `FactInvariantGuard` 校验。当前识别四类形态：
+1. **序列化 JSON 容器（`{...}` 或 `[...]`）**：去除首尾空白后为合法 JSON 对象或数组时，在 `exact.rs` 中扫描其内部活跃字符串值槽位的字节区间（未转义键以零分配切片跟踪重复键遮蔽），在计算外层非槽位骨架字符下界通过字符串上限剪枝后按嵌套深度递归路由内部叶值。仅对满足零克隆 RFC 8259 规范转义校验的槽位就地写回压缩后的 JSON 字符串字面量（跳过含 `\u003c` 等非规范转义的槽位），因此**外层值始终保持合法 JSON 字符串（绝不展开为对象或数组）**，未改写字段、外层缩进空白、键顺序与任意精度数字字面量逐字节不变，逐个恢复叶节点 Stash 后可逐字节还原原始外层字符串。
+2. **Build Log（构建与测试日志）**：包含换行且通过 `BuildLogCompressor::detect` 时，通过与 `compress_with_options` 共享 Stage 0–Stage 2 规划与 Top-24 省略排序的 `render_embedded_view` 复用 SGR 清理、布局压紧、诊断/失败锚点保护与常规进度折叠，在首行前置纯 ASCII 标记 `[Build log reduced; <recovery_instruction>]`；整个原始字段值仅写入 1 条 Stash 记录，单次 `retrieve` 即可逐字节还原原始日志。
+3. **Tabular（CSV/TSV 表格）**：非错误状态下包含换行且通过 `TabularCompressor::detect`、同时剥离前导 BOM 并折叠连续空行后的未引号字符下界与渲染后长度均不超过有效字符串上限时，调用 `TabularCompressor` 去除冗余引号与归一化行尾，前置 `[Tabular data compacted; <recovery_instruction>]` 并整值写入 1 条 Stash 记录；扣除首行和 JSON 转义后净省不足 16 个估算 Token 或超出外层字符串上限时在写 Stash 前零开销跳过。
+4. **HTML 片段或文档**：HTML 转写开启、非错误状态且来源不是 `file_read`，并以受支持的 HTML5 或 SVG 标签、注释或
 `<!doctype html` 开头并以 `>` 结尾时，交给 `HtmlExtractor` 的片段模式。片段模式与页面模式
 共用同一 `Renderer`，通过 `FragmentPlan`（`html/fragment/plan.rs`）对整段 HTML 做四分类规
 划，不选择主内容根，只移除纯外观 `<style>` 与注释并在首行计数：富文本子树转写为
@@ -311,14 +314,11 @@ block 中）；`<svg>`（保留 `xlink:href` 等前缀属性，去除根上纯�
 时，整值原样保留。表格的第一个 `thead` 与 `tfoot` 按浏览器位置分别输出在最前和最后，页面模
 式同样如此。源中以空白、`br`、块级元素、表格单元、按钮或 flex/`inline-block` 子项分开的相邻
 文字，视图中也必须以空白分开，因此任何渲染路径把 `a<br>b` 拼成 `ab` 都会被拒绝；`pre` 与行
-内代码中的 `br` 和块级元素按换行渲染。每个改写值在 JSON 转义形式下（含首行与恢复指令）须至
-少节省 16 个估算 Token，先用占位 Key 测量，通过后才写入 Stash；同一值只渲染、写入一次，各候
-选共享结果。改写值替换原字符串，字段名、类型、数字字面量和记录关联不变，原值可通过该值中的
-恢复指令逐字节取回。工作量按文档限定：值不超过 256 KiB、深度不超过 32、最多解析 128 个值和
+内代码中的 `br` 和块级元素按换行渲染。每个叶节点改写值在 JSON 转义形式下（含首行与恢复指令）须至
+少节省 16 个估算 Token，直接基于内容摘要计算 24 位恢复 Key 单次渲染，并在内存中通过全部外层字符上限与严格变小门禁校验后才在顶层对最终采纳的叶节点写入 Stash；`< 256` 字符在哈希前 O(1) 短路，定长 BLAKE3 摘要缓存置于领域嗅探之前并有界记忆无候选/低收益负结果（上限 1024 条），同一值最多嗅探、渲染与写入一次，各候选共享结果。改写值替换原字符串，字段名、类型、数字字面量和记录关联不变，原值可通过该值中的
+恢复指令逐字节取回。工作量按文档限定：值不超过 256 KiB、深度不超过 32（序列化 JSON 内部嵌套深度一并计入）、最多解析 128 个值和
 2 MiB。Bounded 候选中视图超过字符串上限的值改为普通截断。所有候选的 Stash 写入按发生顺序交
-给 Runtime Ledger，未出现在最终输出中的写入在 Commit 时删除，拒绝时回滚。响应操作为
-`html_extraction`，内容类型为 `json`。新增内容域时扩展 `EmbeddedKind` 并复用相应领域压缩
-器，不新增路由流水线。
+给 Runtime Ledger，未出现在最终输出中的写入在 Commit 时删除，拒绝时回滚。响应内容类型为 `json`，操作按实际命中的嵌入叶域单射映射为既有的 `html_extraction`、`build_log_reduction` 与 `tabular_compaction`，不新增 Protocol v2 Wire 枚举。
 
 Diff、HTML 与 Browser Snapshot 领域要求至少节省 16 个 Token 才采用结果，其他领域至少 1 个，且全部采用结果须同时满足 UTF-8 字节数、字符数与估算 Token 三项严格递减。
 Diff、HTML 与 Browser Snapshot 没有可用 Stash 或宿主未声明恢复能力（例如裸 `tokenless` 不在

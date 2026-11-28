@@ -6,6 +6,12 @@
 //! its payload. Key length is aligned with Headroom's CCR for cross-tool
 //! comparability.
 
+/// Compute the raw 32-byte BLAKE3 digest for `payload` without heap allocation.
+#[must_use]
+pub fn compute_digest(payload: &[u8]) -> [u8; 32] {
+    *blake3::hash(payload).as_bytes()
+}
+
 /// Compute a 24-hex-char stash key for `payload`.
 pub fn compute_key(payload: &[u8]) -> String {
     blake3::hash(payload).to_hex().as_str()[..24].to_string()
@@ -55,5 +61,21 @@ mod tests {
             let key = compute_key(payload.as_bytes());
             assert!(seen.insert(key), "collision at i={i}");
         }
+    }
+
+    #[test]
+    fn digest_is_32_bytes_and_matches_key_prefix() {
+        let payload = b"digest-key-consistency-check";
+        let digest = compute_digest(payload);
+        assert_eq!(digest.len(), 32);
+        assert_eq!(digest, compute_digest(payload));
+        assert_ne!(digest, compute_digest(b"other-payload"));
+
+        let mut prefix_hex = String::with_capacity(24);
+        for byte in &digest[..12] {
+            use std::fmt::Write as _;
+            let _ = write!(&mut prefix_hex, "{byte:02x}");
+        }
+        assert_eq!(prefix_hex, compute_key(payload));
     }
 }

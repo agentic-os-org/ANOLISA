@@ -74,6 +74,10 @@ pub struct RuntimeConfig {
     /// Whether complete HTML documents, and HTML inside JSON string values, are rendered as
     /// Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
+    /// Whether non-HTML domains embedded in JSON string values (build logs,
+    /// CSV/TSV tables, and serialized JSON containers) are routed in place with
+    /// original recovery. Enabled by default.
+    pub embedded_content_enabled: bool,
     /// Whether browser accessibility snapshots are re-encoded as record tables
     /// with original recovery. Enabled by default.
     pub browser_snapshot_enabled: bool,
@@ -95,6 +99,7 @@ impl Default for RuntimeConfig {
             search_path_sharing_enabled: true,
             diff_compression_enabled: true,
             html_extraction_enabled: true,
+            embedded_content_enabled: true,
             browser_snapshot_enabled: true,
             mixed_content_enabled: false,
             exclude_commands: Vec::new(),
@@ -411,6 +416,7 @@ impl TokenlessRuntime {
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
+            embedded_content_enabled: self.config.embedded_content_enabled,
             browser_snapshot_enabled: self.config.browser_snapshot_enabled,
             mixed_content_enabled: self.config.mixed_content_enabled,
             stash_enabled: true,
@@ -448,6 +454,7 @@ impl TokenlessRuntime {
             search_path_sharing_enabled: self.config.search_path_sharing_enabled,
             diff_compression_enabled: self.config.diff_compression_enabled,
             html_extraction_enabled: self.config.html_extraction_enabled,
+            embedded_content_enabled: self.config.embedded_content_enabled,
             browser_snapshot_enabled: self.config.browser_snapshot_enabled,
             mixed_content_enabled: self.config.mixed_content_enabled,
             stash_enabled: true,
@@ -877,6 +884,7 @@ pub fn compress_response_with_store(
             search_path_sharing_enabled: false,
             diff_compression_enabled: false,
             html_extraction_enabled: false,
+            embedded_content_enabled: false,
             browser_snapshot_enabled: false,
             stash_enabled: options.stash_enabled,
             require_reversibility: options.require_reversible,

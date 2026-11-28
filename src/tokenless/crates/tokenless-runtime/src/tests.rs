@@ -859,6 +859,7 @@ fn runtime_entry_options() -> EntryOptions {
         search_path_sharing_enabled: config.search_path_sharing_enabled,
         diff_compression_enabled: config.diff_compression_enabled,
         html_extraction_enabled: config.html_extraction_enabled,
+        embedded_content_enabled: config.embedded_content_enabled,
         browser_snapshot_enabled: config.browser_snapshot_enabled,
         mixed_content_enabled: config.mixed_content_enabled,
         stash_enabled: true,
@@ -873,6 +874,7 @@ fn runtime_entry_options() -> EntryOptions {
 fn html_rendering_and_diff_cropping_are_on_by_default() {
     let config = RuntimeConfig::default();
     assert!(config.html_extraction_enabled);
+    assert!(config.embedded_content_enabled);
     assert!(config.diff_compression_enabled);
     assert!(config.browser_snapshot_enabled);
 }
@@ -1478,4 +1480,287 @@ fn runtime_post_tool_honors_exclude_commands() {
         .unwrap();
     assert_eq!(compressed.disposition, Disposition::Applied);
     assert!(compressed.output.len() < payload.len());
+}
+
+#[test]
+fn concurrent_sessions_and_retrieve_bypass_cover_embedded_mixed_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let cargo_log = |label: &str| {
+        let mut log = String::new();
+        for idx in 1..=32 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut log,
+                format_args!("   Compiling {label}-pkg-{idx:02} v0.3.{idx} (/work/{label})\n"),
+            );
+        }
+        let _ = std::fmt::Write::write_fmt(
+            &mut log,
+            format_args!(
+                "error[E0425]: cannot find value `missing_{label}` in this scope\n                 error: could not compile `{label}` (lib) due to 1 previous error\n"
+            ),
+        );
+        log
+    };
+    let quoted_csv = |label: &str| {
+        let mut csv = String::from("\"row_id\",\"tenant\",\"status\",\"unit\"\r\n");
+        for idx in 1..=26 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut csv,
+                format_args!("\"{label}-{idx:03}\",\"prod-cluster\",\"healthy\",\"ms\"\r\n"),
+            );
+        }
+        csv
+    };
+    let html_card = |label: &str| {
+        format!(
+            "<div style=\"font-family: Arial, sans-serif; color: #333333\">             <p style=\"margin: 0 0 8px 0\"><span style=\"font-weight: normal\">{label}:              verify build status before</span> <strong>2026-12-01</strong>.</p>             <ul style=\"padding-left: 16px; margin: 0\"><li style=\"margin: 0\">             <a href=\"https://example.com/{label}\" target=\"_blank\"              rel=\"noopener noreferrer\">Artifact</a></li></ul></div>"
+        )
+    };
+
+    let barrier = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        for session in 0..4 {
+            let (directory, barrier) = (directory.path(), &barrier);
+            scope.spawn(move || {
+                let runtime = TokenlessRuntime::new(RuntimeConfig {
+                    data_dir: Some(directory.to_path_buf()),
+                    stats_enabled: true,
+                    ..RuntimeConfig::default()
+                })
+                .unwrap();
+                let tag = format!("sess-{session}");
+                let attribution = ProtocolAttribution {
+                    agent_id: "qwenwork".to_owned(),
+                    session_id: Some(tag.clone()),
+                    tool_use_id: Some(format!("call-{session}")),
+                };
+                let shared_log = cargo_log("shared");
+                let own_csv = quoted_csv(&tag);
+                let own_html = html_card(&tag);
+                let own_envelope = serde_json::to_string(&serde_json::json!({
+                    "csv": own_csv,
+                    "html": own_html,
+                }))
+                .unwrap();
+                let content = serde_json::to_string(&serde_json::json!({
+                    "session": session,
+                    "stdout": shared_log,
+                    "envelope": own_envelope,
+                }))
+                .unwrap();
+
+                barrier.wait();
+                let response = runtime
+                    .post_tool(
+                        &PostToolRequest {
+                            result_kind: ResultKind::Tool,
+                            tool_name: "run_pipeline".to_owned(),
+                            content: content.clone(),
+                            status: ToolResultStatus::Success,
+                            content_origin: ContentOrigin::ApiResponse,
+                            command: None,
+                            output_optimization: OutputOptimization::None,
+                            capabilities: PostToolCapabilities {
+                                replace_output: true,
+                                recovery: tokenless_protocol::RecoveryMethod::Shell,
+                                replace_with_text: false,
+                            },
+                            exit_code: None,
+                            stderr: None,
+                            original_command: None,
+                            cwd: None,
+                        },
+                        &attribution,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    response.applied_operations,
+                    [
+                        tokenless_protocol::AppliedOperation::HtmlExtraction,
+                        tokenless_protocol::AppliedOperation::BuildLogReduction,
+                        tokenless_protocol::AppliedOperation::TabularCompaction,
+                    ]
+                );
+                let output: serde_json::Value = serde_json::from_str(&response.output).unwrap();
+                assert!(output["envelope"].is_string());
+                let inner: serde_json::Value =
+                    serde_json::from_str(output["envelope"].as_str().unwrap()).unwrap();
+
+                for (visible_text, expected) in [
+                    (output["stdout"].as_str().unwrap(), shared_log),
+                    (inner["csv"].as_str().unwrap(), own_csv),
+                    (inner["html"].as_str().unwrap(), own_html),
+                ] {
+                    let hash = tokenless_ccr::recovery_hashes(
+                        visible_text,
+                        &tokenless_protocol::RecoveryMethod::Shell,
+                    )[0];
+                    assert!(response.stash_keys.contains(&hash.to_owned()));
+                    let restored = runtime
+                        .retrieve_authorized(
+                            &RetrieveRequest {
+                                hash_or_marker: hash.to_owned(),
+                                visible_markers: vec![visible_text.to_owned()],
+                            },
+                            &attribution,
+                        )
+                        .unwrap();
+                    assert_eq!(restored.payload, expected);
+
+                    // Retrieved payloads passed back as `ResultKind::Retrieve` never re-compress.
+                    let retrieve_pass = runtime
+                        .post_tool(
+                            &PostToolRequest {
+                                result_kind: ResultKind::Retrieve,
+                                tool_name: "Bash".to_owned(),
+                                content: restored.payload.clone(),
+                                status: ToolResultStatus::Success,
+                                content_origin: ContentOrigin::CommandOutput,
+                                command: Some(format!("tokenless retrieve {hash}")),
+                                output_optimization: OutputOptimization::None,
+                                capabilities: PostToolCapabilities {
+                                    replace_output: true,
+                                    recovery: tokenless_protocol::RecoveryMethod::Shell,
+                                    replace_with_text: true,
+                                },
+                                exit_code: None,
+                                stderr: None,
+                                original_command: None,
+                                cwd: None,
+                            },
+                            &attribution,
+                        )
+                        .unwrap();
+                    assert_eq!(retrieve_pass.disposition, Disposition::Passthrough);
+                    assert_eq!(retrieve_pass.output, restored.payload);
+                    assert!(retrieve_pass.stash_keys.is_empty());
+                }
+            });
+        }
+    });
+
+    let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+    for session in 0..4 {
+        let records = recorder
+            .records_by_session(&format!("sess-{session}"), None)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].content_type.as_deref(), Some("json"));
+        assert_eq!(
+            records[0].applied_operations,
+            Some(vec![
+                "html_extraction".to_owned(),
+                "build_log_reduction".to_owned(),
+                "tabular_compaction".to_owned(),
+            ])
+        );
+    }
+}
+
+#[test]
+fn runtime_exclude_commands_coexists_with_embedded_content_routing() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = TokenlessRuntime::new(RuntimeConfig {
+        data_dir: Some(directory.path().to_path_buf()),
+        stats_enabled: false,
+        embedded_content_enabled: true,
+        exclude_commands: vec!["custom-cli".to_owned(), "cat".to_owned()],
+        ..RuntimeConfig::default()
+    })
+    .unwrap();
+
+    let mut cargo_log = String::new();
+    for idx in 1..=32 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut cargo_log,
+            format_args!(
+                "   Compiling coexist-pkg-{idx:02} v0.1.{idx} (/work/coexist)
+"
+            ),
+        );
+    }
+    cargo_log.push_str(
+        "error[E0308]: mismatched types
+  --> src/lib.rs:9:5
+   |
+9  |     42
+   |     ^^ expected `()`, found integer
+error: could not compile `coexist` (lib) due to 1 previous error
+",
+    );
+    let payload = serde_json::json!({
+        "status": "failed",
+        "stdout": cargo_log,
+    })
+    .to_string();
+    let attribution = ProtocolAttribution {
+        agent_id: "runtime-test".to_owned(),
+        session_id: Some("coexist-session".to_owned()),
+        tool_use_id: Some("call-coexist".to_owned()),
+    };
+    let make_request = |origin: ContentOrigin, command: Option<&str>| PostToolRequest {
+        result_kind: ResultKind::Tool,
+        tool_name: "Bash".to_owned(),
+        content: payload.clone(),
+        status: ToolResultStatus::Success,
+        content_origin: origin,
+        output_optimization: OutputOptimization::None,
+        command: command.map(str::to_owned),
+        capabilities: PostToolCapabilities {
+            replace_output: true,
+            recovery: tokenless_protocol::RecoveryMethod::Shell,
+            replace_with_text: false,
+        },
+        exit_code: None,
+        stderr: None,
+        original_command: None,
+        cwd: None,
+    };
+
+    // Excluded CommandOutput and FileRead (both refined from CommandOutput and explicit FileRead)
+    // bypass the PostTool pipeline before embedded JSON routing or Stash writes.
+    for (origin, cmd) in [
+        (
+            ContentOrigin::CommandOutput,
+            Some("timeout 10 custom-cli --json"),
+        ),
+        (ContentOrigin::CommandOutput, Some("cat build-report.json")),
+        (ContentOrigin::FileRead, Some("cat build-report.json")),
+    ] {
+        let excluded = runtime
+            .post_tool(&make_request(origin, cmd), &attribution)
+            .unwrap();
+        assert_eq!(excluded.disposition, Disposition::Passthrough);
+        assert_eq!(excluded.output, payload);
+        assert!(excluded.applied_operations.is_empty());
+        assert!(excluded.stash_keys.is_empty());
+    }
+
+    // Non-excluded commands on CommandOutput/FileRead and ApiResponse (even with an excluded
+    // command string attached) still route embedded JSON values via embedded_content_enabled.
+    for (origin, cmd) in [
+        (ContentOrigin::CommandOutput, Some("other-cli --json")),
+        (
+            ContentOrigin::FileRead,
+            Some("head -n 200 build-report.json"),
+        ),
+        (ContentOrigin::ApiResponse, Some("custom-cli --json")),
+    ] {
+        let routed = runtime
+            .post_tool(&make_request(origin, cmd), &attribution)
+            .unwrap();
+        assert_eq!(routed.disposition, Disposition::Applied);
+        assert_eq!(
+            routed.applied_operations,
+            [tokenless_protocol::AppliedOperation::BuildLogReduction]
+        );
+        assert_eq!(routed.stash_keys.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&routed.output).unwrap();
+        assert!(
+            parsed["stdout"]
+                .as_str()
+                .unwrap()
+                .starts_with("[Build log reduced; ")
+        );
+    }
 }

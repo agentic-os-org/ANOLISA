@@ -40,6 +40,8 @@ pub struct EntryOptions {
     /// Whether complete HTML documents, and HTML inside JSON string values, are rendered as
     /// Markdown with original recovery. Enabled by default.
     pub html_extraction_enabled: bool,
+    /// Whether non-HTML domains embedded in JSON string values are routed in place.
+    pub embedded_content_enabled: bool,
     /// Whether browser accessibility snapshots are re-encoded as record tables
     /// with original recovery. Enabled by default.
     pub browser_snapshot_enabled: bool,
@@ -1536,6 +1538,7 @@ pub(crate) fn post_tool_with_store(
                 search_path_sharing_enabled: options.search_path_sharing_enabled,
                 diff_compression_enabled: options.diff_compression_enabled,
                 html_extraction_enabled: options.html_extraction_enabled,
+                embedded_content_enabled: options.embedded_content_enabled,
                 browser_snapshot_enabled: options.browser_snapshot_enabled,
                 mixed_content_enabled: options.mixed_content_enabled,
                 stash_enabled: options.stash_enabled,

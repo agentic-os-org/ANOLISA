@@ -147,83 +147,31 @@ impl BuildLogCompressor {
             .into_iter()
             .collect::<Vec<_>>();
         let store = stash.filter(|_| recovery.is_available());
-        let detected = detect_log_with_mode(&cleaned, mode);
-        let Some(route) = detected.route else {
+        let PreparedBuildLog::Planned(plan) = prepare_build_log(&cleaned, store, false, mode)
+        else {
             return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
         };
-        if matches!(route, DetectedRoute::Scored(_)) && store.is_none() {
-            return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
-        }
-
-        let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
-        // Stage 0: preserve already-compacted scoped results as terminal on scored routes even
-        // when an oversized preamble pushes the template header out of the sample window.
-        // Stage 1 routes enforce their own same-dialect compacted guards without cross-dialect vetoes.
-        if matches!(route, DetectedRoute::Scored(_)) && has_scoped_compacted_header(&lines) {
-            return lossless_outcome(cleaned, lossless_operations, Vec::new(), 0);
-        }
-
-        let stripped = lines
-            .iter()
-            .map(|line| line.trim_end_matches('\n').to_owned())
-            .collect::<Vec<_>>();
-        let mut diagnostic_mask = vec![false; lines.len()];
-        for region in trace_regions(&stripped) {
-            diagnostic_mask[region].fill(true);
-        }
-        if mode == BuildLogMode::DiagnosticFailure {
-            for (mask, line) in diagnostic_mask.iter_mut().zip(&stripped) {
-                if is_failure_mode_anchor(line.trim()) {
-                    *mask = true;
-                }
-            }
-        }
-
-        // Stage 1: lossless structural layout planning (independent of Stash availability).
-        let stage1 = plan_stage1(route, &lines, &diagnostic_mask);
-        let mut layouts = stage1.layouts;
-
-        // Stage 2: residual line-role classification for optional Stash omission.
-        let (mut roles, run_starts) = build_stage2_roles(
-            stage1.residual,
-            &detected.sample,
-            &lines,
-            &stripped,
-            store,
-            mode,
-        );
-        for (role, &is_diag) in roles.iter_mut().zip(&diagnostic_mask) {
-            if is_diag {
-                *role = LineRole::Diagnostic;
-            }
-        }
-        debug_assert!(
-            layouts
-                .iter()
-                .all(|edit| !roles[edit.start..edit.end].contains(&LineRole::Diagnostic))
-        );
-
-        let layout_output = render_reduced(&lines, &[], &[], recovery, &layouts);
-        let lossless = if saves_both(&cleaned, &layout_output) {
+        if plan.layout_saved {
             lossless_operations.push(BuildLogOperation::Reduction);
-            layout_output
-        } else {
-            layouts.clear();
-            cleaned.clone()
-        };
+        }
         let Some(store) = store else {
-            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
+            return lossless_outcome(plan.lossless, lossless_operations, Vec::new(), 0);
         };
-        let plans = omission_plans(&lines, &roles, &run_starts, recovery);
+        let plans = omission_plans(
+            &plan.lines,
+            &plan.roles,
+            &plan.run_starts,
+            MarkerStyle::PerGap(recovery),
+        );
         if plans.is_empty() {
-            return lossless_outcome(lossless, lossless_operations, Vec::new(), 0);
+            return lossless_outcome(plan.lossless, lossless_operations, Vec::new(), 0);
         }
 
         let mut writes = Vec::with_capacity(plans.len());
         let mut keys = Vec::with_capacity(plans.len());
         let mut stash_errors = 0;
-        for plan in &plans {
-            match store.stash(&plan.payload) {
+        for omission in &plans {
+            match store.stash(&omission.payload) {
                 Ok(write) => {
                     keys.push(write.key.clone());
                     writes.push(write);
@@ -235,19 +183,22 @@ impl BuildLogCompressor {
             }
         }
         if stash_errors > 0 {
-            return lossless_outcome(lossless, lossless_operations, writes, stash_errors);
+            return lossless_outcome(plan.lossless, lossless_operations, writes, stash_errors);
         }
 
-        let reduced = render_reduced(&lines, &plans, &keys, recovery, &layouts);
-        if !saves_both(&lossless, &reduced) {
-            return lossless_outcome(lossless, lossless_operations, writes, 0);
+        let reduced = render_reduced(&plan.lines, &plans, &keys, recovery, &plan.layouts);
+        if !saves_both(&plan.lossless, &reduced) {
+            return lossless_outcome(plan.lossless, lossless_operations, writes, 0);
         }
 
         let mut operations = lossless_operations;
         if !operations.contains(&BuildLogOperation::Reduction) {
             operations.push(BuildLogOperation::Reduction);
         }
-        let omitted_lines = plans.iter().map(|plan| plan.end - plan.start).sum();
+        let omitted_lines = plans
+            .iter()
+            .map(|omission| omission.end - omission.start)
+            .sum();
         BuildLogOutcome {
             output: reduced,
             operations,
@@ -260,6 +211,152 @@ impl BuildLogCompressor {
             },
         }
     }
+
+    /// Renders a compact, Stash-free view of an embedded build/test log for
+    /// callers that stash the complete original value once at the outer slot.
+    ///
+    /// Shares Stage 0–Stage 2 detection, failure-mode anchor protection, layout
+    /// compaction, and top-24 routine omission selection with
+    /// [`Self::compress_with_options`], diverging only by emitting inline count
+    /// notices instead of per-gap Stash markers.
+    #[must_use]
+    pub(crate) fn render_embedded_view(&self, input: &str, mode: BuildLogMode) -> Option<String> {
+        if !input.contains('\n') {
+            return None;
+        }
+        let cleaned = clean_terminal(input);
+        match prepare_build_log(&cleaned, None, true, mode) {
+            PreparedBuildLog::Unrecognized => None,
+            PreparedBuildLog::TerminalCleaned => saves_both(input, &cleaned).then_some(cleaned),
+            PreparedBuildLog::Planned(plan) => {
+                let plans = omission_plans(
+                    &plan.lines,
+                    &plan.roles,
+                    &plan.run_starts,
+                    MarkerStyle::Embedded,
+                );
+                let best = if plans.is_empty() {
+                    plan.lossless
+                } else {
+                    let reduced = render_reduced(
+                        &plan.lines,
+                        &plans,
+                        &[],
+                        &RecoveryMethod::None,
+                        &plan.layouts,
+                    );
+                    if saves_both(&plan.lossless, &reduced) {
+                        reduced
+                    } else {
+                        plan.lossless
+                    }
+                };
+                saves_both(input, &best).then_some(best)
+            }
+        }
+    }
+}
+
+enum PreparedBuildLog<'a> {
+    Unrecognized,
+    TerminalCleaned,
+    Planned(PlannedBuildLog<'a>),
+}
+
+struct PlannedBuildLog<'a> {
+    lines: Vec<&'a str>,
+    layouts: Vec<LayoutEdit>,
+    roles: Vec<LineRole>,
+    run_starts: HashSet<usize>,
+    lossless: String,
+    layout_saved: bool,
+}
+
+fn prepare_build_log<'a>(
+    cleaned: &'a str,
+    store: Option<&dyn StashStore>,
+    allow_omissions: bool,
+    mode: BuildLogMode,
+) -> PreparedBuildLog<'a> {
+    let omissions_allowed = store.is_some() || allow_omissions;
+    let detected = detect_log_with_mode(cleaned, mode);
+    let Some(route) = detected.route else {
+        return PreparedBuildLog::Unrecognized;
+    };
+    if matches!(route, DetectedRoute::Scored(_)) && !omissions_allowed {
+        return PreparedBuildLog::TerminalCleaned;
+    }
+
+    let lines = cleaned.split_inclusive('\n').collect::<Vec<_>>();
+    // Stage 0: preserve already-compacted scoped results as terminal on scored routes even
+    // when an oversized preamble pushes the template header out of the sample window.
+    // Stage 1 routes enforce their own same-dialect compacted guards without cross-dialect vetoes.
+    if matches!(route, DetectedRoute::Scored(_)) && has_scoped_compacted_header(&lines) {
+        return PreparedBuildLog::TerminalCleaned;
+    }
+
+    let stripped = lines
+        .iter()
+        .map(|line| line.trim_end_matches('\n').to_owned())
+        .collect::<Vec<_>>();
+    let mut diagnostic_mask = vec![false; lines.len()];
+    for region in trace_regions(&stripped) {
+        diagnostic_mask[region].fill(true);
+    }
+    if mode == BuildLogMode::DiagnosticFailure {
+        for (mask, line) in diagnostic_mask.iter_mut().zip(&stripped) {
+            if is_failure_mode_anchor(line.trim()) {
+                *mask = true;
+            }
+        }
+    }
+
+    // Stage 1: lossless structural layout planning (independent of Stash availability).
+    let stage1 = plan_stage1(route, &lines, &diagnostic_mask);
+    let mut layouts = stage1.layouts;
+
+    // Stage 2: residual line-role classification for optional omission.
+    let (mut roles, run_starts) = build_stage2_roles(
+        stage1.residual,
+        &detected.sample,
+        &lines,
+        &stripped,
+        store,
+        allow_omissions,
+        mode,
+    );
+    for (role, &is_diag) in roles.iter_mut().zip(&diagnostic_mask) {
+        if is_diag {
+            *role = LineRole::Diagnostic;
+        }
+    }
+    debug_assert!(
+        layouts
+            .iter()
+            .all(|edit| !roles[edit.start..edit.end].contains(&LineRole::Diagnostic))
+    );
+
+    let layout_output = render_reduced(&lines, &[], &[], &RecoveryMethod::None, &layouts);
+    let (lossless, layout_saved) = if saves_both(cleaned, &layout_output) {
+        (layout_output, true)
+    } else {
+        layouts.clear();
+        (cleaned.to_owned(), false)
+    };
+    PreparedBuildLog::Planned(PlannedBuildLog {
+        lines,
+        layouts,
+        roles,
+        run_starts,
+        lossless,
+        layout_saved,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum MarkerStyle<'a> {
+    PerGap(&'a RecoveryMethod),
+    Embedded,
 }
 
 struct OmissionPlan {
@@ -302,7 +399,7 @@ fn omission_plans(
     lines: &[&str],
     roles: &[LineRole],
     run_starts: &HashSet<usize>,
-    recovery: &RecoveryMethod,
+    marker_style: MarkerStyle<'_>,
 ) -> Vec<OmissionPlan> {
     let mut scored = Vec::new();
     let mut index = 0;
@@ -322,12 +419,15 @@ fn omission_plans(
             let start = index + ROUTINE_EDGE_LINES;
             let omitted_end = end - ROUTINE_EDGE_LINES;
             let payload = lines[start..omitted_end].concat();
-            let marker = render_marker(
-                family,
-                omitted_end - start,
-                &compute_key(payload.as_bytes()),
-                recovery,
-            );
+            let marker = match marker_style {
+                MarkerStyle::PerGap(recovery) => render_marker(
+                    family,
+                    omitted_end - start,
+                    &compute_key(payload.as_bytes()),
+                    recovery,
+                ),
+                MarkerStyle::Embedded => render_embedded_marker(family, omitted_end - start),
+            };
             if saves_both(&payload, &marker) {
                 let saved_tokens =
                     estimate_tokens(&payload).saturating_sub(estimate_tokens(&marker));
@@ -370,18 +470,21 @@ fn render_reduced(
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0;
-    let mut omissions = plans.iter().zip(keys).peekable();
+    let mut omissions = plans.iter().enumerate().peekable();
     let mut layouts = layouts.iter().peekable();
     while cursor < lines.len() {
-        if let Some((plan, key)) = omissions.peek()
+        if let Some(&(idx, plan)) = omissions.peek()
             && plan.start == cursor
         {
-            output.push_str(&render_marker(
-                plan.family,
-                plan.end - plan.start,
-                key,
-                recovery,
-            ));
+            let omitted_count = plan.end - plan.start;
+            match keys.get(idx) {
+                Some(key) => {
+                    output.push_str(&render_marker(plan.family, omitted_count, key, recovery));
+                }
+                None => {
+                    output.push_str(&render_embedded_marker(plan.family, omitted_count));
+                }
+            }
             cursor = plan.end;
             omissions.next();
         } else if let Some(layout) = layouts.peek()
@@ -409,6 +512,10 @@ fn render_marker(
         family.label(),
         recovery_instruction(key, recovery),
     )
+}
+
+fn render_embedded_marker(family: RoutineFamily, omitted_lines: usize) -> String {
+    format!("{omitted_lines} {} lines omitted.\n", family.label())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -568,10 +675,12 @@ fn scoped_fallback_roles(
     sample: &[String],
     protected_ranges: &[Range<usize>],
     store: Option<&dyn StashStore>,
+    allow_omissions: bool,
     is_protected_step: fn(&str) -> bool,
     mode: BuildLogMode,
 ) -> Vec<LineRole> {
-    let sub_format = if store.is_some() {
+    let omissions_allowed = store.is_some() || allow_omissions;
+    let sub_format = if omissions_allowed {
         detect_scored_format(sample).or_else(|| {
             (mode == BuildLogMode::Success)
                 .then(|| detect_generic(sample))
@@ -612,14 +721,16 @@ fn build_stage2_roles(
     lines: &[&str],
     stripped: &[String],
     store: Option<&dyn StashStore>,
+    allow_omissions: bool,
     mode: BuildLogMode,
 ) -> (Vec<LineRole>, HashSet<usize>) {
+    let omissions_allowed = store.is_some() || allow_omissions;
     match residual {
         ResidualPolicy::Provided { roles, run_starts } => (roles, run_starts),
         ResidualPolicy::KeepResidual => (vec![LineRole::Summary; lines.len()], HashSet::new()),
         ResidualPolicy::MavenTransfersOrGeneric => {
             if maven::is_compacted(lines)
-                || store.is_none()
+                || !omissions_allowed
                 || mode == BuildLogMode::DiagnosticFailure
             {
                 return (vec![LineRole::Summary; lines.len()], HashSet::new());
@@ -643,7 +754,7 @@ fn build_stage2_roles(
         }
         ResidualPolicy::AnchoredGeneric => {
             if mode == BuildLogMode::Success
-                && store.is_some()
+                && omissions_allowed
                 && let Some(generic) = detect_generic(sample)
             {
                 return (
@@ -662,6 +773,7 @@ fn build_stage2_roles(
                 sample,
                 &protected_ranges,
                 store,
+                allow_omissions,
                 is_protected_step,
                 mode,
             ),
