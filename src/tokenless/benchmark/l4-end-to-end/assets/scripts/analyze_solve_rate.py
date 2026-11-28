@@ -29,6 +29,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 L4 = os.path.normpath(os.path.join(HERE, "..", ".."))
 
 
+def collected_host_id(directory: str) -> str | None:
+    """Read the fleet host ID from a collected host directory name."""
+    name = os.path.basename(os.path.normpath(directory))
+    match = re.match(r"(host[0-9]+)(?:-|$)", name)
+    return match.group(1) if match else None
+
+
 def selected_task_ids(run_dir):
     for path in (
         os.path.join(os.path.dirname(run_dir), "selection.json"),
@@ -83,7 +90,7 @@ def unscored_cells(evals, runs, seen_runs):
         no_predictions = finished and submitted == 0
         host_dir = os.path.dirname(os.path.dirname(os.path.dirname(arm_dir)))
         yield {
-            "host": os.path.basename(host_dir),
+            "host": collected_host_id(host_dir) or os.path.basename(host_dir),
             "repeat": int(match.group(1)),
             "arm": arm_match.group(1),
             "selected": len(selected),
@@ -153,10 +160,7 @@ def load_reports(evals: str, runs: str | None = None, allow_legacy: bool = False
                 f"cannot bind evaluation to current predictions: {path}; supply --runs, "
                 "or --allow-legacy for explicitly unverified historical reports"
             )
-        host = "unknown"
-        hm = re.search(r"(host\d)", path)
-        if hm:
-            host = hm.group(1)
+        host = collected_host_id(run_root) or "unknown"
         try:
             doc = json.load(open(path))
         except (OSError, json.JSONDecodeError):
