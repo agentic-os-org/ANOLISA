@@ -705,11 +705,7 @@ fn rewrite_after_doc_label(line: &str, rewrite: impl Fn(&str) -> String) -> Stri
 /// is never partially rewritten. Position checks always run against the full
 /// (pre-substitution) line with absolute offsets, so a later match on the same
 /// line — an argument of an earlier rewritten command — keeps its original
-/// context.
-fn rewrite_invocation_tokens(line: &str, needle: &str, candidates: &[(&str, &str)]) -> String {
-    rewrite_invocation_tokens_if(line, needle, candidates, |_, _, _| true)
-}
-
+/// context. The predicate checks the prefix and arguments of each match.
 fn rewrite_invocation_tokens_if(
     line: &str,
     needle: &str,
@@ -801,9 +797,6 @@ fn pip_option_requires_pip(word: &str) -> bool {
     )
 }
 
-// Inspect only this invocation's arguments, preserving quoting and command
-// boundaries in the output. An unfinished token can continue on the next line,
-// so leave it to pip as well.
 fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
     // uv ignores PIP_USER. Keep pip whenever the preceding shell text mentions
     // it, including assignments, exports and wrapper arguments. Evaluating
@@ -814,6 +807,16 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
     {
         return false;
     }
+    invocation_can_use_uv(prefix, tail, pip_option_requires_pip)
+}
+
+// Inspect only this invocation's arguments. An unfinished token can continue
+// on the next line, so preserve the original command in that case too.
+fn invocation_can_use_uv(
+    prefix: &str,
+    tail: &str,
+    requires_original: impl Fn(&str) -> bool,
+) -> bool {
     let mut word = String::new();
     let mut quote = None;
     let mut escaped = false;
@@ -836,8 +839,8 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
         } else {
             match ch {
                 '\'' | '"' => quote = Some(ch),
-                ';' | '|' | ')' => return !pip_option_requires_pip(&word),
-                '&' if chars.peek() != Some(&'>') => return !pip_option_requires_pip(&word),
+                ';' | '|' | ')' => return !requires_original(&word),
+                '&' if chars.peek() != Some(&'>') => return !requires_original(&word),
                 '#' if word.is_empty() => return true,
                 '`' => {
                     let mut length = 1;
@@ -846,14 +849,14 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
                         length += 1;
                     }
                     // Stop at this span, not at a later span or trailing prose.
-                    return !pip_option_requires_pip(&word) && inline_delimiter == Some(length);
+                    return !requires_original(&word) && inline_delimiter == Some(length);
                 }
                 // Bare parentheses delimit prose; substitutions can supply
-                // unknown arguments and must retain the original installer.
+                // unknown arguments and must retain the original command.
                 '$' if chars.peek() == Some(&'(') => return false,
-                '(' => return !pip_option_requires_pip(&word),
+                '(' => return !requires_original(&word),
                 '<' | '>' => {
-                    if pip_option_requires_pip(&word) || chars.peek() == Some(&'(') {
+                    if requires_original(&word) || chars.peek() == Some(&'(') {
                         return false;
                     }
                     word.clear();
@@ -864,7 +867,7 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
                     }
                 }
                 ch if ch.is_whitespace() || ch == '&' => {
-                    if pip_option_requires_pip(&word) {
+                    if requires_original(&word) {
                         return false;
                     }
                     word.clear();
@@ -873,24 +876,37 @@ fn pip_install_can_use_uv(prefix: &str, tail: &str) -> bool {
             }
         }
     }
-    !escaped && quote.is_none() && !pip_option_requires_pip(&word)
+    !escaped && quote.is_none() && !requires_original(&word)
 }
 
 /// Normalize `python -m venv` / `python3 -m venv` without changing prose or
 /// argument positions: `echo python -m venv`, a prose mention, and the module
 /// name inside another command's arguments are not invocations. `venv` must be
 /// the whole module name, so `python -m venvwrapper` keeps its text. Both
-/// spellings are rewritten wherever they are invoked, and the `Run: `
+/// spellings keep Python when an option requires its venv module. The `Run: `
 /// documentation label is transparent, as for the pip form.
 fn rewrite_python_venv_invocations(line: &str) -> String {
     rewrite_after_doc_label(line, |commands| {
-        rewrite_invocation_tokens(
+        rewrite_invocation_tokens_if(
             commands,
             "python",
             &[
                 ("python3 -m venv", "uv venv"),
                 ("python -m venv", "uv venv"),
             ],
+            |prefix, _, tail| {
+                invocation_can_use_uv(prefix, tail, |word| {
+                    matches!(
+                        word,
+                        "--copies"
+                            | "--symlinks"
+                            | "--upgrade"
+                            | "--upgrade-deps"
+                            | "--without-pip"
+                            | "--without-scm-ignore-files"
+                    )
+                })
+            },
         )
     })
 }
@@ -2634,6 +2650,42 @@ Run: pip install requests
         assert_eq!(result, expected);
         assert_eq!(compile(&result, &env), result);
         assert_eq!(compile(input, &env_linux_no_uv()), input);
+    }
+
+    #[test]
+    fn test_heuristic_venv_preserves_python_options() {
+        let env = env_darwin_uv();
+        for input in [
+            "python3 -m venv --copies .venv",
+            "python -m venv .venv --copies",
+            "python3 -m venv '.venv;a' '--copies'\r\n",
+            "python -m venv .venv \\\n  --copies\n",
+            "python -m venv --symlinks .venv",
+            "python -m venv --upgrade .venv",
+            "python -m venv --upgrade-deps .venv",
+            "python -m venv --without-pip .venv",
+            "python -m venv --without-scm-ignore-files .venv",
+        ] {
+            assert_eq!(compile(input, &env), input, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn test_heuristic_venv_scopes_options_to_invocation() {
+        let env = env_darwin_uv();
+        for interpreter in ["python3", "python"] {
+            for tail in [
+                ".venv",
+                ".venv && tool --copies",
+                ".venv | tool --copies",
+                ".venv; python -m venv --copies other",
+                "--prompt='env --copies' .venv",
+                "./--copies-backup",
+            ] {
+                let input = format!("{interpreter} -m venv {tail}");
+                assert_eq!(compile(&input, &env), format!("uv venv {tail}"), "{input}");
+            }
+        }
     }
 
     #[test]
