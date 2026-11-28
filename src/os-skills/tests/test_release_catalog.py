@@ -73,6 +73,22 @@ class ReleaseCatalogCliTest(unittest.TestCase):
         self.assertIn("usage:", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_manifest_rejects_released_skill_without_adapter_entry(self) -> None:
+        (self.source / "component.toml").write_text(
+            '[component]\nname = "os-skills"\n'
+            '[[adapters]]\nframework = "hermes"\n'
+            '[[adapters.hermes.skills]]\nname = "incubating"\n'
+            'source = "{datadir}/skills/incubating/"\n',
+            encoding="utf-8",
+        )
+        output = self.source / "filtered.toml"
+        result = self.run_catalog("manifest", str(self.source), str(output))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "released Skill has no OS Skills adapter entry: released", result.stderr
+        )
+        self.assertFalse(output.exists())
+
     @unittest.skipIf(
         sys.version_info < (3, 8),
         "Older interpreters parse these tools when running them",

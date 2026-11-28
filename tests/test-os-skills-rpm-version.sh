@@ -56,6 +56,14 @@ chmod +x "$tmp/rpmbuild"
 EXPECTED_VERSION=7.8.9 EXPECTED_SAMPLE_ADAPTER=true RPMBUILD="$tmp/rpmbuild" bash "$tmp/scripts/rpm-build.sh" os-skills
 EXPECTED_VERSION=9.9.9 VERSION=9.9.9 RPMBUILD="$tmp/rpmbuild" bash "$tmp/scripts/rpm-build.sh" os-skills
 cp "$root/src/os-skills/component.toml" "$tmp/src/os-skills/component.toml"
+# The fixture still releases "sample"; register it in the copied real contract
+# so the release catalog check recognises the fixture's single released Skill.
+cat >> "$tmp/src/os-skills/component.toml" <<'TOML'
+
+[[adapters.hermes.skills]]
+name = "sample"
+source = "{datadir}/skills/sample/"
+TOML
 component_version=$(python3 - "$root/scripts/check-component-versions.py" <<'PY'
 import runpy
 import sys

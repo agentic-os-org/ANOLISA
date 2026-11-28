@@ -110,7 +110,9 @@ class RawPackagingTests(unittest.TestCase):
             (root / "packaging/released-skills.txt").write_text("ai/example\n")
             with (root / "component.toml").open("a") as manifest:
                 manifest.write('\n[[adapters.hermes.skills]]\nname = "experimental"\n'
-                               'source = "{datadir}/skills/experimental/"\n')
+                               'source = "{datadir}/skills/experimental/"\n'
+                               '\n[[adapters.hermes.skills]]\nname = "example"\n'
+                               'source = "{datadir}/skills/example/"\n')
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             subprocess.run(
                 ["git", "-C", str(root), "add", "component.toml", "packaging", "ai"], check=True
