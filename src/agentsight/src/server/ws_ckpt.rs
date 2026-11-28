@@ -338,7 +338,10 @@ fn timestamp(text: &str) -> Option<DateTime<Utc>> {
 fn load(data: &AppState, kind: &str, id: &str) -> anyhow::Result<AtifTrajectory> {
     anyhow::ensure!(
         matches!(kind, "session" | "conversation" | "trajectory"),
-        "invalid trajectory source"
+        Rejected {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid trajectory source",
+        }
     );
     if kind != "trajectory" {
         if let Some(store) = &data.genai_store {
@@ -365,7 +368,10 @@ fn load(data: &AppState, kind: &str, id: &str) -> anyhow::Result<AtifTrajectory>
             }
         }
     }
-    anyhow::bail!("trajectory not found")
+    anyhow::bail!(Rejected {
+        status: StatusCode::NOT_FOUND,
+        message: "trajectory not found",
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -555,6 +561,17 @@ struct Rejected {
     message: &'static str,
 }
 
+fn decode_snapshot_cursor(raw: &str) -> Result<Cursor, Rejected> {
+    URL_SAFE_NO_PAD
+        .decode(raw)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or(Rejected {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid snapshot cursor",
+        })
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("restore refused; refresh changes and confirm again: {0}")]
 struct RestoreNoEffect(String);
@@ -617,6 +634,7 @@ pub(super) async fn get_snapshots(
         let now = Utc::now();
         let cfg = config(&data)?;
         let doc = load(&data, &kind, &id)?;
+        let cursor = cursor.as_deref().map(decode_snapshot_cursor).transpose()?;
         let Some(selector) = workspace(&doc, &cfg)? else {
             return Ok(json!({"trajectory": doc, "scope": null, "reason": "workspace_unresolved", "step_snapshots": {}}));
         };
@@ -633,7 +651,6 @@ pub(super) async fn get_snapshots(
         let boundaries: Vec<_> = doc.steps.iter().map(|step| (step.step_id, &step.source, &step.timestamp)).collect();
         let checkpoints = hermes_checkpoint_steps(&doc, &scope.path, ws);
         let revision = format!("{:x}", Sha256::digest(serde_json::to_vec(&(kind, id, boundaries, ws, &scope.path, cfg.socket(), &checkpoints))?));
-        let cursor: Option<Cursor> = cursor.map(|raw| -> anyhow::Result<_> { Ok(serde_json::from_slice(&URL_SAFE_NO_PAD.decode(raw)?)?) }).transpose()?;
         if let Some(cursor) = &cursor {
             anyhow::ensure!(&cursor.workspace == ws && cursor.revision == revision && cursor.as_of <= now, Rejected { status: StatusCode::CONFLICT, message: "snapshot page changed; reload from the first page" });
         }

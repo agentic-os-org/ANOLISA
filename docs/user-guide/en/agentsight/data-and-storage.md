@@ -359,7 +359,9 @@ credentials even on loopback.
   If a compatibility check fails, the response keeps `trajectory`, sets
   `scope: null` and `restore_enabled: false`, and returns an empty `step_snapshots`.
   Pass `completeness.next_cursor` as `cursor` to continue; all pages retain the
-  same Step boundaries and `as_of` cutoff. A changed revision requires a reload.
+  same Step boundaries and `as_of` cutoff. A cursor for a changed snapshot page
+  returns `409` and requires a reload. An unsupported `kind` or malformed
+  `cursor` returns `400`. A missing trajectory returns `404`.
   Snapshots before the first Step or at/after the cutoff appear only in
   `unassigned` diagnostics, never as a Step action.
 - `POST /api/ws-ckpt/diff`: body `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`.

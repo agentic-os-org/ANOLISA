@@ -314,7 +314,8 @@ sudo systemctl start agentsight.service
   返回 `trajectory`、`scope`、`step_snapshots`、`unassigned`、`association` 与
   `completeness`；未解析工作区时 `scope: null`。兼容性检查失败时保留 `trajectory`，
   返回 `scope: null`、`restore_enabled: false` 和空的 `step_snapshots`。把 `completeness.next_cursor` 作为
-  `cursor` 继续读取，各页共享 Step 边界和 `as_of`；轨迹版本变化时需重新查询。
+  `cursor` 继续读取，各页共享 Step 边界和 `as_of`。游标对应的快照页已变化时返回 `409`，
+  需重新查询。不支持的 `kind` 或格式无效的 `cursor` 返回 `400`。轨迹不存在时返回 `404`。
   首 Step 之前或截止时刻及之后的快照仅保留在 `unassigned` 诊断中，不生成 Step 按钮。
 - `POST /api/ws-ckpt/diff`：请求体为
   `{"workspace":"<WS_ID>","snapshot_id":"<FULL_ID>"}`。返回文件级 `changes`、权威
