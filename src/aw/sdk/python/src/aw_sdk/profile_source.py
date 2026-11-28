@@ -9,7 +9,6 @@ from collections.abc import AsyncIterator, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from time import monotonic
 from types import ModuleType
@@ -28,7 +27,7 @@ from aw_sdk._profile_patch import (
     Seam,
     function_code_sha256,
 )
-from aw_sdk._profile_stream import _SyncStream
+from aw_sdk._profile_stream import _Request, _SyncStream
 from aw_sdk._source_helpers import validate_identity
 from aw_sdk._source_profile import SUPPORTED_EVENTS
 from aw_sdk.client import Instance
@@ -43,21 +42,6 @@ from aw_sdk.transport import AwError
 __all__ = ["ProfileSource", "function_code_sha256"]
 
 _Result = TypeVar("_Result")
-
-
-@dataclass
-class _Request:
-    session: SourceSession
-    sync_streams: set[_SyncStream] = field(default_factory=set)
-    cleanup_tasks: set[asyncio.Future] = field(default_factory=set)
-    cleanup_error: BaseException | None = None
-    calls: int = 0
-    ended: bool = False
-    drained: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def require_live(self) -> None:
-        if self.ended and self.session._native_owner() is not self:
-            raise AwError("source_request_session_required")
 
 
 class ProfileSource:
@@ -90,25 +74,28 @@ class ProfileSource:
         availability: str = "required",
         session_id: str | None = None,
         session_id_context: SessionIdentity | None = None,
+        _additional_profiles: tuple[str, ...] = (),
     ) -> None:
-        document = parse_profile(profile)
-        self._hooks = compile_hooks(document["targets"])
+        documents = [parse_profile(item) for item in (profile, *_additional_profiles)]
+        targets = [target for document in documents for target in document["targets"]]
+        self._hooks = compile_hooks(targets)
         if any(event not in SUPPORTED_EVENTS for event in self._hooks):
             raise AwError("semantic_event_unavailable")
-        package = document["package"]
-        try:
-            installed = version(package["name"])
-        except PackageNotFoundError as error:
-            raise AwError("source_probe_package_missing") from error
-        if not version_matches(installed, package["versions"]):
-            raise AwError("source_probe_package_mismatch")
+        for document in documents:
+            package = document["package"]
+            try:
+                installed = version(package["name"])
+            except PackageNotFoundError as error:
+                raise AwError("source_probe_package_missing") from error
+            if not version_matches(installed, package["versions"]):
+                raise AwError("source_probe_package_mismatch")
         if availability not in ("required", "native_fallback"):
             raise AwError("availability_required")
         self._availability = availability
         self._session_id = None if session_id is None else validate_identity(session_id)
         self._session_id_context = session_id_context
         self._targets: dict[str, list[dict[str, Any]]] = {}
-        for target in document["targets"]:
+        for target in targets:
             fields = target["fields"]
             if ("input" in fields and fields["input"]["codec"] == "text") or (
                 "turn.stop" in target["hooks"] and "output" in fields
@@ -149,7 +136,9 @@ class ProfileSource:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._drain_task: asyncio.Task[BaseException | None] | None = None
         self._source: LanguageSource | None = None
-        self._request_context: ContextVar[_Request] = ContextVar("aw_profile_request")
+        self._request_context: ContextVar[_Request | None] = ContextVar(
+            "aw_profile_request"
+        )
         self._timeout_ms = 5000
         self._owns_source = False
         self._poisoned = False
@@ -550,9 +539,12 @@ class ProfileSource:
             return error
         return None
 
+    def _current_request(self) -> _Request | None:
+        return self._request_context.get(None)
+
     def _call_request(self) -> _Request | None:
         with self._lock:
-            request = self._request_context.get(None)
+            request = self._current_request()
             if self._state == "active" or (
                 self._state == "draining"
                 and request is not None
@@ -573,7 +565,7 @@ class ProfileSource:
             return None
 
     def _check_request(self, request: _Request) -> None:
-        if self._request_context.get(None) is not request:
+        if self._current_request() is not request:
             raise AwError("source_request_session_mismatch")
         request.require_live()
 
@@ -641,6 +633,10 @@ class ProfileSource:
             hook.close()
             raise AwError("source_unavailable") from None
         return pending.result()
+
+    def _check_stream_loop(self) -> None:
+        if asyncio.get_running_loop() is not self._loop:
+            raise AwError("source_activation_loop_required")
 
     async def _async(self, hook: Coroutine[Any, Any, _Result]) -> _Result:
         if asyncio.get_running_loop() is not self._loop:

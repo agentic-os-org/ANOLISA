@@ -11,6 +11,7 @@ pub(crate) mod instance;
 mod native;
 mod native_setup;
 mod policy;
+pub(crate) mod profile_launch;
 mod qoder_bootstrap;
 mod readiness;
 mod run;

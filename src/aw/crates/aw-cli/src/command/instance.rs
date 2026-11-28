@@ -22,7 +22,7 @@ pub(super) struct Instance {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Action {
-    /// Install one-time native startup wiring in an explicit private directory
+    /// Install native startup wiring or configured SDK profile bootstrap files
     Setup(Setup),
     /// Prepare bridge assets for the calling application's native factory
     Prepare(PrepareCommand),

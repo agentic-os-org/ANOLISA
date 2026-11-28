@@ -4,9 +4,9 @@ import errno
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import stat
+from pathlib import Path
 
 from aw_sdk.configuration import claude_transport_hints
 from aw_sdk.transport import AwError
@@ -46,17 +46,31 @@ def check_filesystems(*descriptors: int) -> None:
     pending = set()
     for descriptor in descriptors:
         with open(f"/proc/self/fdinfo/{descriptor}") as info:
-            ids = [line.partition(":")[2].strip() for line in info if line.startswith("mnt_id:")]
+            ids = [
+                line.partition(":")[2].strip()
+                for line in info
+                if line.startswith("mnt_id:")
+            ]
         if len(ids) != 1 or not ids[0].isdigit():
             raise ValueError()
         pending.add(ids[0])
-    with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as mounts:
+    with open(
+        "/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape"
+    ) as mounts:
         for line in mounts:
             mount_id, _, details = line.partition(" ")
             if mount_id not in pending:
                 continue
             filesystem = details.partition(" - ")[2].partition(" ")[0]
-            if filesystem not in {"ext2", "ext3", "ext4", "xfs", "btrfs", "tmpfs", "overlay"}:
+            if filesystem not in {
+                "ext2",
+                "ext3",
+                "ext4",
+                "xfs",
+                "btrfs",
+                "tmpfs",
+                "overlay",
+            }:
                 raise ValueError()
             pending.remove(mount_id)
             if not pending:
@@ -93,8 +107,12 @@ def read_file(path: str) -> bytes:
     return _read_file(path)[0]
 
 
-def _read_file(path: str) -> tuple[bytes, int]:
-    if not isinstance(path, str) or not Path(path).is_absolute() or ".." in path.split("/"):
+def _read_file(path: str, limit: int = LIMIT) -> tuple[bytes, int]:
+    if (
+        not isinstance(path, str)
+        or not Path(path).is_absolute()
+        or ".." in path.split("/")
+    ):
         raise AwError("sdk_descriptor_file_invalid")
     parent = None
     try:
@@ -125,7 +143,7 @@ def _read_file(path: str) -> tuple[bytes, int]:
             info = os.fstat(stream.fileno())
             if (
                 not stat.S_ISREG(info.st_mode)
-                or info.st_size > LIMIT
+                or info.st_size > limit
                 or info.st_uid != os.geteuid()
                 or info.st_mode & 0o7022
                 or info.st_nlink != 1
@@ -133,12 +151,13 @@ def _read_file(path: str) -> tuple[bytes, int]:
                 raise ValueError()
             check_filesystems(parent, stream.fileno())
             reject_acls(parent, directory=True)
-            data = stream.read(LIMIT + 1)
+            data = stream.read(limit + 1)
             reject_acls(stream.fileno())
             reject_acls(parent, directory=True)
             current_parent = os.fstat(parent)
             if (
-                len(data) > LIMIT
+                len(data) > limit
+                or len(data) != info.st_size
                 or identity(info) != identity(os.fstat(stream.fileno()))
                 or identity(info)
                 != identity(os.stat(parts[-1], dir_fd=parent, follow_symlinks=False))
@@ -163,6 +182,59 @@ def object_fields(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+SDK_PROFILE = {
+    "adapter": "sdk",
+    "version": "aw-hook-source/v1",
+    "entrypoint": "application",
+}
+SDK_EVENTS = {
+    "session.start": {"observe"},
+    "turn.stop": {"observe", "block"},
+    "session.end": {"observe"},
+    "input.submit": {"observe", "block"},
+    "tool.before": {"observe", "block", "replace_input"},
+    "tool.after": {"observe", "replace_result"},
+}
+
+
+def validate_instrumentation(binding: object, profile: dict) -> None:
+    if (
+        profile != SDK_PROFILE
+        or not isinstance(binding, dict)
+        or set(binding) != {"runtime", "profiles", "events", "failure_actions"}
+        or binding["runtime"] not in ("python", "js")
+    ):
+        raise ValueError()
+    profiles, events, actions = (
+        binding[key] for key in ("profiles", "events", "failure_actions")
+    )
+    if (
+        not isinstance(profiles, dict)
+        or not 1 <= len(profiles) <= 16
+        or any(
+            not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", name)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+            for name, digest in profiles.items()
+        )
+        or not isinstance(events, dict)
+    ):
+        raise ValueError()
+    for event, effects in events.items():
+        if (
+            event not in SDK_EVENTS
+            or not isinstance(effects, list)
+            or "observe" not in effects
+            or len(effects) != len(set(effects))
+            or not set(effects) <= SDK_EVENTS[event]
+        ):
+            raise ValueError()
+    if actions != {} and (
+        actions != {"tool.after": ["withhold_result"]} or "tool.after" not in events
+    ):
+        raise ValueError()
+
+
 def load_descriptor(
     config_file: str,
     descriptor_file: str,
@@ -175,7 +247,12 @@ def load_descriptor(
     encoded, mode = _read_file(descriptor_file)
     try:
         value = json.loads(encoded.decode("utf-8"), object_pairs_hook=object_fields)
-        optional = {"observe_session_start", "allow_plaintext_http_hosts", "model_transport"}
+        optional = {
+            "observe_session_start",
+            "allow_plaintext_http_hosts",
+            "model_transport",
+            "instrumentation_profiles",
+        }
         if not isinstance(value, dict) or set(value) - optional != FIELDS:
             raise ValueError()
         actual_profile = value["profile"]
@@ -187,11 +264,18 @@ def load_descriptor(
             raise ValueError()
         strings = [
             value[key]
-            for key in ("version", "configuration_sha256", "target", "endpoint", "availability")
+            for key in (
+                "version",
+                "configuration_sha256",
+                "target",
+                "endpoint",
+                "availability",
+            )
         ]
         strings.extend(actual_profile.values())
         if any(
-            not isinstance(text, str) or re.search(r"[\ud800-\udfff]", text) for text in strings
+            not isinstance(text, str) or re.search(r"[\ud800-\udfff]", text)
+            for text in strings
         ):
             raise ValueError()
         if (
@@ -207,17 +291,28 @@ def load_descriptor(
         ):
             raise ValueError()
         hints = claude_transport_hints(value, actual_profile)
+        if "instrumentation_profiles" in value:
+            binding = value["instrumentation_profiles"]
+            validate_instrumentation(binding, actual_profile)
+            hints["instrumentation_profiles"] = binding
     except (ValueError, TypeError, RecursionError):
         raise AwError("sdk_descriptor_invalid") from None
     if actual_profile != profile or (
         requires_service and value["availability"] != "required"
     ):
         raise AwError("sdk_descriptor_profile_mismatch")
-    if (hints.get("allow_plaintext_http_hosts") or hints.get("model_transport") == "direct") and mode & 0o222:
+    if (
+        hints.get("allow_plaintext_http_hosts")
+        or hints.get("model_transport") == "direct"
+        or "instrumentation_profiles" in hints
+    ) and mode & 0o222:
         raise AwError("sdk_descriptor_read_only_required")
     if target is not None and target != value["target"]:
         raise AwError("sdk_descriptor_target_mismatch")
-    if hashlib.sha256(read_file(config_file)).hexdigest() != value["configuration_sha256"]:
+    if (
+        hashlib.sha256(read_file(config_file)).hexdigest()
+        != value["configuration_sha256"]
+    ):
         raise AwError("sdk_descriptor_stale")
     return {
         **hints,

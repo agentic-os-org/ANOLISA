@@ -160,6 +160,43 @@ Source 负责在正确边界调用 `prepare()`，SDK 不从 PID 推断模型派�
 Qoder bridge 和[配置式 QwenPaw 插件](python-sdk.md#安装与接入)复用这条生命周期。
 部署 Descriptor 使用现有已安装能力 Profile；自动 Source 发现和解析仍属后续交付。
 
+通用 `adapter: sdk` 目标未配置内置 Profile 时，运行 `aw config descriptor`
+并指定 `--profile application-hooks`，使用公共 `aw-hook-source/v1` 应用能力上限。
+
+## 内置插桩 Profile
+
+使用包含目标包与运行时所需 Profile 的 AW 构建。将
+`spec.agents.<target>.adapter` 设为 `sdk`，在 `spec.agents.<target>.sdk.profiles`
+列出内置 ID。应用的 Python 或 Node.js 环境须安装与 AW 构建匹配的核心 SDK，
+并使用会执行预加载入口的常规启动方式。当前生产构建的内置目录为空，仓库测试构建提供
+Python 和 Node.js 两套测试 Profile。
+
+将 `config` 设为配置绝对路径，`target` 设为 SDK 目标。
+运行 `aw run --config "$config" --agent "$target"`，应用通过 `required`
+模式接入 AW。AW 管理预加载文件及应用进程组，进程组退出后清理文件。进程退出时若缺少
+SDK 排空确认，`aw run` 报告 `source_cleanup_unconfirmed` 并以失败退出。
+Python 在守护线程中运行 SDK 事件循环。未进入显式
+`async with preloaded_profile_source.request()` 的调用使用进程级 Scope。
+
+应用自行启动时，将 `directory` 设为私有启动目录的绝对路径，执行：
+
+```bash
+aw instance setup --config "$config" --agent "$target" --directory "$directory"
+```
+
+将输出中的 `environment` 应用到启动环境。Python 启动脚本会继续加载应用原有的
+`sitecustomize`，Node.js 保留现有的 `NODE_OPTIONS`。预加载入口在应用工作开始前
+消费本次启动的环境变量。用 `aw connect --config "$config" --sdk-pid APPLICATION_PID`
+挂接已运行的应用，用 `aw disconnect --config "$config" --sdk-instance APPLICATION_ID`
+释放空闲连接。挂接结果提供 `application_id`。协作模式下，新调用或显式请求通过当前
+连接准入 Scope，`required` 调用在 SDK 截止时间内等待挂接确认。
+
+可用 `aw config descriptor --config "$config" --agent "$target"` 单独编译并检查同一份
+Descriptor。如需交给 SDK 读取，将输出文件安装为 `0400`。配置或构建内置 Profile 版本
+变更后，选择新的私有目录重新运行 setup。应用退出后可删除 setup 输出列出的文件。
+自定义 Profile 部署和另外七个可插桩事件归入 M3。
+参见 [Profile 能力](../../../../../src/aw/docs/design/zh/core-admission.md#插桩-profile)。
+
 ## 部署 Descriptor
 
 常驻框架应用的协作式挂接分为三步：

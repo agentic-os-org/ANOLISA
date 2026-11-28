@@ -5,6 +5,7 @@
 //! discovery, private configuration validation and native effect admission belong
 //! to the service and adapter layers; this crate never starts those components.
 
+pub mod instrumentation;
 pub mod native;
 pub mod requirements;
 pub mod service_paths;

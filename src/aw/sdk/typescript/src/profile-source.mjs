@@ -1,5 +1,6 @@
 /** On-demand application-owned instrumentation over aw-hook-source/v1. */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { addAbortListener } from "node:events";
 import {
   MessageChannel,
@@ -13,7 +14,7 @@ import {
   parseFieldPath,
   validateProfile,
 } from "./profile-eval.mjs";
-import { ProfilePatches } from "./profile-patch.mjs";
+import { ProfileSet, verifyProfileBinding } from "./profile-set.mjs";
 import {
   openProfileConnection,
   unpackProfileError,
@@ -179,8 +180,14 @@ export class ProfileSource {
     Object.freeze(this);
   }
 
-  static async probe(profile, options = {}) {
-    const document = validateProfile(profile);
+  static probe(profile, options = {}) {
+    return ProfileSource.probeSet([profile], options);
+  }
+
+  static async probeSet(profiles, options = {}) {
+    const documents = profiles.map(validateProfile);
+    const targets = Object.freeze(documents.flatMap((profile) => profile.targets));
+    const document = Object.freeze({ ...documents[0], targets });
     if (
       document.targets.some(
         ({ hooks, fields }) => hooks["turn.stop"] && fields.output,
@@ -197,7 +204,7 @@ export class ProfileSource {
       )
     )
       throw new AwError("availability_required");
-    const patches = new ProfilePatches(document, options);
+    const patches = new ProfileSet(documents, targets, options);
     await patches.probe();
     return new ProfileSource(profileToken, document, hooks, options, patches);
   }
@@ -252,11 +259,11 @@ export class ProfileSource {
     }
   }
 
-  activate(options = {}) {
+  activate(options = {}, { waitForAttach = true } = {}) {
     if (this.#phase !== "verified")
       throw new AwError("source_profile_invalid_state");
     this.#phase = "activating";
-    this.#activation = this.#open(options)
+    this.#activation = this.#open(options, waitForAttach)
       .then(() => {
         if (this.#phase !== "activating" || this.#failure)
           throw unavailable(this.#failure);
@@ -271,7 +278,7 @@ export class ProfileSource {
     return this.#activation;
   }
 
-  async #open(options) {
+  async #open(options, waitForAttach) {
     const availability = this.#availability;
     const capabilities = wireCapabilities(this.hooks, this.profile.targets);
     const {
@@ -305,11 +312,13 @@ export class ProfileSource {
       typeof location.target !== "string"
     )
       throw new AwError("source_profile_connection_required");
+    verifyProfileBinding(location.instrumentationProfiles, this.#patches.documents, capabilities);
     this.#startup.signal.throwIfAborted();
     this.#availability = location.availability;
     const request = {
       capabilities,
       cooperative,
+      waitForAttach,
       connection: {
         endpoint: location.endpoint,
         target: location.target,
@@ -325,40 +334,54 @@ export class ProfileSource {
       const worker = new WorkerConnection(request);
       this.#binding = { close: (options) => worker.close(options) };
       const status = await worker.request("prepare", [], this.#startup.signal);
-      const budget = Math.max(
-        0,
-        ...(status.routes?.hooks ?? []).map((hook) => hook.budget_ms),
-      );
-      Object.assign(this.#binding, {
-        ...status,
-        dispatch: ([operation, ...args], { signal, sync }) =>
-          worker.request(
-            operation,
-            args,
-            signal,
-            sync
-              ? Math.min(
-                  2 ** 31 - 1,
-                  budget + Math.max(1000, timeoutMs) + timeoutMs,
-                )
-              : undefined,
-          ),
-      });
+      const bind = (status, key) => {
+        const budget = Math.max(0, ...(status.routes?.hooks ?? []).map((hook) => hook.budget_ms));
+        return {
+          ...status,
+          dispatch: ([operation, ...args], { signal, sync }) =>
+            worker.request(operation, key === undefined ? args : [key, ...args], signal,
+              sync ? Math.min(2 ** 31 - 1, budget + 2 * timeoutMs + 1000) : undefined),
+        };
+      };
+      if (cooperative) {
+        Object.assign(this.#binding, {
+          acquire: (sync) => {
+            const key = randomUUID();
+            const budget = sync ? 3 * timeoutMs + 1000 : undefined;
+            const prepared = worker.request("acquire", [key], this.#startup.signal, budget);
+            const confirm = (status) => ({
+              ...bind(status, key),
+              release: () => worker.request("release", [key], undefined, budget),
+            });
+            return sync ? confirm(prepared) : prepared.then(confirm);
+          },
+        });
+      } else {
+        Object.assign(this.#binding, bind(status));
+      }
     } else {
-      const { source, session } = await openProfileConnection(
+      const { source, session, acquire } = await openProfileConnection(
         request,
         this.#startup.signal,
       );
-      this.#binding = {
-        sessionId: session.sessionId,
-        fallback: session.fallback,
-        routes: session.task?.routes,
+      const bind = (active) => ({
+        sessionId: active.sessionId,
+        fallback: active.fallback,
+        routes: active.task?.routes,
         dispatch: ([operation, ...args], { signal }) => {
           const options = { ...args.at(-1), signal };
-          return session[operation](...args.slice(0, -1), options);
+          return active[operation](...args.slice(0, -1), options);
         },
-        close: (options) => source.close(options),
-      };
+      });
+      this.#binding = { close: (options) => source.close(options) };
+      if (acquire) {
+        this.#binding.acquire = async () => {
+          const active = await acquire(this.#startup.signal);
+          return { ...bind(active), release: () => active.close() };
+        };
+      } else {
+        Object.assign(this.#binding, bind(session));
+      }
     }
   }
 
@@ -393,20 +416,58 @@ export class ProfileSource {
       throw new AwError("source_verify_call_shape");
     const { promise, resolve } = Promise.withResolvers();
     this.#ledger.add(promise);
+    let binding, finishing;
     const release = (cleanupError) => {
       if (cleanupError) this.#cleanupFailure ??= cleanupError;
-      this.#ledger.delete(promise);
-      resolve();
+      if (finishing) return finishing;
+      const done = () => {
+        this.#ledger.delete(promise);
+        resolve();
+      };
+      const failed = (error) => {
+        this.#cleanupFailure ??= error;
+        throw cleanupUnconfirmed(error);
+      };
+      try {
+        const pending = binding?.release?.();
+        if (pending?.then) {
+          finishing = pending.catch(failed).finally(done);
+          finishing.catch(() => {});
+          return finishing;
+        }
+      } catch (error) {
+        failed(error);
+      } finally {
+        if (!finishing) {
+          finishing = Promise.resolve();
+          done();
+        }
+      }
     };
-    return runProfileCall({
-      target,
-      receiver,
-      args,
-      options: this.options,
-      binding: this.#binding,
-      callNative,
-      release,
-    });
+    const start = (active) => {
+      binding = active;
+      if (binding.fallback) {
+        const pending = release();
+        if (pending?.then)
+          return pending.then(() => callNative(args));
+        return callNative(args);
+      }
+      return runProfileCall({
+        target, receiver, args, options: this.options, binding, callNative, release,
+      });
+    };
+    const sync = target.call === "sync" || target.call === "sync_iter";
+    try {
+      const active = this.#binding.acquire ? this.#binding.acquire(sync) : this.#binding;
+      if (active?.then) return active.then(start, (error) => {
+        release();
+        throw error;
+      });
+      return start(active);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   async teardown(timeoutMs = 5000) {

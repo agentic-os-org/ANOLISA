@@ -403,7 +403,10 @@ pub fn resolve_shadow_preflight(
         }
     }
 
-    let source = source_from_adapter(caps).map_err(|_| Reject(ERR_SURF))?;
+    let source = match crate::instrumentation::admitted_source(agent, target, caps)? {
+        Some(source) => source,
+        None => source_from_adapter(caps).map_err(|_| Reject(ERR_SURF))?,
+    };
     let requirements = aw_config::requirements::project(config, target)?;
     for req in &requirements {
         if EventGate::for_event(req.event).is_none() {

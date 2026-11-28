@@ -549,6 +549,9 @@ def build_wrapper(seam: Seam, source: ProfileSource) -> Callable[..., Any]:
                     return dispatch(args, kwargs)
         return dispatch(args, kwargs)
 
+    wrap_process = getattr(source, "_wrap_process", None)
+    if wrap_process is not None:
+        wrapped = functools.wraps(wrapped)(wrap_process(wrapped, shape))
     if any(
         test(fn)
         for test in (

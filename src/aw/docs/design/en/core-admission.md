@@ -204,6 +204,23 @@ offline resolver can reason about candidate language-instrumentation Sources:
   `security.violation` control gate whose `output` reads `result` or a result
   subpath, must declare a bounded `stream` configuration with `buffer: true`.
 
+For an `adapter: sdk` target, `sdk.profiles` selects builtin IDs compiled into
+AW. Configuration validation rejects unknown IDs, duplicates, mixed runtimes,
+and overlapping seams. The resolver and runtime preflight use the same SDK
+wire projection. When profiles share an event, its ceiling is the intersection
+of their effects and failure actions. The descriptor binds that ceiling to the
+profile IDs and SHA-256 digests of their canonical JSON. The SDK validates the
+binding before activation, and Service rejects registration claims above it.
+The optional descriptor field preserves existing descriptor readers' behavior
+for documents that omit it.
+
+Managed startup and cooperative setup use the public SDK admission and Scope
+protocol. The language adapters support `session.start`, `session.end`,
+`input.submit`, `turn.stop`, `tool.before`, and `tool.after`. The production
+builtin catalogue is empty at this stage. Compiled test profiles exercise both
+runtimes. M3 tracks custom profiles in deployment configuration and the seven
+remaining instrumentable events. See [SDK deployment](../../../../../docs/developer-guide/en/aw/deployment/native-sdk.md#builtin-instrumentation-profiles).
+
 ## Immutable Scope route compilation
 
 `aw_core::routes` compiles `AdmittedStep` slices and exact `u64` millisecond

@@ -269,6 +269,8 @@
     "agent": {
       "type": "object",
       "additionalProperties": false,
+      "if": { "required": ["sdk"] },
+      "then": { "properties": { "adapter": { "const": "sdk" } } },
       "required": [
         "adapter",
         "argv"
@@ -291,6 +293,25 @@
         },
         "argv": {
           "$ref": "#/$defs/argv"
+        },
+        "sdk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profiles"],
+          "properties": {
+            "profiles": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "not": { "pattern": "[^a-zA-Z0-9._-]" }
+              }
+            }
+          }
         },
         "shutdown_grace_ms": {
           "type": "integer",

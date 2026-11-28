@@ -64,7 +64,9 @@ The declarative instrumentation contract
 `aw_contracts::instrumentation::InstrumentationProfile`
 (`instrumentation-profile-v1alpha1`) is likewise contract-tested and compiles to
 `SourceCapability` offline. Python and JS applications can activate an optional
-ProfileSource through the existing SDK Scope at runtime
+ProfileSource through the existing SDK Scope at runtime. An SDK target can
+also declare a compiled builtin binding to use the same ProfileSource from
+managed startup or cooperative setup
 (see [Instrumentation profiles](../core-admission.md#instrumentation-profiles)).
 Current Adapters expose prepared capabilities and native wiring; preserve those
 executable contracts while introducing the shared abstraction. Do not describe

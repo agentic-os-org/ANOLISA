@@ -1,7 +1,29 @@
 //! Offline wiring profiles for the configuration-driven public SDK integrations.
 
 use crate::{adapter::catalog, Result};
-use aw_core::admission::AdapterCapabilities;
+use aw_contracts::{
+    deployment::{SDK_ENTRYPOINT, SDK_PROTOCOL},
+    instrumentation::InstrumentationProfile,
+};
+use aw_core::{admission::AdapterCapabilities, instrumentation};
+
+/// Python startup shim installed in a private profile bootstrap directory.
+pub const PYTHON_PROFILE_STARTUP: &[u8] = include_bytes!("../native/sdk/profile_sitecustomize.py");
+
+/// Builds the SDK registration ceiling for a configured builtin profile set.
+///
+/// # Errors
+/// Rejects absent profiles or declarations outside the SDK integration surface.
+pub fn instrumentation_capabilities(
+    profiles: &[&InstrumentationProfile],
+) -> Result<AdapterCapabilities> {
+    let source = instrumentation::source(profiles, catalog::SDK.name)
+        .map_err(|error| error.to_string())?
+        .ok_or("SDK target requires configured builtin instrumentation profiles")?;
+    let capabilities = instrumentation::capabilities(&source);
+    crate::adapters::sdk::validate_capabilities(&capabilities)?;
+    Ok(capabilities)
+}
 
 /// Declared wiring used to compile a deployment descriptor, before installation.
 pub struct DeploymentProfile {
@@ -18,7 +40,24 @@ struct ProfileDefinition {
     build: fn() -> DeploymentProfile,
 }
 
+/// Deployment profile for application-owned semantic SDK callbacks.
+pub const APPLICATION_HOOKS: &str = "application-hooks";
+
 const PROFILES: &[ProfileDefinition] = &[
+    ProfileDefinition {
+        name: APPLICATION_HOOKS,
+        build: || {
+            let mut capabilities = catalog::SDK.capabilities(SDK_PROTOCOL, SDK_ENTRYPOINT);
+            capabilities
+                .failure_actions
+                .insert("tool.after".into(), vec!["withhold_result".into()]);
+            DeploymentProfile {
+                capabilities,
+                requires_service: false,
+                session_start_hint: false,
+            }
+        },
+    },
     ProfileDefinition {
         name: "qoder-public-hooks",
         build: || {

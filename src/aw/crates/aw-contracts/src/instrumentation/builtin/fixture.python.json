@@ -1,0 +1,70 @@
+{
+  "version": "aw-instrumentation-profile/v1alpha1",
+  "id": "fixture.python",
+  "origin": "builtin",
+  "runtime": "python",
+  "package": {
+    "name": "aw-profile-fixture",
+    "versions": "==1.0.0"
+  },
+  "targets": [
+    {
+      "id": "call-tool",
+      "module": "aw_profile_fixture",
+      "qualname": "call_tool",
+      "call": "sync",
+      "hooks": {
+        "tool.before": {
+          "mode": "control",
+          "effects": [
+            "observe",
+            "block"
+          ],
+          "failure_actions": [
+            "report",
+            "block"
+          ]
+        }
+      },
+      "fields": {
+        "tool_name": {
+          "from": "arg.0",
+          "codec": "text"
+        },
+        "input": {
+          "from": "arg.1",
+          "codec": "json"
+        }
+      }
+    },
+    {
+      "id": "call-tool-async",
+      "module": "aw_profile_fixture",
+      "qualname": "call_tool_async",
+      "call": "async",
+      "hooks": {
+        "tool.before": {
+          "mode": "control",
+          "effects": [
+            "observe",
+            "block"
+          ],
+          "failure_actions": [
+            "report",
+            "block"
+          ]
+        }
+      },
+      "fields": {
+        "tool_name": {
+          "from": "arg.0",
+          "codec": "text"
+        },
+        "input": {
+          "from": "arg.1",
+          "codec": "json"
+        }
+      }
+    }
+  ]
+}

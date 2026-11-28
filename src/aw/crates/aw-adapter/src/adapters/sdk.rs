@@ -1,6 +1,7 @@
 //! Public semantic callbacks for application-owned runtimes without a native dialect.
 
 use crate::{Adapter, HookOutput, LaunchInput, NativeContext, NativeExit, PreparedLaunch, Result};
+use aw_contracts::deployment::{SDK_ENTRYPOINT, SDK_PROTOCOL};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
@@ -61,7 +62,7 @@ impl Adapter for Sdk {
 
     fn normalize(&self, context: &NativeContext, event: &str, native: &Value) -> Result<Value> {
         let envelope: Envelope = serde_json::from_value(native.clone())?;
-        if envelope.api_version != "aw-hook-source/v1" || native["event"] != event {
+        if envelope.api_version != SDK_PROTOCOL || native["event"] != event {
             return Err("SDK semantic callback protocol or event differs from its route".into());
         }
         identity(&envelope.session_id)?;
@@ -127,7 +128,7 @@ impl Adapter for Sdk {
 pub(crate) fn validate_capabilities(
     capabilities: &aw_core::admission::AdapterCapabilities,
 ) -> Result<()> {
-    let supported = crate::adapter::catalog::SDK.capabilities("aw-hook-source/v1", "application");
+    let supported = crate::adapter::catalog::SDK.capabilities(SDK_PROTOCOL, SDK_ENTRYPOINT);
     let invalid_failure = capabilities.failure_actions.iter().any(|(event, actions)| {
         event != "tool.after"
             || !capabilities.events.contains_key("tool.after")

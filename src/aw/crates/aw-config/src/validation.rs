@@ -23,6 +23,7 @@ pub(super) fn validate(document: &Value) -> Result<(), Error> {
     let agents = spec["agents"].as_object().ok_or(Error::InvalidSchema)?;
     for (name, agent) in agents {
         crate::http_hosts::validate(name, agent)?;
+        crate::instrumentation::profiles(name, agent)?;
         adapters.insert(agent["adapter"].as_str().ok_or(Error::InvalidSchema)?);
         require(
             agent.get("qoder_sdk").is_none() || agent["adapter"] == "qoder-sdk",

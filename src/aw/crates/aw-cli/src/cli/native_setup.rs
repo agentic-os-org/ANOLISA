@@ -70,10 +70,14 @@ impl Installation {
     }
 
     fn write(&mut self, name: &'static str, bytes: &[u8]) -> Result<PathBuf> {
+        self.write_mode(name, bytes, 0o600)
+    }
+
+    fn write_mode(&mut self, name: &'static str, bytes: &[u8], mode: u32) -> Result<PathBuf> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(mode)
             .custom_flags(libc::O_NOFOLLOW)
             .open(self.pinned(name))?;
         let metadata = file.metadata()?;
@@ -146,6 +150,28 @@ pub(super) fn setup(args: &Arguments) -> Result<Exit> {
     }
     if args.flags.contains_key("--remove") {
         return Err("startup removal is available for Qoder only".into());
+    }
+    let profiles =
+        aw_config::instrumentation::profiles(target, &config.as_value()["spec"]["agents"][target])?;
+    if !profiles.is_empty() {
+        args.check(&["--config", "--agent", "--directory"], false)?;
+        let descriptor = super::profile_launch::compile(&bytes, target, &profiles)?;
+        let mut installation = Installation::open(Path::new(args.required("--directory")?), false)?;
+        if installation.directory.metadata()?.mode() & 0o777 != 0o700 {
+            return Err("instrumentation startup directory must be private (0700)".into());
+        }
+        let (runtime, files) =
+            super::profile_launch::files(&bytes, &descriptor, &profiles, None, |name, bytes| {
+                installation.write_mode(name, bytes, 0o400)
+            })?;
+        let guidance = super::profile_launch::guidance(runtime, files)?;
+        installation.verify()?;
+        let mut output = std::io::stdout().lock();
+        serde_json::to_writer(&mut output, &guidance)?;
+        writeln!(output)?;
+        output.flush()?;
+        installation.retained = true;
+        return Ok(Exit::Code(0));
     }
     let asset = aw_adapter::startup::asset(name)?;
     let mut descriptor = json!({"binary":std::env::current_exe()?.canonicalize()?,

@@ -209,7 +209,7 @@ export function lazyAsyncIterator(start) {
   async function step(method, args) {
     const open = start;
     start = undefined;
-    if (open && method === "next") iterator = iteratorOf(open(), true);
+    if (open && method === "next") iterator = iteratorOf(await open(), true);
     if (!iterator && method === "next") return { value: undefined, done: true };
     return iteratorStep(iterator ?? {}, method, args);
   }
@@ -260,7 +260,7 @@ function instrumentStream(context, dispatch, open, release, async) {
   function close(cleanupError) {
     closed = true;
     cancellation?.[Symbol.dispose]();
-    release(cleanupError);
+    return release(cleanupError);
   }
 
   function* step(method, args) {
@@ -269,7 +269,7 @@ function instrumentStream(context, dispatch, open, release, async) {
       (!native && method !== "next") ||
       (delivery && method !== "next")
     ) {
-      close();
+      yield () => close();
       if (method === "next") signal?.throwIfAborted();
       if (method === "throw") throw args[0];
       return { done: true, value: method === "return" ? args[0] : undefined };
@@ -312,7 +312,7 @@ function instrumentStream(context, dispatch, open, release, async) {
       }
       if (delivery && offset < delivery.length)
         return { done: false, value: delivery[offset++] };
-      close();
+      yield () => close();
       return completion;
     } catch (error) {
       let cleanupError;
@@ -329,7 +329,7 @@ function instrumentStream(context, dispatch, open, release, async) {
         );
         throw cleanupError;
       } finally {
-        close(cleanupError);
+        yield () => close(cleanupError);
       }
       throw native ? toolExecuted(error) : error;
     }
@@ -435,7 +435,7 @@ export function runProfileCall({
             throw toolExecuted(error);
           }
         } finally {
-          release();
+          await release();
         }
       })();
     }

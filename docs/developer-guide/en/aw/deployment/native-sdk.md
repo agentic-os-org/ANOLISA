@@ -203,6 +203,55 @@ The Qoder bridge and configured [QwenPaw plugin](python-sdk.md#install-and-integ
 reuse this common lifecycle. Deployment Descriptors use the existing installed
 capability profiles. Automatic Source discovery and resolution remain planned.
 
+For a generic `adapter: sdk` target without builtins, pass
+`--profile application-hooks` to `aw config descriptor`. This selects the
+public `aw-hook-source/v1` application capability ceiling.
+
+## Builtin instrumentation profiles
+
+In a build that bundles a profile for your package and runtime, set
+`spec.agents.<target>.adapter` to `sdk` and list the builtin IDs under
+`spec.agents.<target>.sdk.profiles`. Install the matching core SDK in the
+application's Python or Node.js environment. Use the interpreter's normal
+startup path so it executes the configured preload. Production builds currently
+bundle no profile IDs. The repository's test build supplies fixtures for
+Python and Node.js.
+
+Set `config` to the absolute configuration path and `target` to the SDK target.
+Run `aw run --config "$config" --agent "$target"` to launch the configured
+application with required AW protection. AW owns the preload files and the
+application process group. It removes the files when the group exits. If the
+process exits without confirming SDK drain, `aw run` reports
+`source_cleanup_unconfirmed` and returns a failure. Python uses an SDK loop
+in a daemon thread and a process Scope for calls outside an explicit
+`async with preloaded_profile_source.request()` context.
+
+For an application that owns startup, set `directory` to an absolute private
+startup directory and run:
+
+```bash
+aw instance setup --config "$config" --agent "$target" --directory "$directory"
+```
+
+Apply the returned `environment` entries to the application's startup
+environment. Python's shim chains the existing `sitecustomize`. Node.js
+retains the application's existing `NODE_OPTIONS`. The preload consumes its
+bootstrap environment before starting application work. Run
+`aw connect --config "$config" --sdk-pid APPLICATION_PID` to attach the live
+application and `aw disconnect --config "$config" --sdk-instance APPLICATION_ID`
+to release an idle connection. The attach result supplies `application_id`.
+Each new cooperative call or explicit request admits a Scope through the
+current connection. Required calls wait for a verified attachment within the
+SDK deadline.
+
+To compile the same descriptor for inspection, run
+`aw config descriptor --config "$config" --agent "$target"` and install its
+output with mode `0400` if passing it to the SDK. Re-run setup into a fresh
+private directory after changing the configuration or the bundled profile
+version. Once the application has exited, remove the files listed by setup.
+Custom profile deployment and seven additional instrumentable events are
+planned for M3. See [profile capabilities](../../../../../src/aw/docs/design/en/core-admission.md#instrumentation-profiles).
+
 ## Deployment Descriptor
 
 For resident framework applications, the cooperative attachment workflow has

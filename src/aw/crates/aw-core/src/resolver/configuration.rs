@@ -29,7 +29,14 @@ pub fn resolve_configuration(
             validate_boolean_effects(step).map_err(ResolveError::Requirement)?;
         }
     }
-    resolve(target, adapter, &reqs, sources)
+    let configured = aw_config::instrumentation::profiles(target, agent)?;
+    if let Some(source) = crate::instrumentation::source(&configured, adapter)? {
+        let mut candidates = sources.to_vec();
+        candidates.push(source);
+        resolve(target, adapter, &reqs, &candidates)
+    } else {
+        resolve(target, adapter, &reqs, sources)
+    }
 }
 
 pub(super) fn provider_protocol(provider: &Value) -> &str {

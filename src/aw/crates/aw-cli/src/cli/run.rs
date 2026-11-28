@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-static SIGNAL: AtomicI32 = AtomicI32::new(0);
+pub(super) static SIGNAL: AtomicI32 = AtomicI32::new(0);
 pub(super) static CANCELLED: AtomicBool = AtomicBool::new(false);
 const HERMES_RETIRE_SCRIPT: &str = r#"import json, sys
 from pathlib import Path
@@ -52,14 +52,14 @@ extern "C" fn signal(value: libc::c_int) {
 pub(super) struct Artifacts(pub(super) PathBuf, bool);
 
 impl Artifacts {
-    fn create(state: &Path) -> Result<Self> {
+    pub(super) fn create(state: &Path) -> Result<Self> {
         let id = fs::read_to_string("/proc/sys/kernel/random/uuid")?;
         let path = state.join(format!("launch-{}", id.trim()));
         DirBuilder::new().mode(0o700).create(&path)?;
         Ok(Self(path, false))
     }
 
-    fn cleanup(&self) -> Result<()> {
+    pub(super) fn cleanup(&self) -> Result<()> {
         fs::remove_dir_all(&self.0)?;
         Ok(())
     }
@@ -138,6 +138,18 @@ pub(super) fn launch(args: &Arguments) -> Result<Exit> {
         cwd: cwd.clone(),
         environment: std::env::vars_os().collect::<BTreeMap<_, _>>(),
     };
+    let profiles = aw_config::instrumentation::profiles(target, agent)?;
+    if !profiles.is_empty() {
+        return super::profile_launch::launch(
+            args,
+            &bytes,
+            target,
+            name,
+            &profiles,
+            command,
+            shutdown_grace,
+        );
+    }
     let _agent_package_leases = PackageLeases::acquire([&mut command])?;
     let prepared = adapter.prepare(
         LaunchInput {

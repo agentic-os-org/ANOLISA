@@ -8,6 +8,12 @@ import {
 const startup = new AbortController();
 const opening = openProfileConnection(workerData, startup.signal);
 opening.catch(() => {});
+const requests = new Map();
+const status = (session) => session && {
+  sessionId: session.sessionId,
+  routes: session.task?.routes,
+  fallback: session.fallback,
+};
 parentPort.on("message", async ({ operation, args, port, wait }) => {
   const cancel = new AbortController();
   port.on("message", () => cancel.abort());
@@ -20,16 +26,21 @@ parentPort.on("message", async ({ operation, args, port, wait }) => {
       });
       await binding?.source.close(...args);
     } else {
-      const { session } = await opening;
+      const { session, acquire } = await opening;
       if (operation === "prepare") {
-        value = {
-          sessionId: session.sessionId,
-          routes: session.task?.routes,
-          fallback: session.fallback,
-        };
+        value = status(session);
+      } else if (operation === "acquire") {
+        const active = await acquire(cancel.signal);
+        requests.set(args[0], active);
+        value = status(active);
+      } else if (operation === "release") {
+        const active = requests.get(args[0]);
+        requests.delete(args[0]);
+        await active?.close();
       } else {
+        const active = session ?? requests.get(args.shift());
         const options = { ...args.at(-1), signal: cancel.signal };
-        value = await session[operation](...args.slice(0, -1), options);
+        value = await active[operation](...args.slice(0, -1), options);
       }
     }
     port.postMessage({ value });

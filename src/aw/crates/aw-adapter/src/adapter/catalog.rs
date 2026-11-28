@@ -75,14 +75,7 @@ pub fn coverage_cells(
 pub(crate) const SDK: Profile = Profile {
     name: "sdk",
     adapter: &super::super::adapters::sdk::Sdk,
-    events: &[
-        ("session.start", &["observe"]),
-        ("turn.stop", &["observe", "block"]),
-        ("session.end", &["observe"]),
-        ("input.submit", &["observe", "block"]),
-        ("tool.before", &["observe", "block", "replace_input"]),
-        ("tool.after", &["observe", "replace_result"]),
-    ],
+    events: aw_contracts::deployment::SDK_EVENTS,
 };
 
 pub(crate) const QODER: Profile = Profile {

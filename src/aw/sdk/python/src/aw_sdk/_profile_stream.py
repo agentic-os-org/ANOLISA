@@ -7,13 +7,30 @@ import threading
 from collections.abc import AsyncGenerator, Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import Context, copy_context
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from weakref import finalize
 
+from aw_sdk.sources import SourceSession
 from aw_sdk.transport import AwError
 
 if TYPE_CHECKING:
-    from aw_sdk.profile_source import ProfileSource, _Request
+    from aw_sdk.profile_source import ProfileSource
+
+
+@dataclass
+class _Request:
+    session: SourceSession
+    sync_streams: set[_SyncStream] = field(default_factory=set)
+    cleanup_tasks: set[asyncio.Future] = field(default_factory=set)
+    cleanup_error: BaseException | None = None
+    calls: int = 0
+    ended: bool = False
+    drained: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def require_live(self) -> None:
+        if self.ended and self.session._native_owner() is not self:
+            raise AwError("source_request_session_required")
 
 
 class _StreamContext:
@@ -245,8 +262,7 @@ class _RequestAsyncStream(AsyncGenerator):
         self.runner: _AsyncStreamRunner | None = None
 
     def _reader(self) -> _AsyncStreamRunner:
-        if asyncio.get_running_loop() is not self.owner.source._loop:
-            raise AwError("source_activation_loop_required")
+        self.owner.source._check_stream_loop()
         context = self.owner.resume()
         if self.runner is None:
             self.runner = _AsyncStreamRunner(self.stream, context)

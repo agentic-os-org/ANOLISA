@@ -8,6 +8,7 @@
 //! establishes shape and semantic invariants only, never installed wiring or
 //! runtime adoption.
 
+pub mod builtin;
 mod validate;
 
 use crate::{
