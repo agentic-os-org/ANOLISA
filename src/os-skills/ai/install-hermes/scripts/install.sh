@@ -38,6 +38,13 @@ else
     IS_INTERACTIVE=false
 fi
 
+require_option_value() {
+    if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* || "${2:-}" == -h ]]; then
+        echo "ERROR: $1 requires a value" >&2
+        exit 1
+    fi
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -54,14 +61,17 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --branch)
+            require_option_value "$@"
             BRANCH="$2"
             shift 2
             ;;
         --dir)
+            require_option_value "$@"
             INSTALL_DIR="$2"
             shift 2
             ;;
         --hermes-home)
+            require_option_value "$@"
             HERMES_HOME="$2"
             shift 2
             ;;
