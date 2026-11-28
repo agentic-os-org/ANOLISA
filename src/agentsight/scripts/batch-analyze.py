@@ -167,7 +167,7 @@ def _read_entries(filepath: Path) -> Iterator[dict]:
                 continue
             try:
                 parsed = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError, ValueError):
                 continue
             if isinstance(parsed, dict):
                 yield parsed
