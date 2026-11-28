@@ -17,7 +17,7 @@ from agent_sec_cli.correlation_context import (
 from agent_sec_cli.observability.cli import app as observability_app
 from agent_sec_cli.pii_checker.cli import scanner_app as pii_scanner_app
 from agent_sec_cli.prompt_scanner.cli import scanner_app
-from agent_sec_cli.security_events import get_reader
+from agent_sec_cli.security_events import SecurityEvent, get_reader
 from agent_sec_cli.security_events.summary_formatter import format_summary
 from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.backends.hardening import (
@@ -337,6 +337,10 @@ def code_scan(
 _COUNT_BY_ALLOWED = {"category", "event_type", "trace_id"}
 _OUTPUT_FORMATS = {"table", "json", "jsonl"}
 
+# Page size for summary aggregation. Bounded only to keep one query result set
+# in memory at a time; the summary itself must cover every matching event.
+_SUMMARY_PAGE_SIZE = 10000
+
 # Canonical event types and categories — dynamically derived from lifecycle.py
 # _ACTION_CATEGORY mapping to ensure automatic synchronization.
 # Keys → event types, Values → categories
@@ -373,6 +377,44 @@ def _resolve_time_range(
         since = optional_iso_to_utc_iso(since, field_name="--since")
         until = optional_iso_to_utc_iso(until, field_name="--until")
     return since, until
+
+
+def _query_all_events_for_summary(
+    reader: Any,
+    *,
+    event_type: str | None,
+    category: str | None,
+    trace_id: str | None,
+    session_id: str | None,
+    run_id: str | None,
+    since: str | None,
+    until: str | None,
+) -> list[SecurityEvent]:
+    """Fetch every event matching the summary filters, one page at a time.
+
+    A single capped query made every number in the posture summary reflect only
+    the newest ``_SUMMARY_PAGE_SIZE`` events, silently under-reporting totals on
+    larger stores. Pages are drained in the reader's own order; a short page
+    marks the end.
+    """
+    events: list[SecurityEvent] = []
+    offset = 0
+    while True:
+        page = reader.query(
+            event_type=event_type,
+            category=category,
+            trace_id=trace_id,
+            session_id=session_id,
+            run_id=run_id,
+            since=since,
+            until=until,
+            limit=_SUMMARY_PAGE_SIZE,
+            offset=offset,
+        )
+        events.extend(page)
+        if len(page) < _SUMMARY_PAGE_SIZE:
+            return events
+        offset += len(page)
 
 
 def _format_timestamp(ts: str) -> str:
@@ -580,7 +622,8 @@ def events(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1)
 
-        events_list = reader.query(
+        events_list = _query_all_events_for_summary(
+            reader,
             event_type=event_type,
             category=category,
             trace_id=trace_id,
@@ -588,8 +631,6 @@ def events(
             run_id=run_id,
             since=resolved_since,
             until=resolved_until,
-            limit=10000,
-            offset=0,
         )
         time_label = (
             f"last {summary_hours:.0f} hours"
