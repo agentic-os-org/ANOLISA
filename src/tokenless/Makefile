@@ -386,6 +386,7 @@ test-adapters: build-openclaw-plugin build-dsh-plugin test-npm-package
 		'python3 tests/test_qwencode_install.py' \
 		'bash tests/test-opencode-adapter-install.sh' \
 		'node tests/test-opencode-plugin.mjs' \
+		'node tests/test-opencode-plugin-v2.mjs' \
 		'bash tests/test-qwenpaw-adapter-install.sh' \
 		'python3 tests/test_qwenwork_install.py'
 
