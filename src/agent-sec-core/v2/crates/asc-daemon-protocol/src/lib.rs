@@ -32,7 +32,7 @@ mod pap;
 mod response;
 
 pub use action::{CodeScanParams, PiiScanParams, PromptScanParams, PromptScanWarmupParams};
-pub use common::{ListParams, ListResult, ResourceParams, RevisionParams};
+pub use common::{ListParams, ListResult, ResourceParams, RevisionParams, next_list_offset};
 pub use envelope::{DaemonRequest, V1Request};
 pub use gateway::GatewayKeyRemoveParams;
 pub use pap::{CreatePolicyParams, CreateScopeParams, UpdatePolicyParams};
