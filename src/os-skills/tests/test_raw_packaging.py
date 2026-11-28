@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -128,6 +129,50 @@ class RawPackagingTests(unittest.TestCase):
                 self.assertNotIn(b"experimental", contract.read())
             (skill / "SKILL.md").unlink()
             self.assertNotEqual(self.build(root, root / "bad").returncode, 0)
+
+    @unittest.skipIf(os.name == "nt", "POSIX locale selection is only available on Linux")
+    def test_utf8_contract_survives_non_utf8_process_locale(self):
+        description = "OS Skills for caf\u00e9 and \u73af\u5883"
+        version = tomllib.loads((ROOT / "component.toml").read_text())["component"]["version"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_contract = (ROOT / "component.toml").read_text(encoding="utf-8")
+            source_contract = re.sub(
+                r'^description = ".*"$',
+                f'description = "{description}"',
+                source_contract,
+                count=1,
+                flags=re.M,
+            )
+            (root / "component.toml").write_text(source_contract, encoding="utf-8")
+            skill = root / "ai/qwenpaw-usage"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("# Fixture\n", encoding="utf-8")
+            (root / "packaging").mkdir()
+            (root / "packaging/released-skills.txt").write_text("ai/qwenpaw-usage\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", "component.toml", "packaging", "ai"], check=True
+            )
+
+            environment = dict(os.environ, LC_ALL="C", PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(PACKAGE),
+                    "--source-dir", str(root),
+                    "--output-dir", str(root / "artifacts"),
+                    "--version", version,
+                    "--target-arch", "x86_64",
+                    "--epoch", "1234567890",
+                ],
+                env=environment, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            archive = root / "artifacts" / f"os-skills-{version}-linux-x86_64.tar.gz"
+            with tarfile.open(archive) as package:
+                contract = package.extractfile("./.anolisa/component.toml").read()
+            self.assertEqual(tomllib.loads(contract.decode("utf-8"))["component"]["description"], description)
 
 
 if __name__ == "__main__":
