@@ -1,5 +1,6 @@
 """Exercise Git filename discovery and Markdown URL targets through the CLI."""
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,35 @@ class DocsLinkCheckTests(unittest.TestCase):
         result = self.check_links()
         self.assertEqual(result.returncode, 1)
         self.assertIn("missing%20file.md", result.stdout)
+
+    def test_unicode_checkout_with_legacy_locale(self):
+        checkout = self.root / "太乙"
+        checkout.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+        (checkout / "README.md").write_text(
+            "[target](target.txt)\n", encoding="utf-8"
+        )
+        target = checkout / "target.txt"
+        target.touch()
+        env = dict(
+            os.environ, LC_ALL="C", PYTHONCOERCECLOCALE="0", PYTHONIOENCODING="utf-8"
+        )
+        for expected in (0, 1):
+            with self.subTest(expected=expected):
+                result = subprocess.run(
+                    [sys.executable, "-X", "utf8=0", str(CHECKER)],
+                    cwd=checkout,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                self.assertEqual(result.stderr, "")
+                if expected == 1:
+                    self.assertIn("broken link -> target.txt", result.stdout)
+            if expected == 0:
+                target.unlink()
 
     def test_deleted_tracked_files_are_still_skipped(self):
         doc = self.root / "docs" / "deleted.md"
