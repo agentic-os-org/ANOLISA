@@ -135,6 +135,12 @@ fn process_session(
         gemini::scan_fingerprint(&session.project, file_size, file_mtime_ns)
     } else if session.source == "codex" {
         codex::scan_fingerprint_v1(file_size)
+    } else if matches!(
+        session.source.as_str(),
+        "claude-code" | "qoder" | "qoderwork" | "cursor"
+    ) {
+        // Recollect raw-size snapshots that lost grouped assistant activity.
+        !file_size
     } else {
         file_size
     };
