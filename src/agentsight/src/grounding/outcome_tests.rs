@@ -46,6 +46,65 @@ fn classify(call: &ToolCall, content: &str) -> CallVerdict {
     classify_call(call, Some(&result(content)))
 }
 
+#[test]
+fn probe_invocation_errors_are_failures() {
+    for (command, code) in [
+        ("test 1 -eq notanumber", 2),
+        ("[ 1 -eq notanumber ]", 2),
+        ("[[ 1 -eq '1+' ]]", 2),
+        ("/usr/bin/test 1 -eq notanumber", 2),
+        ("pgrep --definitely-invalid-flag", 2),
+        ("pgrep --definitely-invalid-flag &>/dev/null", 2),
+        ("pgrep agent", 3),
+        ("which --definitely-invalid-flag", 2),
+    ] {
+        let verdict = classify(&bash_call(command), &format!("Exit code: {code}"));
+        assert_eq!(verdict.status, CallStatus::Failed, "{command}");
+        assert_eq!(verdict.matched_rule, "R3");
+    }
+}
+
+#[test]
+fn expected_probe_absence_and_ambiguous_chains_keep_their_status() {
+    for (command, code) in [
+        ("test -f /missing", 1),
+        ("[ -f /missing ]", 1),
+        ("[[ -f /missing ]]", 1),
+        ("pgrep agent", 1),
+        ("which unavailable", 1),
+        ("ls /missing", 2),
+        ("stat /missing", 1),
+        ("ping unavailable", 2),
+        ("test -f /missing || ls /missing", 2),
+    ] {
+        assert_eq!(
+            classify(&bash_call(command), &format!("Exit code: {code}")).status,
+            CallStatus::OkProbe,
+            "{command}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_bash_test_syntax_error_is_not_an_absence_result() {
+    let command = "test 1 -eq notanumber";
+    let output = std::process::Command::new("bash")
+        .args(["-c", command])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let text = format!("{}\nExit code: 2", String::from_utf8_lossy(&output.stderr));
+    let verdict = classify(&bash_call(command), &text);
+    assert_eq!(verdict.status, CallStatus::Failed);
+    assert!(
+        verdict
+            .evidence_quote
+            .unwrap()
+            .contains("integer expression expected")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // attribution_decision_spec.md §8 — T1..T7 (call-level fixtures)
 // ---------------------------------------------------------------------------
@@ -309,16 +368,13 @@ fn redirected_probe_is_still_expected() {
     // `2>&1`, `>&2` and `&>` are redirections, not chains. Splitting on the raw
     // `&` left a stray segment ("1") whose head is not a probe command, so a
     // probe whose non-zero exit is the answer was graded as a real failure.
-    for command in [
-        "ls /nope 2>&1",
-        "ls /nope >/dev/null 2>&1",
-        "pgrep -f agent &>/dev/null",
-        "ls /nope 1>&2",
+    for (command, code) in [
+        ("ls /nope 2>&1", 2),
+        ("ls /nope >/dev/null 2>&1", 2),
+        ("pgrep -f agent &>/dev/null", 1),
+        ("ls /nope 1>&2", 2),
     ] {
-        let v = classify(
-            &bash_call(command),
-            "ls: cannot access '/nope': No such file or directory\nExit code 2",
-        );
+        let v = classify(&bash_call(command), &format!("Exit code {code}"));
         assert_eq!(
             v.status,
             CallStatus::OkProbe,

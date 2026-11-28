@@ -215,7 +215,7 @@ pub fn classify_call(call: &ToolCall, result: Option<&ObservationResult>) -> Cal
                 nested,
             );
         }
-        let status = if is_probe(call) {
+        let status = if is_expected_probe_exit(call, code) {
             CallStatus::OkProbe
         } else {
             CallStatus::Failed
@@ -532,6 +532,24 @@ fn is_probe(call: &ToolCall) -> bool {
                 })
                 .unwrap_or(false)
         })
+}
+
+fn is_expected_probe_exit(call: &ToolCall, code: i64) -> bool {
+    if !is_probe(call) {
+        return false;
+    }
+    let Some(command) = command_of(call) else {
+        return false;
+    };
+    let segments = command_segments(&command);
+    // A chain's exit cannot identify which probe failed; retain its existing verdict.
+    let [segment] = segments.as_slice() else {
+        return true;
+    };
+    let head = segment.split_whitespace().next().unwrap_or("");
+    let bare = head.rsplit('/').next().unwrap_or(head);
+    // These probes reserve 1 for absence/false and higher codes for invocation errors.
+    !matches!(bare, "test" | "[" | "[[" | "pgrep" | "which") || code == 1
 }
 
 /// Shell command separators, unrolled into the segments they delimit.
