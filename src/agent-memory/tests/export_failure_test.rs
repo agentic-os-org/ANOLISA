@@ -100,6 +100,20 @@ fn export_reports_unreadable_subtree_when_not_root() {
     );
     assert!(error.to_string().contains("notes/private"), "{error}");
     assert_failed_export_audit(&svc, "notes/private");
+
+    // The diagnostic is copied into the audit log, then into a consolidated
+    // lesson, then into the next portable AMA export, so the host path must not
+    // ride along: only the mount-relative location is portable.
+    let host_path = svc.mount.root.to_string_lossy().to_string();
+    assert!(
+        !error.to_string().contains(&host_path),
+        "the export error must not carry the host path: {error}"
+    );
+    let audit = std::fs::read_to_string(svc.mount.meta_dir.join("audit.log")).unwrap();
+    assert!(
+        !audit.contains(&host_path),
+        "the audit row must not carry the host path: {audit}"
+    );
 }
 
 #[test]
