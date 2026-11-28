@@ -19,7 +19,16 @@
 1. **持久化所有消息** — 存入 SQLite 数据库，永不删除
 2. **摘要压缩旧轮次** — 超出 freshTailTurns 的旧轮次自动生成一句话摘要
 3. **保留最近轮次原文** — 最近 N 个 turn 的消息始终原样传递给 LLM
-4. **按需展开** — LLM 可通过 `expand_turn` 工具，按 turn_seq 展开被压缩轮次的完整原始消息
+4. **按需展开** — LLM 可通过 `expand_turn` 工具，按窗口中的轮次编号展开被压缩轮次的完整原始消息
+
+最近一次成功组装的上下文窗口编号会映射到持久归档轮次，完整轮次在缓存淘汰或重启后仍可
+召回。每次 `assemble` 替换内存窗口和持久映射；`afterTurn` 继续归档和生成摘要，不改动
+已发布的窗口。局部或改写轮次若没有完整归档锚点，实时缓存丢失后返回缺失。窗口外编号
+仍保留归档编号回退。旧窗口标签会按最新成功窗口解析，可能静默返回新对应轮次的内容，
+不会因标签过期而报告缺失；同会话并发运行也没有独立的窗口标识。映射写入失败会
+使宿主收到上下文组装错误；操作人员须修复归档写入问题后重试。此时保留上一份完整映射，
+但不回滚此前导入的消息。新增的 `recall_aliases` 表不改写消息，旧版本忽略该表。
+完整边界见[用户指南](../../../../docs/user-guide/zh/tokenless/framework-integration.md#openclaw)。
 
 ## 工作原理
 
@@ -101,9 +110,9 @@ openclaw plugins install /path/to/selective-claw
 selective-claw/
 ├── src/
 │   ├── plugin/index.ts      # OpenClaw 插件入口，注册引擎和 expand_turn 工具
-│   ├── engine.ts             # SelectiveContextEngine（ContextEngine 实现）
+│   ├── engine.ts             # ContextEngine 与注册工具的窗口召回实现
 │   ├── assembler.ts          # 摘要 + fresh tail 组装器
-│   ├── recall-tool.ts        # expand_turn 工具实现
+│   ├── recall-tool.ts        # 旧独立归档召回辅助函数与结果类型
 │   ├── summarize.ts          # LLM 摘要生成
 │   ├── estimate-tokens.ts    # Token 估算
 │   ├── fts5-sanitize.ts      # FTS5 查询清理
@@ -111,7 +120,7 @@ selective-claw/
 │   ├── types.ts              # 配置类型
 │   ├── db/
 │   │   ├── connection.ts     # SQLite 连接（WAL 模式）
-│   │   └── migration.ts      # 数据表：conversations、messages、FTS5
+│   │   └── migration.ts      # 数据表：messages、recall_aliases、FTS5
 │   └── store/
 │       ├── message-store.ts  # 消息 CRUD + 全文搜索
 │       └── index.ts          # 重导出
